@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -26,6 +26,8 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 
+const GMAIL_STATUS_CACHE_KEY = "ai_erp_gmail_status";
+
 export default function InboxPage() {
   const [gmailStatus, setGmailStatus] = useState<{
     is_connected: boolean;
@@ -34,12 +36,32 @@ export default function InboxPage() {
     synced_messages_count: number;
     is_configured?: boolean;
     client_id?: string;
-  }>({
-    is_connected: false,
-    connected_email: null,
-    last_synced_at: null,
-    synced_messages_count: 0,
-    is_configured: false,
+  }>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = localStorage.getItem(GMAIL_STATUS_CACHE_KEY);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          return {
+            is_connected: parsed.is_connected || false,
+            connected_email: parsed.connected_email || null,
+            last_synced_at: parsed.last_synced_at || null,
+            synced_messages_count: parsed.synced_messages_count || 0,
+            is_configured: parsed.is_configured ?? false,
+            client_id: parsed.client_id || "",
+          };
+        }
+      } catch {
+        // Fallback to default
+      }
+    }
+    return {
+      is_connected: false,
+      connected_email: null,
+      last_synced_at: null,
+      synced_messages_count: 0,
+      is_configured: false,
+    };
   });
 
   const [inboxEmails, setInboxEmails] = useState<any[]>([]);
@@ -64,6 +86,9 @@ export default function InboxPage() {
   const [exchangingCode, setExchangingCode] = useState(false);
   const [copiedRedirect, setCopiedRedirect] = useState(false);
 
+  // Guard against React Strict Mode double-executing the single-use OAuth code
+  const codeExchangedRef = useRef<string | null>(null);
+
   const redirectUri = typeof window !== "undefined" ? `${window.location.origin}/inbox` : "http://localhost:3000/inbox";
 
   const loadData = async () => {
@@ -77,6 +102,9 @@ export default function InboxPage() {
 
       if (statusRes.status === "fulfilled" && statusRes.value) {
         setGmailStatus(statusRes.value);
+        if (typeof window !== "undefined") {
+          localStorage.setItem(GMAIL_STATUS_CACHE_KEY, JSON.stringify(statusRes.value));
+        }
       }
       if (inboxRes.status === "fulfilled" && Array.isArray(inboxRes.value)) {
         setInboxEmails(inboxRes.value);
@@ -102,9 +130,15 @@ export default function InboxPage() {
 
       if (err) {
         setOauthError(`Google OAuth error: ${err}`);
-        window.history.replaceState({}, "", "/inbox");
+        window.history.replaceState({}, "", window.location.pathname);
       } else if (code) {
-        handleOAuthCallback(code);
+        // Guard against duplicate execution in React Strict Mode or fast reloads
+        if (codeExchangedRef.current !== code) {
+          codeExchangedRef.current = code;
+          // Immediately sanitize URL so browser reload (F5) will reload clean /inbox without replaying code
+          window.history.replaceState({}, "", window.location.pathname);
+          handleOAuthCallback(code);
+        }
       }
     }
   }, []);
@@ -117,11 +151,11 @@ export default function InboxPage() {
         code,
         redirect_uri: window.location.origin + "/inbox",
       });
-      window.history.replaceState({}, "", "/inbox");
+      window.history.replaceState({}, "", window.location.pathname);
       setOauthSuccess(`Successfully authenticated Google Workspace account: ${res.connected_email}`);
       await loadData();
     } catch (err: any) {
-      window.history.replaceState({}, "", "/inbox");
+      window.history.replaceState({}, "", window.location.pathname);
       setOauthError(`Google OAuth token exchange failed: ${err.message}`);
     } finally {
       setExchangingCode(false);
@@ -186,13 +220,17 @@ export default function InboxPage() {
   const handleDisconnectGmail = async () => {
     try {
       await api.disconnectGmail();
-      setGmailStatus({
+      const updated = {
         is_connected: false,
         connected_email: null,
         last_synced_at: null,
         synced_messages_count: 0,
         is_configured: gmailStatus.is_configured,
-      });
+      };
+      setGmailStatus(updated);
+      if (typeof window !== "undefined") {
+        localStorage.removeItem(GMAIL_STATUS_CACHE_KEY);
+      }
       await loadData();
     } catch {
       // Handled

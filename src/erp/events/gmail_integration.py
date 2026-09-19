@@ -10,6 +10,7 @@ from email.message import EmailMessage
 import logging
 import os
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 import urllib.parse
@@ -17,8 +18,12 @@ import uuid
 
 import httpx
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.config import settings
+from erp.db.models.tenant import TenantOAuthConnection
+from erp.db.session import async_session_factory
 from erp.events.email_gateway import (
     EmailAttachment,
     IngestedEmailMessage,
@@ -60,6 +65,169 @@ class GmailIntegrationService:
         # Ensure any stale synthetic data is thoroughly purged
         mailbox.inbox.clear()
         mailbox.sent.clear()
+
+    async def load_connection_from_db(
+        self, tenant_id: str, session: AsyncSession | None = None
+    ) -> GmailConnectionState | None:
+        """Loads and caches persisted OAuth connection from PostgreSQL for the given tenant."""
+        try:
+            tenant_uuid = uuid.UUID(str(tenant_id))
+        except Exception:
+            return None
+
+        client_id, client_secret = self.get_credentials()
+        is_cfg = bool(client_id and client_secret)
+
+        async def _query(s: AsyncSession) -> GmailConnectionState | None:
+            stmt = select(TenantOAuthConnection).where(
+                TenantOAuthConnection.tenant_id == tenant_uuid,
+                TenantOAuthConnection.provider == "google_gmail",
+            )
+            row = (await s.execute(stmt)).scalar_one_or_none()
+            if row and row.is_connected:
+                exp_ts = row.expires_at.timestamp() if row.expires_at else None
+                conn = GmailConnectionState(
+                    is_connected=row.is_connected,
+                    connected_email=row.connected_email,
+                    tenant_id=str(tenant_id),
+                    access_token=row.access_token,
+                    refresh_token=row.refresh_token,
+                    expires_at=exp_ts,
+                    last_synced_at=row.last_synced_at,
+                    synced_messages_count=row.synced_messages_count,
+                    is_configured=is_cfg,
+                )
+                self.connections[str(tenant_id)] = conn
+                return conn
+            return None
+
+        if session is not None:
+            return await _query(session)
+        else:
+            async with async_session_factory() as s:
+                return await _query(s)
+
+    async def save_connection_to_db(
+        self, tenant_id: str, conn: GmailConnectionState, session: AsyncSession | None = None
+    ) -> None:
+        """Persists or updates tenant OAuth connection in PostgreSQL."""
+        try:
+            tenant_uuid = uuid.UUID(str(tenant_id))
+        except Exception as e:
+            logger.warning("Invalid tenant UUID %s, skipping DB persist: %s", tenant_id, e)
+            return
+
+        exp_dt = datetime.fromtimestamp(conn.expires_at, UTC) if conn.expires_at else None
+
+        async def _upsert(s: AsyncSession):
+            stmt = select(TenantOAuthConnection).where(
+                TenantOAuthConnection.tenant_id == tenant_uuid,
+                TenantOAuthConnection.provider == "google_gmail",
+            )
+            existing = (await s.execute(stmt)).scalar_one_or_none()
+            if existing:
+                existing.is_connected = conn.is_connected
+                existing.connected_email = conn.connected_email
+                existing.access_token = conn.access_token
+                existing.refresh_token = conn.refresh_token or existing.refresh_token
+                existing.expires_at = exp_dt
+                existing.last_synced_at = conn.last_synced_at
+                existing.synced_messages_count = conn.synced_messages_count
+                existing.scopes = " ".join(SCOPES)
+            else:
+                record = TenantOAuthConnection(
+                    connection_id=uuid.uuid4(),
+                    tenant_id=tenant_uuid,
+                    provider="google_gmail",
+                    is_connected=conn.is_connected,
+                    connected_email=conn.connected_email,
+                    access_token=conn.access_token,
+                    refresh_token=conn.refresh_token,
+                    token_type="Bearer",
+                    scopes=" ".join(SCOPES),
+                    expires_at=exp_dt,
+                    last_synced_at=conn.last_synced_at,
+                    synced_messages_count=conn.synced_messages_count,
+                )
+                s.add(record)
+            await s.commit()
+
+        if session is not None:
+            await _upsert(session)
+        else:
+            async with async_session_factory() as s:
+                await _upsert(s)
+
+    async def disconnect_async(
+        self, tenant_id: str, session: AsyncSession | None = None
+    ) -> None:
+        """Revokes connection state and clears stored tokens in DB and memory."""
+        self.disconnect(tenant_id)
+        try:
+            tenant_uuid = uuid.UUID(str(tenant_id))
+        except Exception:
+            return
+
+        async def _clear(s: AsyncSession):
+            stmt = select(TenantOAuthConnection).where(
+                TenantOAuthConnection.tenant_id == tenant_uuid,
+                TenantOAuthConnection.provider == "google_gmail",
+            )
+            existing = (await s.execute(stmt)).scalar_one_or_none()
+            if existing:
+                existing.is_connected = False
+                existing.access_token = None
+                existing.refresh_token = None
+                existing.connected_email = None
+                await s.commit()
+
+        if session is not None:
+            await _clear(session)
+        else:
+            async with async_session_factory() as s:
+                await _clear(s)
+
+    async def ensure_valid_token(
+        self, tenant_id: str, session: AsyncSession | None = None
+    ) -> GmailConnectionState:
+        """Checks if access token is expired; if so, uses refresh_token to acquire a fresh access token."""
+        conn = await self.get_connection_async(tenant_id, session)
+        if not conn.is_connected or not conn.refresh_token:
+            return conn
+
+        # Check if token is expired or expiring within 60 seconds
+        now_ts = time.time()
+        if conn.expires_at and (conn.expires_at - now_ts > 60) and conn.access_token:
+            return conn
+
+        client_id, client_secret = self.get_credentials()
+        if not client_id or not client_secret:
+            return conn
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    GOOGLE_TOKEN_ENDPOINT,
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": conn.refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                )
+                if resp.is_success:
+                    data = resp.json()
+                    conn.access_token = data.get("access_token", conn.access_token)
+                    expires_in = data.get("expires_in", 3600)
+                    conn.expires_at = time.time() + float(expires_in)
+                    logger.info("Successfully refreshed Gmail access token for tenant %s", tenant_id)
+                    await self.save_connection_to_db(tenant_id, conn, session)
+                else:
+                    logger.warning("Failed to refresh Gmail token (%s): %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.warning("Exception during Gmail token refresh: %s", e)
+
+        return conn
 
     def get_credentials(self) -> tuple[str | None, str | None]:
         """Retrieves Google OAuth credentials from environment variables or settings."""
@@ -124,16 +292,31 @@ class GmailIntegrationService:
         return {"status": "CONFIGURED", "is_configured": True, "client_id": c_id}
 
     def get_connection(self, tenant_id: str) -> GmailConnectionState:
+        str_id = str(tenant_id)
         client_id, client_secret = self.get_credentials()
         is_cfg = bool(client_id and client_secret)
-        if tenant_id not in self.connections:
-            self.connections[tenant_id] = GmailConnectionState(
-                tenant_id=tenant_id,
+        if str_id not in self.connections:
+            self.connections[str_id] = GmailConnectionState(
+                tenant_id=str_id,
                 is_configured=is_cfg,
             )
         else:
-            self.connections[tenant_id].is_configured = is_cfg
-        return self.connections[tenant_id]
+            self.connections[str_id].is_configured = is_cfg
+        return self.connections[str_id]
+
+    async def get_connection_async(
+        self, tenant_id: str, session: AsyncSession | None = None
+    ) -> GmailConnectionState:
+        """Retrieves tenant connection state, pulling from PostgreSQL if not in active memory."""
+        str_id = str(tenant_id)
+        if str_id in self.connections and self.connections[str_id].is_connected:
+            return self.connections[str_id]
+
+        db_conn = await self.load_connection_from_db(str_id, session)
+        if db_conn is not None:
+            return db_conn
+
+        return self.get_connection(str_id)
 
     def get_authorization_url(self, tenant_id: str, redirect_uri: str | None = None) -> dict[str, Any]:
         """Generates official Google OAuth 2.0 authorization URL."""
@@ -156,7 +339,7 @@ class GmailIntegrationService:
             "scope": " ".join(SCOPES),
             "access_type": "offline",
             "prompt": "consent",
-            "state": tenant_id,
+            "state": str(tenant_id),
         }
         auth_url = f"{GOOGLE_AUTH_ENDPOINT}?{urllib.parse.urlencode(params)}"
         return {
@@ -172,6 +355,7 @@ class GmailIntegrationService:
         tenant_id: str,
         code: str,
         redirect_uri: str,
+        session: AsyncSession | None = None,
     ) -> GmailConnectionState:
         """Exchanges Google authorization code for real Google access & refresh tokens."""
         client_id, client_secret = self.get_credentials()
@@ -180,7 +364,8 @@ class GmailIntegrationService:
                 "Cannot exchange token: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not configured in environment variables."
             )
 
-        conn = self.get_connection(tenant_id)
+        str_id = str(tenant_id)
+        conn = await self.get_connection_async(str_id, session)
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -197,12 +382,24 @@ class GmailIntegrationService:
             if not resp.is_success:
                 err_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
                 err_msg = err_data.get("error_description") or err_data.get("error") or resp.text
+
+                # If tenant is ALREADY connected, do not destroy existing connection on code replay
+                if conn.is_connected and (conn.access_token or conn.refresh_token):
+                    logger.warning(
+                        "Authorization code exchange failed for already connected tenant %s (likely code replay); preserving active session.",
+                        str_id,
+                    )
+                    return conn
+
                 conn.is_connected = False
                 raise ValueError(f"Google OAuth token exchange failed ({resp.status_code}): {err_msg}")
 
             tokens = resp.json()
             conn.access_token = tokens.get("access_token")
-            conn.refresh_token = tokens.get("refresh_token")
+            if tokens.get("refresh_token"):
+                conn.refresh_token = tokens.get("refresh_token")
+            expires_in = tokens.get("expires_in", 3600)
+            conn.expires_at = time.time() + float(expires_in)
             conn.is_connected = True
             conn.last_synced_at = datetime.now(UTC)
 
@@ -216,18 +413,25 @@ class GmailIntegrationService:
             else:
                 conn.connected_email = "authenticated-google-user@workspace"
 
-            logger.info("Successfully connected real Gmail account for tenant %s: %s", tenant_id, conn.connected_email)
+            # Persist to database
+            await self.save_connection_to_db(str_id, conn, session)
+
+            logger.info("Successfully connected and persisted real Gmail account for tenant %s: %s", str_id, conn.connected_email)
             return conn
 
     def disconnect(self, tenant_id: str) -> None:
-        """Revokes connection state for tenant."""
-        if tenant_id in self.connections:
-            self.connections[tenant_id] = GmailConnectionState(tenant_id=tenant_id)
+        """Revokes connection state for tenant in memory."""
+        str_id = str(tenant_id)
+        if str_id in self.connections:
+            self.connections[str_id] = GmailConnectionState(tenant_id=str_id)
         mailbox.inbox.clear()
 
-    async def sync_inbox(self, tenant_id: str) -> list[IngestedEmailMessage]:
+
+    async def sync_inbox(
+        self, tenant_id: str, session: AsyncSession | None = None
+    ) -> list[IngestedEmailMessage]:
         """Polls connected Gmail account for unread messages via real Gmail API."""
-        conn = self.get_connection(tenant_id)
+        conn = await self.ensure_valid_token(tenant_id, session)
         if not conn.is_connected or not conn.access_token:
             raise ValueError("Gmail account is not connected. Please connect via Google OAuth 2.0 first.")
 
@@ -259,6 +463,7 @@ class GmailIntegrationService:
 
         conn.last_synced_at = datetime.now(UTC)
         conn.synced_messages_count += len(synced_emails)
+        await self.save_connection_to_db(str(tenant_id), conn, session)
         # Returns strictly real emails; if none found, returns empty list
         return synced_emails
 
@@ -330,9 +535,10 @@ class GmailIntegrationService:
         body: str,
         pdf_bytes: bytes | None = None,
         filename: str = "Quotation.pdf",
+        session: AsyncSession | None = None,
     ) -> SentEmailMessage:
         """Sends an outbound email using the tenant's connected Gmail OAuth account."""
-        conn = self.get_connection(tenant_id)
+        conn = await self.ensure_valid_token(tenant_id, session)
         if not conn.is_connected or not conn.access_token:
             raise ValueError("Gmail account is not connected. Cannot send outbound quote via Gmail.")
 

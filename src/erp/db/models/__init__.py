@@ -32,7 +32,7 @@ from erp.db.models.sales import (
     SalesOrderItem,
     SalesQuotation,
 )
-from erp.db.models.tenant import Tenant
+from erp.db.models.tenant import Tenant, TenantOAuthConnection
 from erp.db.models.user import User
 
 __all__ = [
@@ -40,6 +40,7 @@ __all__ = [
     "TenantMixin",
     "TimestampMixin",
     "Tenant",
+    "TenantOAuthConnection",
     "User",
     "OperatorCertificationRecord",
     "GeneralLedgerEntry",

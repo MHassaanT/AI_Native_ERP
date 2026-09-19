@@ -190,9 +190,9 @@ class GmailCredentialsPayload(BaseModel):
 
 
 @router.get("/gmail/status", summary="Get Gmail OAuth connection status for tenant")
-async def get_gmail_status(tenant_id: TenantIdDep):
+async def get_gmail_status(tenant_id: TenantIdDep, db: DbSessionDep):
     """Returns whether tenant has connected their corporate Gmail account and credentials configuration status."""
-    conn = gmail_service.get_connection(str(tenant_id))
+    conn = await gmail_service.get_connection_async(str(tenant_id), db)
     cred_status = gmail_service.get_credentials_status()
     return {
         "is_connected": conn.is_connected,
@@ -226,6 +226,7 @@ async def get_gmail_auth_url(tenant_id: TenantIdDep, redirect_uri: str | None = 
 async def handle_gmail_oauth_callback(
     payload: GmailCallbackPayload,
     tenant_id: TenantIdDep,
+    db: DbSessionDep,
 ):
     """Exchanges Google authorization code for access/refresh tokens and stores connection."""
     try:
@@ -233,6 +234,7 @@ async def handle_gmail_oauth_callback(
             tenant_id=str(tenant_id),
             code=payload.code,
             redirect_uri=payload.redirect_uri,
+            session=db,
         )
         return {
             "status": "CONNECTED",
@@ -246,17 +248,17 @@ async def handle_gmail_oauth_callback(
 
 
 @router.post("/gmail/disconnect", summary="Disconnect Gmail account")
-async def disconnect_gmail(tenant_id: TenantIdDep):
-    """Disconnects and revokes tenant's Gmail OAuth session."""
-    gmail_service.disconnect(str(tenant_id))
+async def disconnect_gmail(tenant_id: TenantIdDep, db: DbSessionDep):
+    """Disconnects and revokes tenant's Gmail OAuth session in DB and memory."""
+    await gmail_service.disconnect_async(str(tenant_id), db)
     return {"status": "DISCONNECTED"}
 
 
 @router.post("/gmail/sync", summary="Trigger real-time Gmail inbox sync for RFQs")
-async def sync_gmail_inbox(tenant_id: TenantIdDep):
+async def sync_gmail_inbox(tenant_id: TenantIdDep, db: DbSessionDep):
     """Polls Gmail for unread emails, parses RFQs via BAML, and dispatches multi-agent DAGs."""
     try:
-        synced = await gmail_service.sync_inbox(str(tenant_id))
+        synced = await gmail_service.sync_inbox(str(tenant_id), db)
         return {
             "status": "SYNCED",
             "messages_synced": len(synced),
