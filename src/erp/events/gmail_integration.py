@@ -13,9 +13,10 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 import urllib.parse
+import uuid
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from erp.config import settings
 from erp.events.email_gateway import (
@@ -294,7 +295,10 @@ class GmailIntegrationService:
             else "erp.crm.inbound_rfq_email"
         )
 
-        tenant_uuid = uuid.UUID(tenant_id) if len(tenant_id) == 36 else settings.DEFAULT_TENANT_ID
+        try:
+            tenant_uuid = uuid.UUID(str(tenant_id))
+        except Exception:
+            tenant_uuid = settings.DEFAULT_TENANT_ID
         dag = chief_orchestrator.build_rfq_workflow_dag(
             tenant_id=tenant_uuid,
             rfq_payload={

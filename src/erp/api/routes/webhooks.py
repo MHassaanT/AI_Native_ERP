@@ -1,5 +1,6 @@
 """Inbound Email, Webhook & Open-Banking Integration Endpoints (PRD §Inbound Triggers)."""
 
+import logging
 import uuid
 from typing import Any
 
@@ -14,6 +15,8 @@ from erp.events.email_gateway import (
     outbound_mailer,
 )
 from erp.orchestration.orchestrator import chief_orchestrator
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["Inbound Webhooks & Email Gateways"])
 
