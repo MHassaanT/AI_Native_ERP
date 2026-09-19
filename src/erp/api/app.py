@@ -34,12 +34,14 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Lifecycle manager for startup and graceful shutdown."""
     logger.info("Initializing %s in %s mode...", settings.APP_NAME, settings.ENVIRONMENT)
-    # Start Kafka/Redpanda Event Producer & Inbound Email Gateway
+    # Start Kafka/Redpanda Event Producer
     await event_producer.start()
-    email_gateway.start()
+    if settings.ENABLE_SMTP_GATEWAY:
+        email_gateway.start()
     yield
     # Graceful shutdown
-    email_gateway.stop()
+    if settings.ENABLE_SMTP_GATEWAY:
+        email_gateway.stop()
     await event_producer.stop()
     logger.info("Shutdown complete.")
 

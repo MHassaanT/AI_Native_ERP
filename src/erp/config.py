@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
 
+    # Inbound SMTP Gateway (False by default in production web containers to prevent port conflict)
+    ENABLE_SMTP_GATEWAY: bool = False
+
     # Deterministic Ledger Ceilings & Settings
     LEDGER_TIER1_CEILING: Decimal = Decimal("2500.0000")
     LEDGER_TIER2_CEILING: Decimal = Decimal("25000.0000")
