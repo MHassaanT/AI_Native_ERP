@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libpq-dev \
     gcc \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -30,11 +31,11 @@ COPY entrypoint.sh /app/
 
 RUN chmod +x /app/entrypoint.sh
 
-# Expose default HTTP port
-EXPOSE 8000
+# Expose HTTP ports (both 8000 and 8080 bridged via socat)
+EXPOSE 8000 8080
 
 # Health check
 HEALTHCHECK --interval=20s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]

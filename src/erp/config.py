@@ -67,10 +67,10 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Redpanda / Kafka
-    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
+    # Redpanda / Kafka (Optional: in-memory bus used if not configured)
+    KAFKA_BOOTSTRAP_SERVERS: str | None = None
     KAFKA_CLIENT_ID: str = "erp-backend"
-    KAFKA_SCHEMA_REGISTRY_URL: str | None = "http://localhost:8081"
+    KAFKA_SCHEMA_REGISTRY_URL: str | None = None
 
     # Google Workspace / Gmail OAuth 2.0
     GOOGLE_CLIENT_ID: str | None = None

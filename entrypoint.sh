@@ -24,9 +24,18 @@ print('Tables initialized via fallback.')
 " || echo "Database init warning (non-fatal if database is already provisioned)."
 }
 
-# 2. Start Uvicorn server
-PORT="${PORT:-8000}"
-WORKERS="${WEB_CONCURRENCY:-2}"
+# 2. Start Uvicorn server & dual-port bridge
+PORT="${PORT:-8080}"
+WORKERS="${WEB_CONCURRENCY:-1}"
+
+# If socat is available, bridge 8000 and 8080 so both ports answer requests seamlessly
+if command -v socat >/dev/null 2>&1; then
+  if [ "$PORT" = "8080" ]; then
+    socat TCP-LISTEN:8000,fork,reuseaddr TCP:127.0.0.1:8080 &
+  elif [ "$PORT" = "8000" ]; then
+    socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:8000 &
+  fi
+fi
 
 echo "[2/2] Launching Uvicorn ASGI Server on port ${PORT} with ${WORKERS} worker(s)..."
 exec uvicorn erp.api.app:app \

@@ -34,14 +34,20 @@ class EventProducer:
         self.event_log: list[dict[str, Any]] = []
 
     async def start(self) -> None:
-        """Initializes and connects the Kafka producer."""
+        """Initializes and connects the Kafka producer if configured, otherwise falls back to in-memory bus."""
+        servers = settings.KAFKA_BOOTSTRAP_SERVERS
+        if not servers or (settings.ENVIRONMENT == "production" and ("localhost" in servers or "127.0.0.1" in servers)):
+            self._is_started = False
+            logger.info("Kafka broker not configured for production environment. Operating with in-memory event bus.")
+            return
+
         try:
             self._producer = AIOKafkaProducer(
                 bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
                 client_id=settings.KAFKA_CLIENT_ID,
                 value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8") if k else None,
-                request_timeout_ms=3000,
+                request_timeout_ms=2000,
             )
             await self._producer.start()
             self._is_started = True
