@@ -5,11 +5,12 @@ echo "============================================================"
 echo "  Starting AI-Native ERP Backend Container"
 echo "============================================================"
 
-# 1. Run database migrations
-echo "[1/2] Running database schema migrations (Alembic)..."
-alembic upgrade head || {
-  echo "Alembic upgrade warning. Attempting fallback table initialization..."
-  python -c "
+# 1. Run database migrations and ensure all tables exist
+echo "[1/3] Running database schema migrations (Alembic)..."
+alembic upgrade head || echo "Alembic upgrade warning (will verify tables via ORM)."
+
+echo "[2/3] Verifying and synchronizing all ORM tables..."
+python -c "
 import asyncio
 from erp.db.engine import async_engine
 from erp.db.models.base import Base
@@ -20,9 +21,9 @@ async def init():
         await conn.run_sync(Base.metadata.create_all)
 
 asyncio.run(init())
-print('Tables initialized via fallback.')
-" || echo "Database init warning (non-fatal if database is already provisioned)."
-}
+print('PostgreSQL ORM tables verified and synchronized.')
+" || echo "Warning: Table sync encountered an issue, proceeding..."
+
 
 # 2. Start Uvicorn server & dual-port bridge
 PORT="${PORT:-8080}"
@@ -37,7 +38,7 @@ if command -v socat >/dev/null 2>&1; then
   fi
 fi
 
-echo "[2/2] Launching Uvicorn ASGI Server on port ${PORT} with ${WORKERS} worker(s)..."
+echo "[3/3] Launching Uvicorn ASGI Server on port ${PORT} with ${WORKERS} worker(s)..."
 exec uvicorn erp.api.app:app \
   --host 0.0.0.0 \
   --port "${PORT}" \
