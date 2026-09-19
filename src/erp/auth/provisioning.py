@@ -80,6 +80,12 @@ async def provision_tenant_blueprint(
         ),
         Account(
             tenant_id=tenant_id,
+            account_code="1350-FINISHED-GOODS",
+            account_name="Finished Goods Valuation",
+            account_type="ASSET",
+        ),
+        Account(
+            tenant_id=tenant_id,
             account_code="1400-FINISHED-GOODS",
             account_name="Finished Goods Inventory Valuation",
             account_type="ASSET",
@@ -108,6 +114,13 @@ async def provision_tenant_blueprint(
             account_name="Commercial Sales Revenue",
             account_type="REVENUE",
         ),
+        Account(
+            tenant_id=tenant_id,
+            account_code="4000-SALES-REVENUE",
+            account_name="Commercial Sales Revenue Standard",
+            account_type="REVENUE",
+        ),
+
         Account(
             tenant_id=tenant_id,
             account_code="5000-COGS-MATERIALS",

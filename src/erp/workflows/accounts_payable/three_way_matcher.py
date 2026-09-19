@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp.db.models.inventory import Item
 from erp.db.models.purchasing import (
     GoodsReceiptNote,
+    GoodsReceiptNoteItem,
     PurchaseOrder,
     PurchaseOrderItem,
     Supplier,
     SupplierInvoice,
+    SupplierInvoiceItem,
 )
 from erp.events.outbox import OutboxManager
 from erp.ledger.engine import LedgerCommitResult, TransactionProposal, ledger_engine
@@ -121,11 +123,61 @@ class ThreeWayMatcher:
             )
         ).scalar_one()
 
-        # In standard flow, GRN mirrors received quantities
-        grn_lines = po_lines.copy()
+        # 4. Fetch actual GRN line items from DB
+        grn_items_db = (
+            await session.execute(
+                select(GoodsReceiptNoteItem, Item.item_code)
+                .join(Item, GoodsReceiptNoteItem.item_id == Item.item_id)
+                .where(
+                    GoodsReceiptNoteItem.tenant_id == tenant_id,
+                    GoodsReceiptNoteItem.grn_id == target_grn_id,
+                )
+            )
+        ).all()
 
-        # Build invoice lines (for matched items, derived from PO lines or payload)
-        inv_lines = po_lines.copy()
+        if grn_items_db:
+            grn_lines = [
+                {
+                    "item_code": code,
+                    "quantity": line.quantity_received,
+                    "unit_price": line.unit_price,
+                }
+                for line, code in grn_items_db
+            ]
+        else:
+            # Fallback if GRN was recorded without line items
+            grn_lines = po_lines.copy()
+
+        # Fetch actual Supplier Invoice line items from DB
+        inv_items_db = (
+            await session.execute(
+                select(SupplierInvoiceItem).where(
+                    SupplierInvoiceItem.tenant_id == tenant_id,
+                    SupplierInvoiceItem.invoice_id == invoice.invoice_id,
+                )
+            )
+        ).scalars().all()
+
+        if inv_items_db:
+            inv_lines = [
+                {
+                    "item_code": line.item_code,
+                    "quantity": line.quantity,
+                    "unit_price": line.unit_price,
+                }
+                for line in inv_items_db
+            ]
+        else:
+            first_sku = po_lines[0]["item_code"] if po_lines else "RAW-MATERIAL"
+            first_qty = po_lines[0]["quantity"] if po_lines else Decimal("1.0000")
+            inv_lines = [
+                {
+                    "item_code": first_sku,
+                    "quantity": first_qty,
+                    "unit_price": (invoice.total_amount / max(first_qty, Decimal("1.0000"))).quantize(Decimal("0.0001")),
+                }
+            ]
+
 
         # 5. Evaluate tolerances
         tolerance = evaluate_three_way_tolerances(

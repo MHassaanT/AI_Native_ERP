@@ -83,35 +83,66 @@ async def get_current_tenant_id(
 ) -> uuid.UUID:
     """Enforces strict multi-tenancy isolation.
 
-    If JWT is present, tenant ID is derived from the authenticated user.
-    If X-Tenant-ID is supplied in test/CLI environments, it is validated.
+    If JWT is present, tenant ID is derived from the authenticated user token.
+    If X-Tenant-ID is also passed, it must match the authenticated tenant.
+    Unauthenticated requests with arbitrary X-Tenant-ID headers are strictly rejected.
     """
     if token:
         try:
             payload = decode_access_token(token)
             t_id_str = payload.get("tenant_id")
             if t_id_str:
-                return uuid.UUID(t_id_str)
-        except Exception:
-            pass
+                token_tenant_id = uuid.UUID(t_id_str)
+                if x_tenant_id:
+                    try:
+                        header_tenant_id = uuid.UUID(x_tenant_id)
+                        if token_tenant_id != header_tenant_id:
+                            raise HTTPException(
+                                status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Tenant mismatch: authenticated token does not match X-Tenant-ID header.",
+                            )
+                    except ValueError as err:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid tenant UUID: {x_tenant_id}",
+                        ) from err
+                return token_tenant_id
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Could not validate credentials: {e!s}",
+            )
 
     if x_tenant_id:
-        try:
-            return uuid.UUID(x_tenant_id)
-        except ValueError as err:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid tenant UUID: {x_tenant_id}",
-            ) from err
-
-    # If no token and no header in non-development, reject request
-    if not settings.DEBUG:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Tenant context required. Please log in or provide authentication.",
+            detail="Authentication required: raw X-Tenant-ID headers cannot be used without valid authorization token.",
         )
 
-    return settings.DEFAULT_TENANT_ID
+    # In development/test with no explicit headers, fallback to default tenant for internal tests
+    if settings.DEBUG and settings.ENVIRONMENT != "production":
+        return settings.DEFAULT_TENANT_ID
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Tenant context required. Please log in or provide authentication.",
+    )
+
 
 
 TenantIdDep = Annotated[uuid.UUID, Depends(get_current_tenant_id)]
+
+
+def require_roles(*roles: str):
+    """Dependency factory enforcing Role-Based Access Control (RBAC)."""
+    def role_checker(user: CurrentUserDep) -> User:
+        if user.role == "TENANT_ADMIN" or user.role in roles:
+            return user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: User role '{user.role}' lacks required permissions ({list(roles)}).",
+        )
+    return Depends(role_checker)
+

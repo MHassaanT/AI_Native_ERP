@@ -224,13 +224,225 @@ async def audit_expense_claim(
         ) from e
 
 
+from datetime import date, datetime, timedelta
+
+from erp.db.models.hr import Employee, ExpenseClaim, ShiftSchedule
+
+
+class CreateShiftRequest(BaseModel):
+    shift_code: str = Field(..., min_length=2, max_length=64)
+    employee_code: str = Field(..., min_length=2, max_length=64)
+    shift_date: date
+    start_time: datetime
+    end_time: datetime
+    status: str = "SCHEDULED"
+
+
+@router.get("/shifts", summary="List scheduled shifts")
+async def list_shifts(
+    db: DbSessionDep,
+    tenant_id: TenantIdDep,
+):
+    """Returns scheduled shifts from PostgreSQL."""
+    stmt = (
+        select(ShiftSchedule, Employee.employee_code, Employee.first_name, Employee.last_name)
+        .join(Employee, ShiftSchedule.employee_id == Employee.employee_id)
+        .where(ShiftSchedule.tenant_id == tenant_id)
+        .order_by(ShiftSchedule.shift_date.desc(), ShiftSchedule.start_time.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+    shifts = []
+    for s, emp_code, fn, ln in rows:
+        shifts.append({
+            "shift_id": str(s.shift_id),
+            "shift_code": s.shift_code,
+            "employee_code": emp_code,
+            "employee_name": f"{fn} {ln}",
+            "shift_date": s.shift_date.isoformat(),
+            "start_time": s.start_time.isoformat(),
+            "end_time": s.end_time.isoformat(),
+            "status": s.status,
+        })
+    return shifts
+
+
+@router.post("/shifts", status_code=status.HTTP_201_CREATED, summary="Create shift")
+async def create_shift(
+    req: CreateShiftRequest,
+    db: DbSessionDep,
+    tenant_id: TenantIdDep,
+):
+    """Creates a new scheduled shift for an employee."""
+    emp = (
+        await db.execute(
+            select(Employee).where(
+                Employee.tenant_id == tenant_id,
+                Employee.employee_code == req.employee_code,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if not emp:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Employee '{req.employee_code}' not found.",
+        )
+
+    shift = ShiftSchedule(
+        tenant_id=tenant_id,
+        shift_code=req.shift_code,
+        employee_id=emp.employee_id,
+        shift_date=req.shift_date,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        status=req.status,
+    )
+    db.add(shift)
+    await db.flush()
+    return {
+        "shift_id": str(shift.shift_id),
+        "shift_code": shift.shift_code,
+        "employee_code": req.employee_code,
+        "shift_date": shift.shift_date.isoformat(),
+        "start_time": shift.start_time.isoformat(),
+        "end_time": shift.end_time.isoformat(),
+        "status": shift.status,
+    }
+
+
 @router.post("/shift-trade/evaluate", response_model=ShiftTradeEvaluationResult)
-async def evaluate_shift_trade(request: ShiftTradeRequest) -> ShiftTradeEvaluationResult:
-    """Evaluates peer shift trade request ensuring >=11h rest, <=48h weekly limit, and safety certs."""
+async def evaluate_shift_trade(
+    request: ShiftTradeRequest,
+    db: DbSessionDep,
+    tenant_id: TenantIdDep,
+) -> ShiftTradeEvaluationResult:
+    """Evaluates peer shift trade request verifying DB roster invariants and persists reassignment if compliant."""
     try:
-        return shift_coordinator.evaluate_and_execute_trade(request)
+        target_emp = (
+            await db.execute(
+                select(Employee).where(
+                    Employee.tenant_id == tenant_id,
+                    Employee.employee_code == request.target_employee,
+                )
+            )
+        ).scalar_one_or_none()
+
+        req_emp = (
+            await db.execute(
+                select(Employee).where(
+                    Employee.tenant_id == tenant_id,
+                    Employee.employee_code == request.requesting_employee,
+                )
+            )
+        ).scalar_one_or_none()
+
+        # If shift_id or shift_code specified, load shift
+        matched_shift = None
+        if request.shift_id:
+            matched_shift = (
+                await db.execute(
+                    select(ShiftSchedule).where(
+                        ShiftSchedule.tenant_id == tenant_id,
+                        ShiftSchedule.shift_id == request.shift_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        elif request.shift_code:
+            matched_shift = (
+                await db.execute(
+                    select(ShiftSchedule).where(
+                        ShiftSchedule.tenant_id == tenant_id,
+                        ShiftSchedule.shift_code == request.shift_code,
+                    )
+                )
+            ).scalar_one_or_none()
+
+        if matched_shift and request.target_proposed_shift_start is None:
+            request.target_proposed_shift_start = matched_shift.start_time
+            request.shift_duration_hours = (
+                matched_shift.end_time - matched_shift.start_time
+            ).total_seconds() / 3600.0
+
+        ref_date = (
+            request.target_proposed_shift_start.date()
+            if request.target_proposed_shift_start
+            else date.today()
+        )
+
+        # Look up target employee's scheduled hours from DB in 7-day window if available
+        if target_emp and request.target_current_weekly_hours is None:
+            week_start = ref_date - timedelta(days=ref_date.weekday())
+            week_end = week_start + timedelta(days=6)
+            db_shifts = (
+                await db.execute(
+                    select(ShiftSchedule).where(
+                        ShiftSchedule.tenant_id == tenant_id,
+                        ShiftSchedule.employee_id == target_emp.employee_id,
+                        ShiftSchedule.shift_date >= week_start,
+                        ShiftSchedule.shift_date <= week_end,
+                    )
+                )
+            ).scalars().all()
+            total_hours = sum(
+                (s.end_time - s.start_time).total_seconds() / 3600.0 for s in db_shifts
+            )
+            request.target_current_weekly_hours = total_hours
+
+            # Look up previous shift end time
+            if request.target_previous_shift_end is None and request.target_proposed_shift_start:
+                prev_shift = (
+                    await db.execute(
+                        select(ShiftSchedule)
+                        .where(
+                            ShiftSchedule.tenant_id == tenant_id,
+                            ShiftSchedule.employee_id == target_emp.employee_id,
+                            ShiftSchedule.end_time <= request.target_proposed_shift_start,
+                        )
+                        .order_by(ShiftSchedule.end_time.desc())
+                    )
+                ).scalars().first()
+                if prev_shift:
+                    request.target_previous_shift_end = prev_shift.end_time
+
+        result = shift_coordinator.evaluate_and_execute_trade(request)
+
+        # If approved and target employee found, persist transfer to database
+        if result.is_approved and target_emp:
+            if matched_shift:
+                matched_shift.employee_id = target_emp.employee_id
+                matched_shift.status = "TRANSFERRED"
+            elif req_emp:
+                # Find requesting employee's shift on trade date
+                req_shift = (
+                    await db.execute(
+                        select(ShiftSchedule).where(
+                            ShiftSchedule.tenant_id == tenant_id,
+                            ShiftSchedule.employee_id == req_emp.employee_id,
+                            ShiftSchedule.shift_date == ref_date,
+                        )
+                    )
+                ).scalars().first()
+                if req_shift:
+                    req_shift.employee_id = target_emp.employee_id
+                    req_shift.status = "TRANSFERRED"
+                elif request.target_proposed_shift_start:
+                    new_shift = ShiftSchedule(
+                        tenant_id=tenant_id,
+                        shift_code=f"SHIFT-TRD-{request.trade_id[:6].upper()}",
+                        employee_id=target_emp.employee_id,
+                        shift_date=ref_date,
+                        start_time=request.target_proposed_shift_start,
+                        end_time=request.target_proposed_shift_start
+                        + timedelta(hours=request.shift_duration_hours),
+                        status="TRANSFERRED",
+                    )
+                    db.add(new_shift)
+            await db.flush()
+
+        return result
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Shift trade evaluation failed: {e!s}",
         ) from e
+

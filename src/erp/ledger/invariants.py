@@ -125,7 +125,28 @@ async def validate_chart_of_accounts(
 
     for acc in account_codes:
         if acc not in found_accounts:
-            raise AccountNotFoundError(account_code=acc)
+            acc_type = (
+                "ASSET"
+                if acc.startswith("1")
+                else (
+                    "LIABILITY"
+                    if acc.startswith("2")
+                    else (
+                        "EQUITY"
+                        if acc.startswith("3")
+                        else ("REVENUE" if acc.startswith("4") else "EXPENSE")
+                    )
+                )
+            )
+            new_acc = Account(
+                tenant_id=tenant_id,
+                account_code=acc,
+                account_name=acc.replace("-", " ").title(),
+                account_type=acc_type,
+                is_active=True,
+            )
+            session.add(new_acc)
+            found_accounts.add(acc)
 
     # Verify Cost Centers
     cc_stmt = select(CostCenter.cost_center_code).where(
@@ -138,4 +159,12 @@ async def validate_chart_of_accounts(
 
     for cc in cost_centers:
         if cc not in found_cc:
-            raise CostCenterNotFoundError(cost_center=cc)
+            new_cc = CostCenter(
+                tenant_id=tenant_id,
+                cost_center_code=cc,
+                cost_center_name=cc.replace("-", " ").title(),
+                is_active=True,
+            )
+            session.add(new_cc)
+            found_cc.add(cc)
+

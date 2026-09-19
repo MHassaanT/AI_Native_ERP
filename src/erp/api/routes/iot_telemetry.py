@@ -7,7 +7,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from erp.api.deps import DbSessionDep, TenantIdDep
-from erp.db.models.manufacturing import MaintenanceTicket, Workstation
+from erp.db.models.manufacturing import MaintenanceTicket, WorkOrder, Workstation
+
+
 from erp.iot.predictive_maintenance import (
     MaintenanceActionPlan,
     maintenance_dispatcher,
@@ -138,12 +140,63 @@ async def ingest_telemetry_frame(
     tenant_id: TenantIdDep,
     db: DbSessionDep,
 ):
-    """Evaluates telemetry frame; triggers predictive maintenance work order if failure probability >= 0.85."""
-    return await maintenance_dispatcher.process_telemetry_frame(
+    """Evaluates telemetry frame; triggers predictive maintenance and automatically reroutes jobs on critical faults."""
+    plan = await maintenance_dispatcher.process_telemetry_frame(
         session=db,
         tenant_id=tenant_id,
         frame=frame,
     )
+
+    if plan.emergency_lockout or plan.failure_probability >= 0.85:
+        from erp.production.cpsat_scheduler import JobOperationSpec, JobSpec
+        from erp.production.router import production_router
+
+        # Find active work orders to reroute
+        wo_stmt = select(WorkOrder).where(
+            WorkOrder.tenant_id == tenant_id,
+            WorkOrder.status.in_(["SCHEDULED", "IN_PROGRESS", "DRAFT"]),
+        )
+        work_orders = (await db.execute(wo_stmt)).scalars().all()
+
+        alt_stmt = select(Workstation).where(
+            Workstation.tenant_id == tenant_id,
+            Workstation.workstation_code != frame.workstation_code,
+            Workstation.status == "OPERATIONAL",
+        )
+        alt_ws = (await db.execute(alt_stmt)).scalars().all()
+        alt_codes = [w.workstation_code for w in alt_ws] or ["WS-CNC-02"]
+
+        jobs = []
+        for wo in work_orders:
+            jobs.append(
+                JobSpec(
+                    job_id=wo.work_order_number,
+                    job_name=f"Work Order {wo.work_order_number}",
+                    operations=[
+                        JobOperationSpec(
+                            operation_id=f"OP-{wo.work_order_number}-01",
+                            operation_name="Primary Operation",
+                            workstation_code=frame.workstation_code,
+                            duration_minutes=45,
+                            alternative_workstations=alt_codes,
+                        )
+                    ],
+                )
+            )
+
+        if jobs:
+            try:
+                production_router.handle_workstation_failure(
+                    faulted_workstation_code=frame.workstation_code,
+                    current_jobs=jobs,
+                )
+                plan.rerouted = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Automatic reroute failed: %s", e)
+
+    return plan
+
 
 
 @router.post(

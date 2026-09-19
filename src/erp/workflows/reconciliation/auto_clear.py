@@ -89,14 +89,32 @@ class AutoClearingEngine:
 
             commit = await ledger_engine.commit_transaction(session=session, proposal=proposal)
 
-            # Update Sales Order status
-            so_stmt = select(SalesOrder).where(
-                SalesOrder.tenant_id == tenant_id,
-                SalesOrder.order_id == best.order_id,
+            # Update Sales Invoice / Sales Order status
+            from erp.db.models.sales import SalesInvoice
+            inv_stmt = select(SalesInvoice).where(
+                SalesInvoice.tenant_id == tenant_id,
+                SalesInvoice.invoice_id == best.order_id,
             )
-            so = (await session.execute(so_stmt)).scalar_one_or_none()
-            if so:
-                so.status = "SETTLED"
+            inv = (await session.execute(inv_stmt)).scalar_one_or_none()
+            if inv:
+                inv.status = "PAID"
+                if inv.order_id:
+                    so_stmt = select(SalesOrder).where(
+                        SalesOrder.tenant_id == tenant_id,
+                        SalesOrder.order_id == inv.order_id,
+                    )
+                    so = (await session.execute(so_stmt)).scalar_one_or_none()
+                    if so:
+                        so.status = "SETTLED"
+            else:
+                so_stmt = select(SalesOrder).where(
+                    SalesOrder.tenant_id == tenant_id,
+                    SalesOrder.order_id == best.order_id,
+                )
+                so = (await session.execute(so_stmt)).scalar_one_or_none()
+                if so:
+                    so.status = "SETTLED"
+
 
             logger.info(
                 "Bank feed auto-cleared order %s (confidence=%.2f). Ledger txn: %s",

@@ -23,12 +23,21 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "dev_secret_key_change_in_production_ai_native_erp_2026"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    WEBHOOK_SIGNING_SECRET: str = "whsec_dev_ai_erp_2026"
 
     # Multi-Tenancy (Priority invariant)
     DEFAULT_TENANT_ID: uuid.UUID = Field(
         default_factory=lambda: uuid.UUID("00000000-0000-0000-0000-000000000001")
     )
     MULTI_TENANCY_ENABLED: bool = True
+
+    def model_post_init(self, __context):
+        if self.ENVIRONMENT == "production":
+            if self.DEBUG:
+                raise ValueError("DEBUG must be False in production environment.")
+            if "dev_secret" in self.SECRET_KEY:
+                raise ValueError("Default development SECRET_KEY is forbidden in production.")
+
 
     # PostgreSQL Database
     POSTGRES_USER: str = "postgres"

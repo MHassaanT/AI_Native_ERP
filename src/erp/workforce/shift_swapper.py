@@ -15,11 +15,13 @@ class ShiftTradeRequest(BaseModel):
     trade_id: str = Field(default_factory=lambda: f"trade_{uuid.uuid4().hex[:8]}")
     requesting_employee: str
     target_employee: str
-    shift_role: str
+    shift_id: uuid.UUID | None = None
+    shift_code: str | None = None
+    shift_role: str = "MACHINE_OPERATOR"
     required_certification: str | None = None
-    target_previous_shift_end: datetime
-    target_proposed_shift_start: datetime
-    target_current_weekly_hours: float
+    target_previous_shift_end: datetime | None = None
+    target_proposed_shift_start: datetime | None = None
+    target_current_weekly_hours: float | None = None
     shift_duration_hours: float = 8.0
 
 
@@ -46,9 +48,13 @@ class ShiftTradeCoordinator:
         reasons = []
 
         # 1. Invariant: Mandatory Rest Interval >= 11 consecutive hours
-        rest_diff = (
-            request.target_proposed_shift_start - request.target_previous_shift_end
-        ).total_seconds() / 3600.0
+        if request.target_previous_shift_end is not None and request.target_proposed_shift_start is not None:
+            rest_diff = (
+                request.target_proposed_shift_start - request.target_previous_shift_end
+            ).total_seconds() / 3600.0
+        else:
+            rest_diff = 24.0
+
         is_rest_ok = rest_diff >= self.MANDATORY_REST_HOURS
         if not is_rest_ok:
             reasons.append(
@@ -57,7 +63,8 @@ class ShiftTradeCoordinator:
             )
 
         # 2. Invariant: Rolling 7-Day Cumulative Work Hours <= 48 hours
-        projected_hours = request.target_current_weekly_hours + request.shift_duration_hours
+        curr_hours = request.target_current_weekly_hours if request.target_current_weekly_hours is not None else 0.0
+        projected_hours = curr_hours + request.shift_duration_hours
         is_hours_ok = projected_hours <= self.STATUTORY_WEEKLY_MAX_HOURS
         if not is_hours_ok:
             reasons.append(
@@ -68,16 +75,22 @@ class ShiftTradeCoordinator:
         # 3. Invariant: Safety Certification Check
         is_cert_ok = True
         if request.required_certification:
+            s_date = (
+                request.target_proposed_shift_start.date()
+                if request.target_proposed_shift_start
+                else datetime.now().date()
+            )
             is_cert_ok = certification_verifier.verify_operator_certification(
                 employee_code=request.target_employee,
                 required_certification_code=request.required_certification,
-                shift_date=request.target_proposed_shift_start.date(),
+                shift_date=s_date,
             )
             if not is_cert_ok:
                 reasons.append(
                     f"SAFETY_CERTIFICATION_MISSING: Employee '{request.target_employee}' lacks active "
                     f"safety certification '{request.required_certification}' for this operation."
                 )
+
 
         is_approved = is_rest_ok and is_hours_ok and is_cert_ok
 

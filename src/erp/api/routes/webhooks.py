@@ -1,5 +1,4 @@
-"""Inbound Email, Webhook & Open-Banking Integration Endpoints (PRD §Inbound Triggers)."""
-
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -7,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from erp.api.deps import TenantIdDep
+from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.events.email_gateway import (
     EmailAttachment,
     IngestedEmailMessage,
@@ -15,6 +14,10 @@ from erp.events.email_gateway import (
     outbound_mailer,
 )
 from erp.orchestration.orchestrator import chief_orchestrator
+from erp.orchestration.worker import dag_executor
+from erp.workflows.reconciliation.auto_clear import auto_clearing_engine
+from erp.workflows.reconciliation.bank_feed_ingestor import bank_feed_ingestor
+
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,9 @@ async def ingest_email_webhook(
     )
     mailbox.add_inbox(ingested)
 
+    # Concurrently execute DAG across subagents
+    asyncio.create_task(dag_executor.execute_dag(dag))
+
     return {
         "status": "INGESTED",
         "event_type": event_type,
@@ -134,17 +140,37 @@ async def dispatch_quote_email(
 async def ingest_banking_settlement(
     payload: BankSettlementWebhookPayload,
     tenant_id: TenantIdDep,
+    db: DbSessionDep,
 ):
-    """Receives live settlement notifications from open-banking rails and stages reconciliation."""
+    """Receives live settlement notifications from open-banking rails and executes reconciliation against open receivables."""
+    raw_tx = bank_feed_ingestor.parse_webhook_payload({
+        "account_number": payload.debtor_account,
+        "amount": payload.amount,
+        "counterparty_name": payload.debtor_name,
+        "remittance_information": payload.remittance_reference,
+        "currency": payload.currency,
+        "booking_date": payload.value_date,
+    })
+
+    result = await auto_clearing_engine.process_bank_transaction(
+        session=db,
+        tenant_id=tenant_id,
+        tx=raw_tx,
+    )
+
+    action = "AUTO_MATCH_CONFIRMED" if result.is_auto_cleared else "MANUAL_REVIEW_STAGED"
     return {
         "settlement_id": payload.settlement_id,
-        "status": "INGESTED_TO_RECONCILER",
+        "status": "AUTO_MATCH_CONFIRMED" if result.is_auto_cleared else "UNMATCHED_STAGED",
         "amount": payload.amount,
         "counterparty": payload.debtor_name,
         "remittance_reference": payload.remittance_reference,
-        "confidence": 0.98,
-        "action": "AUTO_MATCH_CONFIRMED",
+        "confidence": result.confidence_score,
+        "action": action,
+        "matched_document": result.matched_order_number,
+        "transaction_id": str(result.ledger_commit.transaction_id) if result.ledger_commit else None,
     }
+
 
 
 # ==============================================================================

@@ -49,18 +49,54 @@ class SemanticReconciler:
         narrative: str = "",
     ) -> ReconciliationMatchResult:
         """Finds candidate customer sales orders matching the bank payment."""
+        from erp.db.models.sales import SalesInvoice
+
+        # Query open sales invoices for tenant
+        inv_stmt = (
+            select(SalesInvoice, Customer.customer_name)
+            .join(Customer, SalesInvoice.customer_id == Customer.customer_id)
+            .where(
+                SalesInvoice.tenant_id == tenant_id,
+                SalesInvoice.status == "ISSUED",
+            )
+        )
+        inv_results = (await session.execute(inv_stmt)).all()
+
         # Query open sales orders for tenant
         stmt = (
             select(SalesOrder, Customer.customer_name)
             .join(Customer, SalesOrder.customer_id == Customer.customer_id)
             .where(
                 SalesOrder.tenant_id == tenant_id,
-                SalesOrder.status == "CONFIRMED",
+                SalesOrder.status.in_(["CONFIRMED", "DELIVERED"]),
             )
         )
         results = (await session.execute(stmt)).all()
 
         candidates: list[CandidateMatch] = []
+
+        for inv, cust_name in inv_results:
+            amt_diff = abs(inv.total_amount - amount)
+            amt_score = 1.0 if amt_diff <= Decimal("0.01") else (0.8 if amt_diff <= Decimal("10.00") else max(0.0, 1.0 - float(amt_diff / (inv.total_amount or 1))))
+            s1 = SequenceMatcher(None, counterparty.lower(), cust_name.lower()).ratio()
+            s2 = 1.0 if inv.invoice_number.lower() in narrative.lower() else 0.0
+            semantic_score = max(s1, s2)
+            composite = (amt_score * 0.60) + (semantic_score * 0.40)
+            status = "AUTO_MATCH" if composite >= self.AUTO_CLEAR_CONFIDENCE_THRESHOLD else ("AMBIGUOUS" if composite >= 0.60 else "NO_MATCH")
+            candidates.append(
+                CandidateMatch(
+                    order_id=inv.invoice_id,
+                    order_number=inv.invoice_number,
+                    customer_id=inv.customer_id,
+                    customer_name=cust_name,
+                    order_amount=inv.total_amount,
+                    amount_difference=amt_diff,
+                    semantic_similarity=round(semantic_score, 4),
+                    composite_confidence=round(composite, 4),
+                    match_status=status,
+                )
+            )
+
 
         for so, cust_name in results:
             # 1. Amount Delta Score (within 1 cent = 1.0, otherwise penalty)

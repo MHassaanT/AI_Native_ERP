@@ -26,6 +26,8 @@ class MaintenanceActionPlan(BaseModel):
     expedited_po_required: bool = False
     emergency_lockout: bool = False
     alarm_summary: str
+    rerouted: bool = False
+
 
 
 class PredictiveMaintenanceDispatcher:
@@ -90,8 +92,9 @@ class PredictiveMaintenanceDispatcher:
             ticket_number=ticket_no,
             workstation_id=ws.workstation_id,
             priority="CRITICAL" if eval_result.is_catastrophic else "HIGH",
-            failure_mode="; ".join(eval_result.alarm_reasons),
+            description="; ".join(eval_result.alarm_reasons),
             status="SCHEDULED",
+
         )
         session.add(ticket)
 

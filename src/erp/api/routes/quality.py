@@ -111,17 +111,67 @@ async def list_quarantined_lots():
 
 
 @router.post("/release-lot", summary="Release quarantined lot back into production")
-async def release_quarantined_lot(req: ReleaseLotRequest):
-    """Releases quarantined lot back into available stock."""
+async def release_quarantined_lot(
+    req: ReleaseLotRequest,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    """Releases quarantined lot back into available stock and updates database flags."""
+    from sqlalchemy import select
+    from erp.db.models.inventory import StockLevel
+
+    stk_stmt = select(StockLevel).where(
+        StockLevel.tenant_id == tenant_id,
+        StockLevel.lot_number == req.lot_number,
+    )
+    matching_stks = (await db.execute(stk_stmt)).scalars().all()
+    for s in matching_stks:
+        s.is_quarantined = False
+
     if req.lot_number in lot_quarantine_manager.quarantined_lots:
         lot_quarantine_manager.quarantined_lots.remove(req.lot_number)
-        return {
-            "lot_number": req.lot_number,
-            "status": "RELEASED",
-            "message": f"Lot {req.lot_number} successfully released from quarantine hold.",
-        }
+
+    await db.flush()
     return {
         "lot_number": req.lot_number,
-        "status": "NOT_FOUND",
-        "message": f"Lot {req.lot_number} is not in quarantine list.",
+        "status": "RELEASED",
+        "message": f"Lot {req.lot_number} successfully released from quarantine hold.",
     }
+
+
+@router.post(
+    "/arbitrate-conflict",
+    summary="Arbitrate Quality statutory quarantine vs Revenue VIP shipment conflict",
+)
+async def arbitrate_quarantine_conflict(
+    req: dict[str, Any],
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    """Arbitrates conflicting agent claims and triggers revenue fallback re-route or customer notice."""
+    from decimal import Decimal
+    import uuid
+    from erp.orchestration.arbitration_coordinator import (
+        ConflictArbitrationRequest,
+        arbitration_coordinator,
+    )
+
+    arb_req = ConflictArbitrationRequest(
+        lot_number=req["lot_number"],
+        item_id=uuid.UUID(str(req["item_id"])),
+        warehouse_id=uuid.UUID(str(req["warehouse_id"])),
+        order_id=uuid.UUID(str(req["order_id"])),
+        customer_id=uuid.UUID(str(req["customer_id"])),
+        order_quantity=Decimal(str(req.get("order_quantity", "100.0000"))),
+        order_monetary_value=Decimal(str(req.get("order_monetary_value", "50000.00"))),
+        defect_type=req.get("defect_type", "SURFACE_CRACK"),
+        defect_confidence=float(req.get("defect_confidence", 0.99)),
+    )
+
+    report = await arbitration_coordinator.arbitrate_quality_vs_revenue(
+        session=db,
+        tenant_id=tenant_id,
+        req=arb_req,
+    )
+    return report.model_dump()
+

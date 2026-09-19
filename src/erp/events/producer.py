@@ -84,8 +84,8 @@ class EventProducer:
             "status": "PUBLISHED",
         }
         self.event_log.insert(0, event_record)
-        if len(self.event_log) > 200:
-            self.event_log.pop()
+        from erp.events.bus import async_event_bus
+        await async_event_bus.publish(topic, key, value)
 
         if not self._is_started or not self._producer:
             logger.info("[LOCAL STREAM] Topic: %s | Key: %s | ID: %s", topic, key, event_record["event_id"])

@@ -1,8 +1,10 @@
-"""Deterministic Ledger Invariant Bridge (PRD §General Ledger Engine).
+"""Deterministic Ledger Invariant Engine (PRD §General Ledger Engine).
 
-Provides sub-microsecond in-memory validation of financial transactions
-with strict zero-sum balancing, single-sided constraints, and autonomy ceilings.
+Provides high-performance in-memory validation of financial transactions
+with strict zero-sum balancing, single-sided constraints, and autonomy ceilings
+via deterministic Python Decimal arithmetic, mirroring crates/ledger_core specifications.
 """
+
 
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum

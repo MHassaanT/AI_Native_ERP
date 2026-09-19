@@ -105,6 +105,7 @@ class StockLedgerEntry(Base, TenantMixin):
         String(64), nullable=False, doc="GOODS_RECEIPT, DELIVERY_NOTE, WORK_ORDER_ISSUE"
     )
     source_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    lot_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_cancelled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
@@ -143,9 +144,12 @@ class StockLevel(Base, TenantMixin, TimestampMixin):
     valuation_rate: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
+    lot_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_quarantined: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     __table_args__ = (
         Index(
             "idx_stock_level_tenant_item_wh", "tenant_id", "item_id", "warehouse_id", unique=True
         ),
     )
+

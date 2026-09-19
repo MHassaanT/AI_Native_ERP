@@ -53,13 +53,21 @@ class BamlClient:
 
         # High-fidelity deterministic extractor fallback
         inv_match = re.search(r"(?:INVOICE|INV)[-:\s#]*([A-Z0-9-]+)", ocr_text, re.IGNORECASE)
-        invoice_number = inv_match.group(1) if inv_match else "INV-2026-9042"
+        invoice_number = inv_match.group(1) if inv_match else "INV-UNKNOWN"
 
         tax_match = re.search(r"(?:TAX ID|EIN|VAT)[-:\s#]*([A-Z0-9-]+)", ocr_text, re.IGNORECASE)
-        vendor_tax_id = tax_match.group(1) if tax_match else "US-EIN-98-7654321"
+        vendor_tax_id = tax_match.group(1) if tax_match else None
 
         date_match = re.search(r"\b(202[0-9]-[0-1][0-9]-[0-3][0-9])\b", ocr_text)
         invoice_date = date_match.group(1) if date_match else "2026-11-04"
+
+        # Detect vendor name from text or fallback to generic detected string
+        vendor_match = re.search(r"(?:VENDOR|FROM|SUPPLIER|COMPANY):\s*([A-Za-z0-9\s,\.]+)", ocr_text, re.IGNORECASE)
+        if vendor_match:
+            vendor_name = vendor_match.group(1).strip()
+        else:
+            first_line = ocr_text.strip().split("\n")[0].strip()
+            vendor_name = first_line[:50] if len(first_line) > 3 and "invoice" not in first_line.lower() else "Verified Supplier"
 
         # Look for dollar amounts with priority to currency signs or total labels
         cleaned_text = ocr_text.replace(",", "")
@@ -72,25 +80,43 @@ class BamlClient:
             dec_amounts = [Decimal(a) for a in flat if Decimal(a) > 0 and len(a) <= 10]
 
         filtered_amounts = [a for a in dec_amounts if a != Decimal("2026") and a != Decimal("2025")]
-        total_amount = max(filtered_amounts) if filtered_amounts else Decimal("18450.0000")
+        total_amount = max(filtered_amounts) if filtered_amounts else Decimal("0.0000")
         subtotal = total_amount
         tax_amount = Decimal("0.0000")
 
-        # Line items
+        # Dynamically extract SKU if present
+        sku_match = re.search(r"\b([A-Z]{2,4}-[A-Z0-9-]+)\b", ocr_text)
+        item_sku = sku_match.group(1) if sku_match else "ITEM-GENERAL"
+
+        # Extract quantities if line pattern exists: e.g. "1000 units" or "1000 pcs"
+        qty_match = re.search(r"\b(\d+)\s*(?:units?|pcs?|kg|nos)?\b", ocr_text, re.IGNORECASE)
+        qty = Decimal(qty_match.group(1)) if qty_match and Decimal(qty_match.group(1)) != total_amount else Decimal("1.0000")
+
+        unit_price = (total_amount / qty).quantize(Decimal("0.0001")) if qty > 0 else total_amount
+
         line_items = [
             InvoiceLineExtraction(
-                item_code="RAW-RESIN-HDPE",
-                description="High-Density Polyethylene Resin Pellet",
-                quantity=Decimal("6000.0000"),
-                unit_price=Decimal("2.4500"),
-                line_total=Decimal("14700.0000"),
+                item_code=item_sku,
+                description=f"Extracted line item {item_sku}",
+                quantity=qty,
+                unit_price=unit_price,
+                line_total=total_amount,
                 tax_rate=Decimal("0.0000"),
             )
         ]
 
+        # Calculate genuine confidence score
+        confidence = 0.50
+        if inv_match:
+            confidence += 0.20
+        if dec_amounts:
+            confidence += 0.20
+        if tax_match:
+            confidence += 0.05
+
         return InvoiceDocumentExtraction(
-            vendor_tax_id=vendor_tax_id,
-            vendor_name="Global Polymers Inc.",
+            vendor_tax_id=vendor_tax_id or "TAX-ID-PENDING",
+            vendor_name=vendor_name,
             invoice_number=invoice_number,
             invoice_date=invoice_date,
             currency="USD",
@@ -99,8 +125,9 @@ class BamlClient:
             total_amount=total_amount,
             payment_terms_days=30,
             line_items=line_items,
-            extraction_confidence=0.98,
+            extraction_confidence=round(confidence, 2),
         )
+
 
     async def extract_receipt_metadata(self, receipt_text: str) -> ExpenseItemExtraction:
         """Extracts structured expense receipt metadata."""
@@ -145,10 +172,10 @@ class BamlClient:
 
         # Regex heuristic extraction
         email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", rfq_text)
-        customer_email = email_match.group(0) if email_match else "procurement@siemens-energy.com"
+        customer_email = email_match.group(0) if email_match else "procurement@commercial.internal"
 
         rfq_match = re.search(r"(?:RFQ|REQ|INQ)[-:\s#]*([A-Z0-9-]+)", rfq_text, re.IGNORECASE)
-        rfq_ref = rfq_match.group(0) if rfq_match else "RFQ-2026-SE-091"
+        rfq_ref = rfq_match.group(0) if rfq_match else "RFQ-PENDING"
 
         date_match = re.search(r"\b(202[0-9]-[0-1][0-9]-[0-3][0-9])\b", rfq_text)
         delivery_date = date_match.group(1) if date_match else "2026-12-15"
@@ -157,14 +184,32 @@ class BamlClient:
 
         # Look for quantity
         qty_match = re.search(r"\b(\d+)\s*(?:units?|pcs?|nos|pieces?|kg)?\b", rfq_text, re.IGNORECASE)
-        qty = Decimal(qty_match.group(1)) if qty_match else Decimal("500.0000")
+        qty = Decimal(qty_match.group(1)) if qty_match else Decimal("100.0000")
 
         # Look for SKU / enclosure code
         sku_match = re.search(r"(FG-[A-Z0-9-]+|[A-Z]{2,4}-\d{3,5})", rfq_text)
-        sku = sku_match.group(1) if sku_match else "FG-ENCLOSURE-IP67"
+        sku = sku_match.group(1) if sku_match else "SKU-UNSPECIFIED"
+
+        if "siemens" in rfq_text.lower():
+            cust_name = "Siemens Energy AG"
+        elif email_match and "@" in customer_email:
+            domain = customer_email.split("@")[1].split(".")[0]
+            cust_name = f"{domain.capitalize()} Enterprises"
+        else:
+            cust_name = "Commercial Inquirer"
+
+        confidence = 0.50
+        if email_match:
+            confidence += 0.15
+        if sku_match:
+            confidence += 0.15
+        if qty_match:
+            confidence += 0.10
+        if date_match:
+            confidence += 0.05
 
         return RFQExtraction(
-            customer_name="Siemens Energy AG" if "siemens" in rfq_text.lower() else "Industrial Manufacturing Partner",
+            customer_name=cust_name,
             customer_email=customer_email,
             rfq_reference=rfq_ref,
             required_delivery_date=delivery_date,
@@ -174,12 +219,13 @@ class BamlClient:
                     quantity=qty,
                     uom="Nos",
                     target_unit_price=Decimal("48.5000"),
-                    custom_specifications="Industrial grade coating, IP67 polyurethane gasket",
+                    custom_specifications="Industrial standard specification",
                 )
             ],
             commercial_urgency=urgency,
-            extraction_confidence=0.96,
+            extraction_confidence=round(confidence, 2),
         )
+
 
     async def extract_bank_remittance(self, narrative: str) -> BankTransactionExtraction:
         """Extracts counterparty and invoice reference from bank feed narrative."""

@@ -57,8 +57,18 @@ class LotQuarantineManager:
             self.quarantined_lots.add(classification.lot_number)
             quarantine_triggered = True
 
-            # Enqueue outbox event for Stock Ledger Lot Quarantine if session provided
+            # Enqueue outbox event for Stock Ledger Lot Quarantine and update StockLevel in DB
             if session is not None:
+                from erp.db.models.inventory import StockLevel
+
+                stk_stmt = select(StockLevel).where(
+                    StockLevel.tenant_id == tenant_id,
+                    StockLevel.lot_number == classification.lot_number,
+                )
+                matching_stks = (await session.execute(stk_stmt)).scalars().all()
+                for s in matching_stks:
+                    s.is_quarantined = True
+
                 await OutboxManager.enqueue_event(
                     session=session,
                     tenant_id=tenant_id,
@@ -78,6 +88,7 @@ class LotQuarantineManager:
                 classification.lot_number,
                 classification.defect_type,
             )
+
 
         # Check 1-hour rolling defect rate threshold (3.0%)
         if rate > self.DEFECT_RATE_PAUSE_THRESHOLD and len(hist) >= 20:
