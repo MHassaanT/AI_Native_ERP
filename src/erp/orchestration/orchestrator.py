@@ -44,7 +44,12 @@ class ChiefOrchestrator:
         rfq_payload: dict[str, Any],
     ) -> TaskDAG:
         """Constructs an asynchronous DAG for multi-line customer RFQ evaluation."""
-        dag = TaskDAG(dag_id=f"dag_rfq_{uuid.uuid4().hex[:6]}")
+        dag = TaskDAG(
+            dag_id=f"dag_rfq_{uuid.uuid4().hex[:6]}",
+            tenant_id=str(tenant_id),
+            customer_name=rfq_payload.get("customer_name") or "Enterprise Customer",
+            inquiry_text=rfq_payload.get("inquiry_text") or "",
+        )
 
         # Subtask 1: Revenue Agent parses inquiry
         t1 = dag.add_node(
@@ -79,6 +84,22 @@ class ChiefOrchestrator:
 
         self.active_dags[dag.dag_id] = dag
         return dag
+
+    def get_dags(self, tenant_id: uuid.UUID | str | None = None) -> list[TaskDAG]:
+        """Returns list of DAGs sorted newest first, filtered by tenant when available."""
+        dags = list(self.active_dags.values())
+        if tenant_id:
+            tenant_str = str(tenant_id)
+            filtered = [d for d in dags if d.tenant_id is None or d.tenant_id == tenant_str]
+            if filtered:
+                dags = filtered
+        from datetime import datetime, UTC
+        dags.sort(key=lambda d: getattr(d, "created_at", datetime.min.replace(tzinfo=UTC)), reverse=True)
+        return dags
+
+    def get_dag(self, dag_id: str) -> TaskDAG | None:
+        """Retrieves a specific DAG by its ID."""
+        return self.active_dags.get(dag_id)
 
     def create_subagent_context(
         self,

@@ -30,6 +30,7 @@ export default function OverviewPage() {
     COMPLIANCE: "IDLE",
   });
   const [dispatchStatus, setDispatchStatus] = useState<string | null>(null);
+  const [dispatchedDagId, setDispatchedDagId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Live Metrics
@@ -139,6 +140,7 @@ export default function OverviewPage() {
         customer_name: customerName,
         inquiry_text: inquiryText,
       });
+      setDispatchedDagId(res.dag_id);
       setDispatchStatus(`DAG '${res.dag_id}' dispatched with ${res.nodes?.length || 4} subtasks across mesh.`);
       setShowRfqModal(false);
     } catch (err: any) {
@@ -216,7 +218,7 @@ export default function OverviewPage() {
       {dispatchStatus && (
         <div className="rounded border border-sage-100 bg-sage-50 px-4 py-2 text-xs font-mono text-sage-700 flex items-center justify-between">
           <span>&bull; {dispatchStatus}</span>
-          <Link href="/agents" className="text-[10px] uppercase underline hover:text-sage-800">
+          <Link href={dispatchedDagId ? `/agents?dag_id=${dispatchedDagId}` : "/agents"} className="text-[10px] uppercase underline hover:text-sage-800">
             View Agent DAG &rarr;
           </Link>
         </div>

@@ -37,9 +37,41 @@ class TaskNode(BaseModel):
 class TaskDAG:
     """Manages DAG formation, cycle validation, and topological execution."""
 
-    def __init__(self, dag_id: str | None = None):
+    def __init__(
+        self,
+        dag_id: str | None = None,
+        tenant_id: str | None = None,
+        customer_name: str | None = None,
+        inquiry_text: str | None = None,
+    ):
         self.dag_id = dag_id or f"dag_{uuid.uuid4().hex[:8]}"
+        self.tenant_id = str(tenant_id) if tenant_id else None
+        self.customer_name = customer_name or "Enterprise Customer"
+        self.inquiry_text = inquiry_text or ""
+        self.created_at = datetime.now(UTC)
         self.nodes: dict[str, TaskNode] = {}
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serializes DAG with node dependencies, statuses, and execution metadata."""
+        node_list = []
+        for n in self.nodes.values():
+            n_dict = n.model_dump(mode="json")
+            n_dict["dependencies"] = list(n.dependencies)
+            node_list.append(n_dict)
+
+        status = "COMPLETED" if self.is_finished() else "RUNNING"
+        if all(n.status == TaskStatus.PENDING for n in self.nodes.values()):
+            status = "DISPATCHED"
+
+        return {
+            "dag_id": self.dag_id,
+            "tenant_id": self.tenant_id,
+            "customer_name": self.customer_name,
+            "inquiry_text": self.inquiry_text,
+            "created_at": self.created_at.isoformat(),
+            "status": status,
+            "nodes": node_list,
+        }
 
     def add_node(
         self,

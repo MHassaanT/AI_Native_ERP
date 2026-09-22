@@ -471,7 +471,7 @@ export default function InboxPage() {
                         <td className="py-3 px-4">
                           {msg.associated_dag_id ? (
                             <Link
-                              href="/agents"
+                              href={`/agents?dag_id=${encodeURIComponent(msg.associated_dag_id)}`}
                               className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
                             >
                               <span>{msg.associated_dag_id}</span>

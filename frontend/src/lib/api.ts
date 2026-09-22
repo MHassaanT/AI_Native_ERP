@@ -51,6 +51,9 @@ export const api = {
   getAgentStates: () => fetchWithTenant("/agents/states"),
   dispatchRFQ: (data: { customer_name: string; inquiry_text: string }) =>
     fetchWithTenant("/agents/dispatch-rfq", { method: "POST", body: JSON.stringify(data) }),
+  getLatestDag: () => fetchWithTenant("/agents/dags/latest"),
+  getDag: (dagId: string) => fetchWithTenant(`/agents/dags/${encodeURIComponent(dagId)}`),
+  listDags: () => fetchWithTenant("/agents/dags"),
   arbitrateAgentCollision: (proposals: any[]) =>
     fetchWithTenant("/agents/arbitrate", { method: "POST", body: JSON.stringify({ proposals }) }),
 

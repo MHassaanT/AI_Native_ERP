@@ -1,12 +1,12 @@
-"""Agent Orchestration and DAG API Endpoints."""
-
-from fastapi import APIRouter
+import asyncio
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from erp.api.deps import TenantIdDep
 from erp.orchestration.conflict_resolution import ArbitrationResult
 from erp.orchestration.orchestrator import chief_orchestrator
 from erp.orchestration.state import AgentActionProposal
+from erp.orchestration.worker import dag_executor
 
 router = APIRouter(prefix="/agents", tags=["Agent Orchestration"])
 
@@ -38,11 +38,45 @@ async def dispatch_rfq_workflow(
         tenant_id=tenant_id,
         rfq_payload=req.model_dump(),
     )
-    return {
-        "dag_id": dag.dag_id,
-        "nodes": [n.model_dump() for n in dag.nodes.values()],
-        "status": "DISPATCHED",
-    }
+    # Execute DAG concurrently across agents
+    asyncio.create_task(dag_executor.execute_dag(dag))
+    return dag.to_dict()
+
+
+@router.get("/dags", summary="List task DAGs")
+async def list_task_dags(tenant_id: TenantIdDep):
+    """Returns all active and completed task DAGs, sorted newest first."""
+    dags = chief_orchestrator.get_dags(tenant_id)
+    return [d.to_dict() for d in dags]
+
+
+@router.get("/dags/latest", summary="Get most recent task DAG")
+async def get_latest_task_dag(tenant_id: TenantIdDep):
+    """Returns the most recent task DAG for the tenant."""
+    dags = chief_orchestrator.get_dags(tenant_id)
+    if not dags:
+        # If empty, spawn an initial baseline DAG so the visualizer never shows blank
+        sample_dag = chief_orchestrator.build_rfq_workflow_dag(
+            tenant_id=tenant_id,
+            rfq_payload={
+                "customer_name": "AeroDynamics GmbH",
+                "inquiry_text": "Need 500 units IP67 industrial enclosures by Q4.",
+                "target_sku": "FG-ENCLOSURE-IP67",
+                "quantity": 500.0,
+            },
+        )
+        asyncio.create_task(dag_executor.execute_dag(sample_dag))
+        return sample_dag.to_dict()
+    return dags[0].to_dict()
+
+
+@router.get("/dags/{dag_id}", summary="Get task DAG by ID")
+async def get_task_dag(dag_id: str, tenant_id: TenantIdDep):
+    """Returns task DAG structure, current status, dependencies, and node output results."""
+    dag = chief_orchestrator.get_dag(dag_id)
+    if not dag:
+        raise HTTPException(status_code=404, detail=f"Task DAG '{dag_id}' not found.")
+    return dag.to_dict()
 
 
 @router.post(

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   ArrowRight,
@@ -10,15 +11,20 @@ import {
   Cpu,
   Layers,
   Play,
+  Plus,
   RefreshCw,
   Send,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  X,
 } from "lucide-react";
 import { api } from "@/lib/api";
 
-export default function AgentsPage() {
+function AgentsContent() {
+  const searchParams = useSearchParams();
+  const dagIdParam = searchParams ? searchParams.get("dag_id") : null;
+
   const [agentStates, setAgentStates] = useState<Record<string, string>>({
     FINANCIAL_CONTROLLER: "IDLE",
     SUPPLY_CHAIN: "IDLE",
@@ -29,13 +35,18 @@ export default function AgentsPage() {
   });
   const [loading, setLoading] = useState(false);
 
-  // Active DAG Execution
+  // Active & List DAGs
   const [activeDag, setActiveDag] = useState<{
     dag_id: string;
     nodes: any[];
     status: string;
     customer_name?: string;
+    inquiry_text?: string;
+    created_at?: string;
   } | null>(null);
+  const [dagsList, setDagsList] = useState<any[]>([]);
+  const [loadingDag, setLoadingDag] = useState(false);
+  const [showDispatchModal, setShowDispatchModal] = useState(false);
 
   // RFQ Dispatch Form
   const [customerName, setCustomerName] = useState("AeroDynamics GmbH");
@@ -57,9 +68,58 @@ export default function AgentsPage() {
     }
   };
 
+  const loadDagsList = async () => {
+    try {
+      const list = await api.listDags();
+      if (Array.isArray(list)) {
+        setDagsList(list);
+      }
+    } catch {
+      // Fallback
+    }
+  };
+
+  const fetchDag = useCallback(async (dagId?: string) => {
+    setLoadingDag(true);
+    try {
+      let dag = null;
+      if (dagId) {
+        dag = await api.getDag(dagId);
+      } else {
+        dag = await api.getLatestDag();
+      }
+      if (dag && dag.dag_id) {
+        setActiveDag(dag);
+      }
+    } catch (err) {
+      console.warn("Could not fetch active DAG:", err);
+    } finally {
+      setLoadingDag(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadAgentStates();
-  }, []);
+    loadDagsList();
+    fetchDag(dagIdParam || undefined);
+  }, [dagIdParam, fetchDag]);
+
+  // Real-time polling while DAG is running
+  useEffect(() => {
+    if (!activeDag || activeDag.status === "COMPLETED" || activeDag.status === "FAILED") return;
+    const interval = setInterval(async () => {
+      try {
+        const updated = await api.getDag(activeDag.dag_id);
+        if (updated && updated.dag_id) {
+          setActiveDag(updated);
+        }
+        await loadAgentStates();
+      } catch {
+        // Handled
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [activeDag]);
 
   const handleDispatchRFQ = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -75,8 +135,11 @@ export default function AgentsPage() {
         nodes: res.nodes || [],
         status: res.status || "DISPATCHED",
         customer_name: customerName,
+        inquiry_text: inquiryText,
       });
+      setShowDispatchModal(false);
       await loadAgentStates();
+      await loadDagsList();
     } catch (err: any) {
       setDispatchError(err.message || "Failed to dispatch RFQ DAG");
     } finally {
@@ -193,50 +256,199 @@ export default function AgentsPage() {
             </p>
           </div>
 
-          {activeDag && (
-            <span className="rounded-full bg-sage-50 text-sage-700 border border-sage-200 px-3 py-1 text-[11px] font-medium font-mono">
-              Topological Sort Validated
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => fetchDag(activeDag?.dag_id)}
+              disabled={loadingDag}
+              className="inline-flex items-center gap-1.5 rounded-md border border-cream-300 bg-cream-50 px-3 py-1.5 text-xs text-cream-800 hover:bg-cream-200"
+            >
+              <RefreshCw className={`h-3 w-3 ${loadingDag ? "animate-spin" : ""}`} />
+              <span>Refresh DAG</span>
+            </button>
+            <button
+              onClick={() => setShowDispatchModal(!showDispatchModal)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-cream-400 bg-cream-900 px-3 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 transition-colors"
+            >
+              <Plus className="h-3 w-3" />
+              <span>Dispatch Inbound RFQ</span>
+            </button>
+          </div>
         </div>
 
-        {activeDag ? (
+        {/* Recent DAGs Selector Row */}
+        {dagsList.length > 0 && (
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+            <span className="text-[10px] font-mono text-cream-600 shrink-0 uppercase font-semibold">Recent Inbound DAGs:</span>
+            {dagsList.map((d: any) => (
+              <button
+                key={d.dag_id}
+                onClick={() => fetchDag(d.dag_id)}
+                className={`px-2.5 py-1 rounded text-[11px] font-mono whitespace-nowrap transition-colors border ${
+                  activeDag?.dag_id === d.dag_id
+                    ? "bg-cream-900 text-cream-50 border-cream-900 font-semibold"
+                    : "bg-cream-50 text-cream-700 border-cream-300 hover:bg-cream-200"
+                }`}
+              >
+                {d.customer_name || "Commercial RFQ"} ({d.dag_id}) • {d.status}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Modal / Inline Drawer for Dispatching New RFQ */}
+        {showDispatchModal && (
+          <div className="rounded-lg border border-cream-400 bg-cream-50 p-5 space-y-4 shadow-sm animate-fadeIn">
+            <div className="flex items-center justify-between border-b border-cream-300 pb-2">
+              <span className="text-xs font-semibold text-cream-900">Dispatch Inbound RFQ DAG to Mesh</span>
+              <button onClick={() => setShowDispatchModal(false)} className="text-cream-600 hover:text-cream-900">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={handleDispatchRFQ} className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-cream-800 mb-1">
+                    Customer / Inquiring Organization
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    className="w-full rounded-md border border-cream-300 bg-cream-100 px-3 py-1.5 text-xs text-cream-900 focus:outline-hidden focus:border-cream-500"
+                    placeholder="e.g. AeroDynamics GmbH"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-cream-800 mb-1">
+                    Commercial Inquiry Text
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={inquiryText}
+                    onChange={(e) => setInquiryText(e.target.value)}
+                    className="w-full rounded-md border border-cream-300 bg-cream-100 px-3 py-1.5 text-xs text-cream-900 focus:outline-hidden focus:border-cream-500"
+                    placeholder="Order specifications..."
+                  />
+                </div>
+              </div>
+              {dispatchError && <p className="text-[11px] text-terracotta-700">{dispatchError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDispatchModal(false)}
+                  className="rounded-md border border-cream-300 bg-cream-100 px-3 py-1.5 text-xs text-cream-800 hover:bg-cream-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={dispatching}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-cream-400 bg-cream-900 px-4 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
+                >
+                  <Send className="h-3 w-3" />
+                  <span>{dispatching ? "Formulating DAG..." : "Execute DAG"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {loadingDag && !activeDag ? (
+          <div className="py-12 text-center text-xs font-mono text-cream-600">
+            <RefreshCw className="h-6 w-6 animate-spin mx-auto text-cream-400 mb-2" />
+            <span>Loading task DAG topology...</span>
+          </div>
+        ) : activeDag ? (
           <div className="space-y-4">
-            <div className="text-xs font-mono text-cream-800 flex items-center justify-between">
-              <span>Event Source: RFQ from {activeDag.customer_name}</span>
-              <span className="text-sage-700 font-semibold">{activeDag.status}</span>
+            <div className="text-xs font-mono text-cream-800 flex items-center justify-between bg-cream-50 p-3 rounded-lg border border-cream-200">
+              <div>
+                <span className="text-[10px] text-cream-600 uppercase font-bold block">Event Source:</span>
+                <span className="font-semibold">{activeDag.customer_name || "Commercial Customer"}</span>
+                {activeDag.inquiry_text && (
+                  <span className="text-cream-600 text-[11px] ml-2 italic truncate max-w-md inline-block align-bottom">
+                    &ldquo;{activeDag.inquiry_text}&rdquo;
+                  </span>
+                )}
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] text-cream-600 uppercase font-bold block">Status:</span>
+                <span className={`font-semibold ${activeDag.status === "COMPLETED" ? "text-sage-700" : "text-amberGold-600 animate-pulse"}`}>
+                  {activeDag.status}
+                </span>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              {activeDag.nodes.map((node: any, idx: number) => (
-                <div
-                  key={node.task_id}
-                  className="relative rounded-lg border border-cream-300 bg-cream-50 p-4 shadow-2xs space-y-3"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs font-bold text-cream-700">
-                      T{idx + 1}
-                    </span>
-                    <span className="rounded bg-cream-200/80 px-1.5 py-0.5 text-[10px] font-mono text-cream-700">
-                      {node.status}
-                    </span>
-                  </div>
+              {activeDag.nodes?.map((node: any, idx: number) => {
+                const isCompleted = node.status === "COMPLETED";
+                const isRunning = node.status === "RUNNING";
+                return (
+                  <div
+                    key={node.task_id}
+                    className="relative rounded-lg border border-cream-300 bg-cream-50 p-4 shadow-2xs space-y-3 flex flex-col justify-between"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs font-bold text-cream-700">
+                        T{idx + 1}
+                      </span>
+                      <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono ${
+                        isCompleted
+                          ? "bg-sage-100 text-sage-800"
+                          : isRunning
+                          ? "bg-amberGold-100 text-amberGold-800 animate-pulse"
+                          : "bg-cream-200 text-cream-700"
+                      }`}>
+                        {isCompleted && <CheckCircle2 className="h-3 w-3 text-sage-600" />}
+                        {isRunning && <RefreshCw className="h-3 w-3 animate-spin text-amberGold-600" />}
+                        <span>{node.status}</span>
+                      </span>
+                    </div>
 
-                  <div>
-                    <div className="text-xs font-semibold text-cream-900">{node.name}</div>
-                    <div className="text-[11px] font-mono text-cream-700 mt-1">
-                      Agent: {node.agent_id}
+                    <div>
+                      <div className="text-xs font-semibold text-cream-900">{node.name}</div>
+                      <div className="text-[11px] font-mono text-cream-700 mt-0.5">
+                        Agent: <span className="font-semibold">{node.agent_id}</span>
+                      </div>
+                    </div>
+
+                    {/* Node Output Preview if Completed */}
+                    {node.output_result && (
+                      <div className="rounded border border-cream-200 bg-cream-100/70 p-2 text-[10px] font-mono text-cream-800 space-y-0.5">
+                        <span className="text-[9px] text-cream-500 font-bold block uppercase">Agent Output:</span>
+                        {node.output_result.requested_sku && (
+                          <div>SKU: <span className="font-semibold text-cream-900">{node.output_result.requested_sku}</span></div>
+                        )}
+                        {node.output_result.quantity && (
+                          <div>Qty: <span className="font-semibold text-cream-900">{node.output_result.quantity}</span></div>
+                        )}
+                        {node.output_result.material_cost !== undefined && (
+                          <div>Cost: <span className="font-semibold text-cream-900">${node.output_result.material_cost}</span></div>
+                        )}
+                        {node.output_result.lead_time_days !== undefined && (
+                          <div>Lead Time: <span className="font-semibold text-cream-900">{node.output_result.lead_time_days} days</span></div>
+                        )}
+                        {node.output_result.makespan_minutes !== undefined && (
+                          <div>Makespan: <span className="font-semibold text-cream-900">{node.output_result.makespan_minutes} min (CP-SAT)</span></div>
+                        )}
+                        {node.output_result.proposed_unit_price !== undefined && (
+                          <div>Quote: <span className="font-semibold text-sage-800">${node.output_result.proposed_unit_price}</span> ({(node.output_result.computed_margin_percentage * 100).toFixed(1)}% margin)</div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-cream-200 text-[10px] font-mono text-cream-600 flex items-center justify-between">
+                      <span>
+                        Deps: {Array.isArray(node.dependencies) && node.dependencies.length > 0 ? `${node.dependencies.length} prior` : "Root"}
+                      </span>
+                      <span className={isCompleted ? "text-sage-700 font-medium" : isRunning ? "text-amberGold-700 font-medium" : "text-cream-500"}>
+                        {isCompleted ? "Completed" : isRunning ? "Active" : "Pending"}
+                      </span>
                     </div>
                   </div>
-
-                  <div className="pt-2 border-t border-cream-200 text-[10px] font-mono text-cream-600 flex items-center justify-between">
-                    <span>
-                      Deps: {Array.isArray(node.dependencies) && node.dependencies.length > 0 ? `${node.dependencies.length} prior` : "Root"}
-                    </span>
-                    <span className="text-sage-700">Active</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ) : (
@@ -372,3 +584,19 @@ export default function AgentsPage() {
     </div>
   );
 }
+
+export default function AgentsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="py-20 text-center text-xs font-mono text-cream-600">
+          <RefreshCw className="h-6 w-6 animate-spin mx-auto text-cream-400 mb-2" />
+          <span>Connecting to autonomous agent mesh...</span>
+        </div>
+      }
+    >
+      <AgentsContent />
+    </Suspense>
+  );
+}
+
