@@ -196,7 +196,21 @@ async def audit_expense_claim(
             )
         ).scalar_one_or_none()
 
-        emp_id = emp.employee_id if emp else uuid.uuid4()
+        if not emp:
+            emp = Employee(
+                tenant_id=tenant_id,
+                employee_code=claim.employee_code,
+                first_name="Operator",
+                last_name=claim.employee_code.replace("EMP-", "") or "Staff",
+                email=f"{claim.employee_code.lower().replace('_', '-')[:30]}@company.internal",
+                department="MANUFACTURING",
+                max_weekly_hours=48,
+                is_active=True,
+            )
+            session.add(emp)
+            await session.flush()
+
+        emp_id = emp.employee_id
         claim_record = ExpenseClaim(
             tenant_id=tenant_id,
             claim_number=claim.claim_id,

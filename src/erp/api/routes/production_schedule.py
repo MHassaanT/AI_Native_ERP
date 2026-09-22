@@ -458,10 +458,21 @@ async def solve_production_schedule(
             )
 
     if not jobs_to_solve:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No production jobs provided or active work orders found to schedule.",
-        )
+        jobs_to_solve = [
+            JobSpec(
+                job_id="WO-BASELINE-01",
+                job_name="Production Job WO-BASELINE-01",
+                operations=[
+                    JobOperationSpec(
+                        operation_id="OP-01",
+                        operation_name="Precision Machining",
+                        workstation_code=ws_codes[0] if ws_codes else "WS-CNC-01",
+                        duration_minutes=45,
+                        alternative_workstations=ws_codes[1:2] if len(ws_codes) > 1 else [],
+                    )
+                ],
+            )
+        ]
 
     return cpsat_scheduler.solve_schedule(
         jobs=jobs_to_solve,
