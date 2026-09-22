@@ -339,5 +339,46 @@ class OutboundQuotationMailer:
         logger.info("Outbound shortage notice email dispatched to %s for %s (%s)", recipient_email, order_number, sent_msg.dispatch_id)
         return sent_msg
 
+    @staticmethod
+    async def dispatch_catalog_mismatch_email(
+        recipient_email: str,
+        customer_name: str,
+        requested_sku: str,
+        requested_qty: float,
+        recommended_alternatives: list[dict[str, Any]] | None = None,
+        custom_body: str | None = None,
+        tenant_id: str = "00000000-0000-0000-0000-000000000001",
+    ) -> SentEmailMessage:
+        """Delivers catalog mismatch notification and product alternatives to buyer."""
+        subject = f"Regarding your order request for {requested_sku} - Product Availability Update"
+        if custom_body:
+            body = custom_body
+        else:
+            alt_lines = ""
+            if recommended_alternatives:
+                alt_lines = "\n\nOur available products and current stock include:\n" + "\n".join(
+                    [f"- {a.get('item_code')}: {a.get('item_name')} (${float(a.get('standard_rate', 0.0)):,.2f} each, {float(a.get('available_qty', 0.0)):,.0f} available)" for a in recommended_alternatives]
+                )
+            body = (
+                f"Dear {customer_name},\n\n"
+                f"Thank you for reaching out to us. We received your request for {requested_qty:,.0f} units of '{requested_sku}'.\n\n"
+                f"However, '{requested_sku}' is not currently available in our product catalog.{alt_lines}\n\n"
+                f"Please let us know if you would like to proceed with an order for any of our available products.\n\n"
+                f"Autonomous Sales & Customer Success\n"
+                f"AI-Native Enterprise Resource Planning"
+            )
+        sent_msg = SentEmailMessage(
+            recipient=recipient_email,
+            subject=subject,
+            body=body,
+            attachment_name=None,
+            attachment_size_bytes=0,
+            tenant_id=tenant_id,
+            status="NOTIFIED_CATALOG_MISMATCH",
+        )
+        mailbox.add_sent(sent_msg)
+        logger.info("Outbound catalog mismatch email dispatched to %s for %s (%s)", recipient_email, requested_sku, sent_msg.dispatch_id)
+        return sent_msg
+
 
 outbound_mailer = OutboundQuotationMailer()

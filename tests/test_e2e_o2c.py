@@ -330,6 +330,39 @@ async def test_autonomous_email_order_fulfillment_lifecycle():
         assert sys_data["dag_id"] is None
         assert sys_data["subtasks_spawned"] == 0
 
+        # Seed catalog item & stock for tenant
+        async with async_session_factory() as session:
+            wh = Warehouse(
+                tenant_id=tenant_id,
+                warehouse_code="WH-APEX-01",
+                warehouse_name="Apex Logistics Center",
+                is_active=True,
+            )
+            session.add(wh)
+            await session.flush()
+
+            item = Item(
+                tenant_id=tenant_id,
+                item_code="FG-ENCLOSURE-IP67",
+                item_name="Industrial FG-ENCLOSURE-IP67",
+                standard_rate=Decimal("1200.0000"),
+                is_active=True,
+            )
+            session.add(item)
+            await session.flush()
+
+            stk = StockLevel(
+                tenant_id=tenant_id,
+                item_id=item.item_id,
+                warehouse_id=wh.warehouse_id,
+                current_qty=Decimal("100.0000"),
+                reserved_qty=Decimal("0.0000"),
+                available_qty=Decimal("100.0000"),
+                valuation_rate=Decimal("1200.0000"),
+            )
+            session.add(stk)
+            await session.commit()
+
         # Step 2: Inbound Commercial Customer Purchase Order Email
         order_res = await client.post(
             "/api/v1/webhooks/email/inbound",
@@ -497,6 +530,39 @@ async def test_autonomous_email_order_shortage_backorder_lifecycle():
         tenant_id = uuid.UUID(reg_res.json()["user"]["tenant_id"])
         headers = {"Authorization": f"Bearer {token}"}
 
+        # Seed catalog with 100 units of FG-ENCLOSURE-IP67
+        async with async_session_factory() as session:
+            wh = Warehouse(
+                tenant_id=tenant_id,
+                warehouse_code="WH-TURBINE-01",
+                warehouse_name="Turbine Supply Hub",
+                is_active=True,
+            )
+            session.add(wh)
+            await session.flush()
+
+            item = Item(
+                tenant_id=tenant_id,
+                item_code="FG-ENCLOSURE-IP67",
+                item_name="Industrial FG-ENCLOSURE-IP67",
+                standard_rate=Decimal("1200.0000"),
+                is_active=True,
+            )
+            session.add(item)
+            await session.flush()
+
+            stk = StockLevel(
+                tenant_id=tenant_id,
+                item_id=item.item_id,
+                warehouse_id=wh.warehouse_id,
+                current_qty=Decimal("100.0000"),
+                reserved_qty=Decimal("0.0000"),
+                available_qty=Decimal("100.0000"),
+                valuation_rate=Decimal("1200.0000"),
+            )
+            session.add(stk)
+            await session.commit()
+
         # Customer sends PO for 250 units (warehouse has 100 units)
         order_res = await client.post(
             "/api/v1/webhooks/email/inbound",
@@ -559,4 +625,363 @@ async def test_autonomous_email_order_shortage_backorder_lifecycle():
         assert shortage_email is not None
         assert "Inventory Backorder" in shortage_email.subject
         assert "insufficient" in shortage_email.body.lower()
+
+
+@pytest.mark.asyncio
+async def test_gemini_email_order_catalog_matching_fulfillment():
+    """Verifies that when a customer emails an order for an available catalog item (e.g. CHASHM-001):
+    1. Gemini/order agent matches CHASHM-001 from tenant catalog.
+    2. Pulls real unit price ($10.00) and confirms stock (500 available >= 20 requested).
+    3. Provisions Sales Order for $200.00 total (20 * $10.00), NOT $24,000!
+    4. Delivers stock and posts $200.00 to General Ledger.
+    5. Dispatches official PDF Sales Invoice for CHASHM-001 to the customer.
+    """
+    import asyncio
+    from erp.events.email_gateway import mailbox
+    from erp.orchestration.orchestrator import chief_orchestrator
+
+    slug = f"chashm-pass-{uuid.uuid4().hex[:6]}"
+    email = f"sales@{slug}.com"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Register Tenant
+        reg_res = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "company_name": "Chashm Pvt Ltd",
+                "tenant_slug": slug,
+                "email": email,
+                "password": "PasswordChashm123!",
+                "full_name": "Chashm Admin",
+            },
+        )
+        assert reg_res.status_code == 201, reg_res.text
+        token = reg_res.json()["access_token"]
+        tenant_id = uuid.UUID(reg_res.json()["user"]["tenant_id"])
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Seed tenant warehouse and catalog items: CHASHM-001 ($10.00, 500 stock) and CHASHM ($5.00, 500 stock)
+        async with async_session_factory() as session:
+            wh = Warehouse(
+                tenant_id=tenant_id,
+                warehouse_code="WH-CHASHM-01",
+                warehouse_name="Chashm Primary Hub",
+                is_active=True,
+            )
+            session.add(wh)
+            await session.flush()
+
+            sensor_item = Item(
+                tenant_id=tenant_id,
+                item_code="CHASHM-001",
+                item_name="Wall Mounted Sensor",
+                standard_rate=Decimal("10.0000"),
+                is_active=True,
+            )
+            relay_item = Item(
+                tenant_id=tenant_id,
+                item_code="CHASHM",
+                item_name="Relay based Fan Regulator",
+                standard_rate=Decimal("5.0000"),
+                is_active=True,
+            )
+            session.add_all([sensor_item, relay_item])
+            await session.flush()
+
+            # Stock 500 units of each
+            sensor_stock = StockLevel(
+                tenant_id=tenant_id,
+                item_id=sensor_item.item_id,
+                warehouse_id=wh.warehouse_id,
+                current_qty=Decimal("500.0000"),
+                reserved_qty=Decimal("0.0000"),
+                available_qty=Decimal("500.0000"),
+                valuation_rate=Decimal("10.0000"),
+            )
+            relay_stock = StockLevel(
+                tenant_id=tenant_id,
+                item_id=relay_item.item_id,
+                warehouse_id=wh.warehouse_id,
+                current_qty=Decimal("500.0000"),
+                reserved_qty=Decimal("0.0000"),
+                available_qty=Decimal("500.0000"),
+                valuation_rate=Decimal("5.0000"),
+            )
+            session.add_all([sensor_stock, relay_stock])
+            await session.commit()
+
+        # Customer sends email ordering 20 pieces of CHASHM-001
+        order_res = await client.post(
+            "/api/v1/webhooks/email/inbound",
+            json={
+                "sender": "Hassaan Tahir <misterhassan58@gmail.com>",
+                "recipient": "orders@chashm.internal",
+                "subject": "Order for Chashm",
+                "body_text": "Hi, I want to order 20 pieces of CHASHM-001. Hassaan Tahir",
+            },
+            headers=headers,
+        )
+        assert order_res.status_code == 200, order_res.text
+        dag_id = order_res.json()["dag_id"]
+
+        dag = chief_orchestrator.get_dag(dag_id)
+        assert dag is not None
+
+        # Wait for DAG execution
+        for _ in range(30):
+            if dag.is_finished():
+                break
+            await asyncio.sleep(0.3)
+
+        assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
+
+        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        assert dag_res.status_code == 200
+        dag_details = dag_res.json()
+        assert dag_details["status"] == "COMPLETED"
+
+        nodes = {n["name"]: n for n in dag_details["nodes"]}
+
+        # 1. Verify Node 1 matched catalog item CHASHM-001
+        extract_out = nodes["Extract Order & Buyer Entity"]["output_result"]
+        assert extract_out["requested_sku"] == "CHASHM-001"
+        assert extract_out["quantity"] == 20.0
+        assert extract_out["target_unit_price"] == 10.0
+        assert extract_out["item_found_in_catalog"] is True
+
+        # 2. Verify Node 2 verified stock
+        stock_out = nodes["Check Inventory & Stock Availability"]["output_result"]
+        assert stock_out["is_in_stock"] is True
+        assert stock_out["fulfillment_status"] == "STOCK_AVAILABLE_READY_TO_FULFILL"
+
+        # 3. Verify Node 3 created Sales Order for $200.00 (NOT $24,000!)
+        prov_out = nodes["Auto-Provision Customer & Sales Order"]["output_result"]
+        assert prov_out["status"] == "CONFIRMED"
+        assert prov_out["order_total"] == 200.0
+        assert prov_out["target_unit_price"] == 10.0
+
+        # 4. Verify Node 4 fulfilled and invoiced $200.00
+        fin_out = nodes["Fulfill Delivery & Post Invoice to Ledger"]["output_result"]
+        assert fin_out["invoice_number"] is not None
+        assert fin_out["invoice_amount"] == 200.0
+        assert fin_out["gl_posted"] is True
+
+        # 5. Verify Node 5 dispatched email with invoice
+        disp_out = nodes["Dispatch Order Confirmation & Invoice"]["output_result"]
+        assert disp_out["confirmation_dispatched"] is True
+        assert disp_out["email_type"] == "SALES_INVOICE_DISPATCH"
+        assert disp_out["invoice_amount"] == 200.0
+        assert disp_out["recipient"] == "misterhassan58@gmail.com"
+
+        # 6. Verify Database State
+        async with async_session_factory() as session:
+            so = (
+                await session.execute(
+                    select(SalesOrder).where(
+                        SalesOrder.tenant_id == tenant_id,
+                        SalesOrder.order_number == prov_out["order_number"],
+                    )
+                )
+            ).scalar_one_or_none()
+            assert so is not None
+            assert so.total_amount == Decimal("200.0000")
+
+            inv = (
+                await session.execute(
+                    select(SalesInvoice).where(
+                        SalesInvoice.tenant_id == tenant_id,
+                        SalesInvoice.invoice_number == fin_out["invoice_number"],
+                    )
+                )
+            ).scalar_one_or_none()
+            assert inv is not None
+            assert inv.total_amount == Decimal("200.0000")
+
+            # Verify GL entries are exactly $200.00
+            gle_lines = (
+                await session.execute(
+                    select(GeneralLedgerEntry).where(
+                        GeneralLedgerEntry.tenant_id == tenant_id,
+                        GeneralLedgerEntry.source_document_id == inv.invoice_id,
+                    )
+                )
+            ).scalars().all()
+            assert len(gle_lines) == 2
+            ar_line = next(l for l in gle_lines if l.account_code == "1200-AR-CUSTOMERS")
+            rev_line = next(l for l in gle_lines if l.account_code == "4000-SALES-REVENUE")
+            assert ar_line.debit_amount == Decimal("200.0000")
+            assert rev_line.credit_amount == Decimal("200.0000")
+
+
+@pytest.mark.asyncio
+async def test_gemini_email_order_unavailable_item_recommendation():
+    """Verifies that when a customer emails ordering an unavailable SKU (e.g. CHASHM-002):
+    1. Gemini/order agent detects CHASHM-002 does NOT exist in catalog.
+    2. Does NOT create fake items or fake stock levels.
+    3. Holds invoicing & fulfillment (no Delivery Note, no Sales Invoice, no GL posting).
+    4. Automatically emails customer explaining CHASHM-002 is unavailable and recommending CHASHM-001 and CHASHM!
+    """
+    import asyncio
+    from erp.events.email_gateway import mailbox
+    from erp.orchestration.orchestrator import chief_orchestrator
+
+    slug = f"chashm-miss-{uuid.uuid4().hex[:6]}"
+    email = f"sales@{slug}.com"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Register Tenant
+        reg_res = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "company_name": "Chashm Pvt Ltd",
+                "tenant_slug": slug,
+                "email": email,
+                "password": "PasswordChashm123!",
+                "full_name": "Chashm Admin",
+            },
+        )
+        assert reg_res.status_code == 201, reg_res.text
+        token = reg_res.json()["access_token"]
+        tenant_id = uuid.UUID(reg_res.json()["user"]["tenant_id"])
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Seed catalog with ONLY CHASHM-001 and CHASHM (CHASHM-002 does NOT exist!)
+        async with async_session_factory() as session:
+            wh = Warehouse(
+                tenant_id=tenant_id,
+                warehouse_code="WH-CHASHM-01",
+                warehouse_name="Chashm Primary Hub",
+                is_active=True,
+            )
+            session.add(wh)
+            await session.flush()
+
+            sensor_item = Item(
+                tenant_id=tenant_id,
+                item_code="CHASHM-001",
+                item_name="Wall Mounted Sensor",
+                standard_rate=Decimal("10.0000"),
+                is_active=True,
+            )
+            relay_item = Item(
+                tenant_id=tenant_id,
+                item_code="CHASHM",
+                item_name="Relay based Fan Regulator",
+                standard_rate=Decimal("5.0000"),
+                is_active=True,
+            )
+            session.add_all([sensor_item, relay_item])
+            await session.flush()
+
+            sensor_stock = StockLevel(
+                tenant_id=tenant_id,
+                item_id=sensor_item.item_id,
+                warehouse_id=wh.warehouse_id,
+                current_qty=Decimal("500.0000"),
+                reserved_qty=Decimal("0.0000"),
+                available_qty=Decimal("500.0000"),
+                valuation_rate=Decimal("10.0000"),
+            )
+            relay_stock = StockLevel(
+                tenant_id=tenant_id,
+                item_id=relay_item.item_id,
+                warehouse_id=wh.warehouse_id,
+                current_qty=Decimal("500.0000"),
+                reserved_qty=Decimal("0.0000"),
+                available_qty=Decimal("500.0000"),
+                valuation_rate=Decimal("5.0000"),
+            )
+            session.add_all([sensor_stock, relay_stock])
+            await session.commit()
+
+        # Customer sends the exact user email: ordering 20 pieces of CHASHM-002
+        order_res = await client.post(
+            "/api/v1/webhooks/email/inbound",
+            json={
+                "sender": "Hassaan Tahir <misterhassan58@gmail.com>",
+                "recipient": "orders@chashm.internal",
+                "subject": "Order for Chashm",
+                "body_text": "Hi, I want to order 20 pieces of CHASHM-002. Hassaan Tahir",
+            },
+            headers=headers,
+        )
+        assert order_res.status_code == 200, order_res.text
+        dag_id = order_res.json()["dag_id"]
+
+        dag = chief_orchestrator.get_dag(dag_id)
+        assert dag is not None
+
+        # Wait for DAG execution
+        for _ in range(30):
+            if dag.is_finished():
+                break
+            await asyncio.sleep(0.3)
+
+        assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
+
+        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        assert dag_res.status_code == 200
+        dag_details = dag_res.json()
+        assert dag_details["status"] == "COMPLETED"
+
+        nodes = {n["name"]: n for n in dag_details["nodes"]}
+
+        # 1. Node 1 flags item is NOT in catalog
+        extract_out = nodes["Extract Order & Buyer Entity"]["output_result"]
+        assert extract_out["raw_item_query"] == "CHASHM-002"
+        assert extract_out["item_found_in_catalog"] is False
+        assert extract_out["catalog_match_status"] == "NOT_IN_CATALOG"
+
+        # 2. Node 2 flags fulfillment feasibility failed
+        stock_out = nodes["Check Inventory & Stock Availability"]["output_result"]
+        assert stock_out["is_in_stock"] is False
+        assert stock_out["fulfillment_status"] == "ITEM_NOT_FOUND_IN_CATALOG"
+
+        # 3. Node 3 does NOT create confirmed sales order
+        prov_out = nodes["Auto-Provision Customer & Sales Order"]["output_result"]
+        assert prov_out["status"] == "REJECTED_CATALOG_MISMATCH"
+        assert prov_out["order_total"] == 0.0
+
+        # 4. Node 4 holds fulfillment and generates NO invoice
+        fin_out = nodes["Fulfill Delivery & Post Invoice to Ledger"]["output_result"]
+        assert fin_out["delivery_note_number"] is None
+        assert fin_out["invoice_number"] is None
+        assert fin_out["fulfillment_status"] == "ITEM_NOT_IN_CATALOG_HELD"
+
+        # 5. Node 5 sends catalog mismatch recommendation email
+        disp_out = nodes["Dispatch Order Confirmation & Invoice"]["output_result"]
+        assert disp_out["confirmation_dispatched"] is True
+        assert disp_out["email_type"] == "CATALOG_MISMATCH_RECOMMENDATION"
+        assert disp_out["stock_status"] == "ITEM_NOT_IN_CATALOG"
+        assert disp_out["recipient"] == "misterhassan58@gmail.com"
+
+        # 6. Verify Sent Mailbox contains the catalog notification with alternatives
+        sent_emails = mailbox.get_sent(str(tenant_id))
+        notif_email = next((m for m in sent_emails if m.recipient == "misterhassan58@gmail.com"), None)
+        assert notif_email is not None
+        assert "CHASHM-002" in notif_email.subject or "CHASHM-002" in notif_email.body
+        assert "not currently available" in notif_email.body or "not" in notif_email.body.lower()
+        # Verify recommended catalog alternatives are mentioned!
+        assert "CHASHM-001" in notif_email.body
+        assert "CHASHM" in notif_email.body
+
+        # 7. Verify NO bogus invoices or fake items in DB
+        async with async_session_factory() as session:
+            fake_item = (
+                await session.execute(
+                    select(Item).where(
+                        Item.tenant_id == tenant_id,
+                        Item.item_code == "CHASHM-002",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert fake_item is None  # Never fabricated!
+
+            invoices = (
+                await session.execute(
+                    select(SalesInvoice).where(SalesInvoice.tenant_id == tenant_id)
+                )
+            ).scalars().all()
+            assert len(invoices) == 0  # No invoice created!
+
 

@@ -196,11 +196,15 @@ class BamlClient:
             generic_qty = re.search(r"\b(\d+)\b", rfq_text)
             qty = Decimal(generic_qty.group(1)) if generic_qty else Decimal("100.0000")
 
-        # Look for SKU / enclosure code (prioritize FG- prefix and avoid PO-/INV- matches)
-        sku_match = re.search(r"\b(FG-[A-Z0-9-]+)\b", rfq_text)
-        if not sku_match:
-            sku_match = re.search(r"\b(?!PO-)(?!INV-)([A-Z]{2,4}-\d{3,5})\b", rfq_text)
-        sku = sku_match.group(1) if sku_match else "FG-ENCLOSURE-IP67"
+        # Look for SKU / product code (support phrases like 'pieces of CHASHM-002', general SKUs, or FG- prefixes)
+        sku_phrase = re.search(r"(?:pieces|units|pcs|items|nos|order)\s+(?:of|for)\s+([A-Za-z0-9_-]+)", rfq_text, re.IGNORECASE)
+        if sku_phrase:
+            sku = sku_phrase.group(1).strip()
+        else:
+            sku_match = re.search(r"\b(FG-[A-Z0-9-]+)\b", rfq_text)
+            if not sku_match:
+                sku_match = re.search(r"\b(?!PO-)(?!INV-)(?!DN-)([A-Za-z0-9]{2,15}(?:-[A-Za-z0-9]+)+)\b", rfq_text)
+            sku = sku_match.group(1) if sku_match else ("FG-ENCLOSURE-IP67" if "enclosure" in rfq_text.lower() else "ITEM-CATALOG")
 
         # Look for target unit price
         price_match = re.search(r"(?:\$|USD\s*)(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:/unit|per unit)", rfq_text, re.IGNORECASE)
@@ -221,7 +225,7 @@ class BamlClient:
         confidence = 0.50
         if email_match:
             confidence += 0.15
-        if sku_match:
+        if sku and sku != "ITEM-CATALOG":
             confidence += 0.15
         if qty_match:
             confidence += 0.10

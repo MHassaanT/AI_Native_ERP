@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -62,7 +63,10 @@ async def ingest_email_webhook(
         body_text=payload.body_text,
         recipient=payload.recipient,
     )
-    cust_name = payload.sender.split("<")[0].strip().replace('"', "") or "Enterprise Customer"
+    email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", payload.sender)
+    cust_email = email_match.group(0) if email_match else payload.sender
+    name_part = payload.sender.split("<")[0].strip().replace('"', "")
+    cust_name = name_part if (name_part and "@" not in name_part) else "Enterprise Customer"
 
     # Filter out automated system notifications (Google alerts, noreply, security warnings)
     if classification.intent == EmailIntent.SYSTEM_NOTIFICATION:
@@ -97,7 +101,8 @@ async def ingest_email_webhook(
             tenant_id=tenant_id,
             order_payload={
                 "customer_name": cust_name,
-                "customer_email": payload.sender,
+                "customer_email": cust_email,
+                "sender": payload.sender,
                 "inquiry_text": f"Subject: {payload.subject}\n\n{payload.body_text}",
                 "attachments": payload.attachments,
             },
@@ -107,7 +112,8 @@ async def ingest_email_webhook(
             tenant_id=tenant_id,
             rfq_payload={
                 "customer_name": cust_name,
-                "customer_email": payload.sender,
+                "customer_email": cust_email,
+                "sender": payload.sender,
                 "inquiry_text": f"Subject: {payload.subject}\n\n{payload.body_text}",
                 "attachments": payload.attachments,
             },

@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
 
+    # Google Gemini AI
+    GEMINI_API_KEY: str | None = None
+
     # Inbound SMTP Gateway (False by default in production web containers to prevent port conflict)
     ENABLE_SMTP_GATEWAY: bool = False
 
