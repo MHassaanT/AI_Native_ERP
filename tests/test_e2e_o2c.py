@@ -278,3 +278,285 @@ async def test_order_to_cash_full_lifecycle():
             ).scalar_one()
             assert sinv.status == "PAID", f"Expected invoice status PAID, got {sinv.status}"
 
+
+@pytest.mark.asyncio
+async def test_autonomous_email_order_fulfillment_lifecycle():
+    """Verifies:
+    1. System notifications (Google OAuth alerts) are filtered out with ZERO spurious DAGs created.
+    2. Real customer Purchase Order emails are classified as CUSTOMER_ORDER.
+    3. Multi-agent DAG automatically checks warehouse stock availability.
+    4. Auto-provisions Customer, Confirmed Sales Order, and reserves inventory.
+    5. Fulfills Delivery Note, deducts physical inventory, records StockLedgerEntry, issues Sales Invoice, and posts GL double entries.
+    6. Dispatches order confirmation without human intervention.
+    """
+    import asyncio
+    from erp.orchestration.orchestrator import chief_orchestrator
+
+    slug = f"auto-ord-{uuid.uuid4().hex[:6]}"
+    email = f"ops@{slug}.com"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Register Tenant
+        reg_res = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "company_name": "Autonomous Logistics Corp",
+                "tenant_slug": slug,
+                "email": email,
+                "password": "PasswordAuto123!",
+                "full_name": "Operations Lead",
+            },
+        )
+        assert reg_res.status_code == 201, reg_res.text
+        token = reg_res.json()["access_token"]
+        tenant_id = uuid.UUID(reg_res.json()["user"]["tenant_id"])
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Step 1: Filter Google OAuth / System Security Alert Email
+        sys_res = await client.post(
+            "/api/v1/webhooks/email/inbound",
+            json={
+                "sender": "Google <no-reply@accounts.google.com>",
+                "recipient": "admin@company.internal",
+                "subject": "Security alert: You allowed ai-native-erp-rho.vercel.app access to some of your Google Account data",
+                "body_text": "If you didn't grant access, you should check your security activity. Google Community Team.",
+            },
+            headers=headers,
+        )
+        assert sys_res.status_code == 200, sys_res.text
+        sys_data = sys_res.json()
+        assert sys_data["status"] == "FILTERED"
+        assert sys_data["intent"] == "SYSTEM_NOTIFICATION"
+        assert sys_data["dag_id"] is None
+        assert sys_data["subtasks_spawned"] == 0
+
+        # Step 2: Inbound Commercial Customer Purchase Order Email
+        order_res = await client.post(
+            "/api/v1/webhooks/email/inbound",
+            json={
+                "sender": "procurement@apex-defense.com",
+                "recipient": "orders@company.internal",
+                "subject": "Purchase Order PO-APEX-9001 for 15 units FG-ENCLOSURE-IP67",
+                "body_text": "Please accept our Purchase Order PO-APEX-9001 for 15 units of FG-ENCLOSURE-IP67 at $1200/unit. Prompt delivery requested.",
+            },
+            headers=headers,
+        )
+        assert order_res.status_code == 200, order_res.text
+        order_data = order_res.json()
+        assert order_data["status"] == "INGESTED"
+        assert order_data["intent"] == "CUSTOMER_ORDER"
+        dag_id = order_data["dag_id"]
+        assert dag_id is not None
+        assert order_data["subtasks_spawned"] == 5
+
+        # Wait for the background DAG execution to complete
+        dag = chief_orchestrator.get_dag(dag_id)
+        assert dag is not None
+
+        for _ in range(30):
+            if dag.is_finished():
+                break
+            await asyncio.sleep(0.3)
+
+        assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
+
+        # Verify DAG state via GET endpoint
+        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        assert dag_res.status_code == 200
+        dag_details = dag_res.json()
+        assert dag_details["status"] == "COMPLETED"
+
+        nodes = {n["name"]: n for n in dag_details["nodes"]}
+
+        # 1. Extraction node
+        assert "Extract Order & Buyer Entity" in nodes
+        extract_out = nodes["Extract Order & Buyer Entity"]["output_result"]
+        assert extract_out["intent"] == "CUSTOMER_ORDER"
+        assert extract_out["po_number"] == "PO-APEX-9001"
+
+        # 2. Stock Availability Check
+        assert "Check Inventory & Stock Availability" in nodes
+        stock_out = nodes["Check Inventory & Stock Availability"]["output_result"]
+        assert stock_out["is_in_stock"] is True
+        assert stock_out["fulfillment_status"] == "STOCK_AVAILABLE_READY_TO_FULFILL"
+
+        # 3. Customer & Sales Order Auto-Provisioning
+        assert "Auto-Provision Customer & Sales Order" in nodes
+        prov_out = nodes["Auto-Provision Customer & Sales Order"]["output_result"]
+        assert prov_out["status"] == "CONFIRMED"
+        assert prov_out["order_number"] == "SO-APEX-9001"
+        assert prov_out["stock_reserved"] == 15.0
+
+        # 4. Delivery & Financial Controller GL Posting
+        assert "Fulfill Delivery & Post Invoice to Ledger" in nodes
+        fin_out = nodes["Fulfill Delivery & Post Invoice to Ledger"]["output_result"]
+        assert fin_out["delivery_note_number"] == "DN-SO-APEX-9001"
+        assert fin_out["invoice_number"] == "INV-APEX-9001"
+        assert fin_out["general_ledger_status"] == "COMMITTED_AR_AND_REVENUE"
+
+        # 5. Outbound Confirmation
+        assert "Dispatch Order Confirmation & Invoice" in nodes
+        disp_out = nodes["Dispatch Order Confirmation & Invoice"]["output_result"]
+        assert disp_out["confirmation_dispatched"] is True
+
+        # Verify Database Records
+        async with async_session_factory() as session:
+            # Verify Customer created
+            cust = (
+                await session.execute(
+                    select(Customer).where(
+                        Customer.tenant_id == tenant_id,
+                        Customer.email == "procurement@apex-defense.com",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert cust is not None
+
+            # Verify Sales Order CONFIRMED
+            so = (
+                await session.execute(
+                    select(SalesOrder).where(
+                        SalesOrder.tenant_id == tenant_id,
+                        SalesOrder.order_number == "SO-APEX-9001",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert so is not None
+            assert so.status == "CONFIRMED"
+
+            # Verify Delivery Note COMPLETED
+            dn = (
+                await session.execute(
+                    select(DeliveryNote).where(
+                        DeliveryNote.tenant_id == tenant_id,
+                        DeliveryNote.delivery_note_number == "DN-SO-APEX-9001",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert dn is not None
+            assert dn.status == "COMPLETED"
+
+            # Verify Sales Invoice ISSUED
+            inv = (
+                await session.execute(
+                    select(SalesInvoice).where(
+                        SalesInvoice.tenant_id == tenant_id,
+                        SalesInvoice.invoice_number == "INV-APEX-9001",
+                    )
+                )
+            ).scalar_one_or_none()
+            assert inv is not None
+            assert inv.status == "ISSUED"
+
+            # Verify General Ledger Entries
+            gle_lines = (
+                await session.execute(
+                    select(GeneralLedgerEntry).where(
+                        GeneralLedgerEntry.tenant_id == tenant_id,
+                        GeneralLedgerEntry.source_document_id == inv.invoice_id,
+                    )
+                )
+            ).scalars().all()
+            assert len(gle_lines) == 2
+            ar_line = next(l for l in gle_lines if l.account_code == "1200-AR-CUSTOMERS")
+            rev_line = next(l for l in gle_lines if l.account_code == "4000-SALES-REVENUE")
+            assert ar_line.debit_amount == Decimal("18000.0000")
+            assert rev_line.credit_amount == Decimal("18000.0000")
+
+
+@pytest.mark.asyncio
+async def test_autonomous_email_order_shortage_backorder_lifecycle():
+    """Verifies that when customer orders more quantity than available in warehouse:
+    1. Node 2 flags shortage (is_in_stock = False).
+    2. Node 3 creates SalesOrder with status BACKORDERED.
+    3. Node 4 holds fulfillment without shipping or generating invoice.
+    4. Node 5 dispatches an automated Backorder Notification email to the buyer detailing lead time.
+    5. The notification is recorded in the sent mailbox.
+    """
+    import asyncio
+    from erp.events.email_gateway import mailbox
+    from erp.orchestration.orchestrator import chief_orchestrator
+
+    slug = f"shortage-{uuid.uuid4().hex[:6]}"
+    email = f"supply@{slug}.com"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Register Tenant
+        reg_res = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "company_name": "Heavy Machinery Supply Corp",
+                "tenant_slug": slug,
+                "email": email,
+                "password": "PasswordShort123!",
+                "full_name": "Supply Manager",
+            },
+        )
+        assert reg_res.status_code == 201, reg_res.text
+        token = reg_res.json()["access_token"]
+        tenant_id = uuid.UUID(reg_res.json()["user"]["tenant_id"])
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Customer sends PO for 250 units (warehouse has 100 units)
+        order_res = await client.post(
+            "/api/v1/webhooks/email/inbound",
+            json={
+                "sender": "purchasing@turbine-dynamics.com",
+                "recipient": "orders@company.internal",
+                "subject": "Purchase Order PO-TURBINE-550 for 250 units FG-ENCLOSURE-IP67",
+                "body_text": "Please process our firm Purchase Order PO-TURBINE-550 for 250 units of FG-ENCLOSURE-IP67. Delivery needed urgently.",
+            },
+            headers=headers,
+        )
+        assert order_res.status_code == 200, order_res.text
+        dag_id = order_res.json()["dag_id"]
+
+        dag = chief_orchestrator.get_dag(dag_id)
+        assert dag is not None
+
+        # Wait for DAG execution
+        for _ in range(30):
+            if dag.is_finished():
+                break
+            await asyncio.sleep(0.3)
+
+        assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
+
+        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        assert dag_res.status_code == 200
+        dag_details = dag_res.json()
+        assert dag_details["status"] == "COMPLETED"
+
+        nodes = {n["name"]: n for n in dag_details["nodes"]}
+
+        # 1. Stock check flagged shortage
+        stock_out = nodes["Check Inventory & Stock Availability"]["output_result"]
+        assert stock_out["is_in_stock"] is False
+        assert stock_out["fulfillment_status"] == "SHORTAGE_BACKORDER_TRIGGERED"
+        assert stock_out["requested_qty"] == 250.0
+
+        # 2. Sales Order marked BACKORDERED
+        prov_out = nodes["Auto-Provision Customer & Sales Order"]["output_result"]
+        assert prov_out["status"] == "BACKORDERED"
+        assert prov_out["stock_reserved"] == 0.0
+
+        # 3. Delivery & Invoicing held
+        fin_out = nodes["Fulfill Delivery & Post Invoice to Ledger"]["output_result"]
+        assert fin_out["delivery_note_number"] is None
+        assert fin_out["invoice_number"] is None
+        assert fin_out["fulfillment_status"] == "SHORTAGE_BACKORDER_HELD"
+
+        # 4. Outbound shortage notification sent to customer
+        disp_out = nodes["Dispatch Order Confirmation & Invoice"]["output_result"]
+        assert disp_out["confirmation_dispatched"] is True
+        assert disp_out["email_type"] == "INVENTORY_SHORTAGE_NOTIFICATION"
+        assert disp_out["stock_status"] == "SHORTAGE_BACKORDERED"
+        assert disp_out["recipient"] == "purchasing@turbine-dynamics.com"
+
+        # 5. Verify email recorded in sent mailbox
+        sent_emails = mailbox.get_sent(str(tenant_id))
+        shortage_email = next((m for m in sent_emails if m.recipient == "purchasing@turbine-dynamics.com"), None)
+        assert shortage_email is not None
+        assert "Inventory Backorder" in shortage_email.subject
+        assert "insufficient" in shortage_email.body.lower()
+

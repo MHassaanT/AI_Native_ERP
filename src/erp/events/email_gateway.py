@@ -18,7 +18,9 @@ from aiosmtpd.controller import Controller
 from pydantic import BaseModel, Field
 
 from erp.config import settings
+from erp.events.email_classifier import EmailIntent, classify_inbound_email
 from erp.orchestration.orchestrator import chief_orchestrator
+from erp.orchestration.worker import dag_executor
 
 logger = logging.getLogger(__name__)
 
@@ -128,27 +130,56 @@ class SMTPEmailHandler:
                 body_text = msg.get_content()
 
             # Classify event type
-            subject_lower = subject.lower()
-            body_lower = body_text.lower()
-            if "invoice" in subject_lower or "invoice" in recipient.lower() or "bill" in subject_lower:
-                event_type = "erp.supplychain.invoice_received"
-            else:
-                event_type = "erp.crm.inbound_rfq_email"
+            classification = classify_inbound_email(
+                sender=sender,
+                subject=subject,
+                body_text=body_text,
+                recipient=recipient,
+            )
+
+            # Filter out non-commercial system notifications
+            if classification.intent == EmailIntent.SYSTEM_NOTIFICATION:
+                logger.info("Filtered system notification from %s (Subject: %s)", sender, subject)
+                ingested = IngestedEmailMessage(
+                    sender=sender,
+                    recipient=recipient,
+                    subject=subject,
+                    body_text=body_text or "(Empty Body)",
+                    body_html=body_html,
+                    attachments=attachments,
+                    event_type=classification.event_type,
+                    tenant_id=str(tenant_uuid),
+                    status="FILTERED_NOTIFICATION",
+                    associated_dag_id=None,
+                )
+                mailbox.add_inbox(ingested)
+                return "250 Message accepted (system notification archived)"
 
             # Parse customer name from sender
             cust_name = sender.split("<")[0].strip().replace('"', "") or "Enterprise Customer"
 
             # Formulate DAG via Chief Orchestrator
             tenant_uuid = uuid.UUID("00000000-0000-0000-0000-000000000001")
-            dag = chief_orchestrator.build_rfq_workflow_dag(
-                tenant_id=tenant_uuid,
-                rfq_payload={
-                    "customer_name": cust_name,
-                    "customer_email": sender,
-                    "inquiry_text": body_text or subject,
-                    "attachments": [a.filename for a in attachments],
-                },
-            )
+            if classification.intent == EmailIntent.CUSTOMER_ORDER:
+                dag = chief_orchestrator.build_order_fulfillment_workflow_dag(
+                    tenant_id=tenant_uuid,
+                    order_payload={
+                        "customer_name": cust_name,
+                        "customer_email": sender,
+                        "inquiry_text": body_text or subject,
+                        "attachments": [a.filename for a in attachments],
+                    },
+                )
+            else:
+                dag = chief_orchestrator.build_rfq_workflow_dag(
+                    tenant_id=tenant_uuid,
+                    rfq_payload={
+                        "customer_name": cust_name,
+                        "customer_email": sender,
+                        "inquiry_text": body_text or subject,
+                        "attachments": [a.filename for a in attachments],
+                    },
+                )
 
             ingested = IngestedEmailMessage(
                 sender=sender,
@@ -157,12 +188,14 @@ class SMTPEmailHandler:
                 body_text=body_text or "(Empty Body)",
                 body_html=body_html,
                 attachments=attachments,
-                event_type=event_type,
+                event_type=classification.event_type,
                 tenant_id=str(tenant_uuid),
                 status="DISPATCHED_TO_MESH",
                 associated_dag_id=dag.dag_id,
             )
             mailbox.add_inbox(ingested)
+            # Execute DAG asynchronously
+            asyncio.create_task(dag_executor.execute_dag(dag))
             logger.info("Ingested email from %s: '%s' -> DAG %s", sender, subject, dag.dag_id)
 
             return "250 Message accepted for delivery to MAS Mesh"
@@ -231,6 +264,79 @@ class OutboundQuotationMailer:
         )
         mailbox.add_sent(sent_msg)
         logger.info("Outbound quote email dispatched to %s for %s (%s)", recipient_email, quote_number, sent_msg.dispatch_id)
+        return sent_msg
+
+    @staticmethod
+    async def dispatch_invoice_email(
+        recipient_email: str,
+        customer_name: str,
+        order_number: str,
+        invoice_number: str,
+        total_amount: float,
+        pdf_bytes: bytes | None = None,
+        tenant_id: str = "00000000-0000-0000-0000-000000000001",
+    ) -> SentEmailMessage:
+        """Delivers official Sales Invoice PDF to buyer upon order fulfillment."""
+        subject = f"Order Confirmation & Sales Invoice {invoice_number} for Order {order_number}"
+        body = (
+            f"Dear {customer_name},\n\n"
+            f"Thank you for your order {order_number}! Your purchase has been confirmed and fulfilled.\n\n"
+            f"Order Reference: {order_number}\n"
+            f"Sales Invoice: {invoice_number}\n"
+            f"Total Amount: ${total_amount:,.2f} USD\n\n"
+            f"Your order has been allocated and delivered from our warehouse. "
+            f"Please find attached your official Sales Invoice PDF.\n\n"
+            f"Autonomous Revenue & Fulfillment Agent\n"
+            f"AI-Native Enterprise Resource Planning"
+        )
+        sent_msg = SentEmailMessage(
+            recipient=recipient_email,
+            subject=subject,
+            body=body,
+            attachment_name=f"{invoice_number}.pdf",
+            attachment_size_bytes=len(pdf_bytes) if pdf_bytes else 4520,
+            tenant_id=tenant_id,
+            status="DELIVERED_300S_SLA",
+        )
+        mailbox.add_sent(sent_msg)
+        logger.info("Outbound invoice email dispatched to %s for %s (%s)", recipient_email, invoice_number, sent_msg.dispatch_id)
+        return sent_msg
+
+    @staticmethod
+    async def dispatch_shortage_notice_email(
+        recipient_email: str,
+        customer_name: str,
+        order_number: str,
+        requested_sku: str,
+        requested_qty: float,
+        available_qty: float,
+        lead_time_days: int = 7,
+        tenant_id: str = "00000000-0000-0000-0000-000000000001",
+    ) -> SentEmailMessage:
+        """Delivers inventory shortage and backorder lead-time notice to buyer."""
+        subject = f"Order Notification: Inventory Backorder Update for Order {order_number}"
+        body = (
+            f"Dear {customer_name},\n\n"
+            f"Thank you for your order {order_number} for {requested_qty:,.0f} units of {requested_sku}.\n\n"
+            f"Our autonomous inventory engine has verified current stock availability. "
+            f"We currently have {available_qty:,.0f} units on hand, which is insufficient to immediately fulfill your full request.\n\n"
+            f"We have automatically placed your order on prioritized BACKORDER and triggered an immediate "
+            f"manufacturing replenishment work order. The estimated delivery lead time is {lead_time_days} business days.\n\n"
+            f"We apologize for the brief delay and will send you a dispatch notification and invoice as soon as the batch is completed.\n\n"
+            f"Autonomous Supply Chain Operations\n"
+            f"AI-Native Enterprise Resource Planning"
+        )
+        sent_msg = SentEmailMessage(
+            recipient=recipient_email,
+            subject=subject,
+            body=body,
+            attachment_name=None,
+            attachment_size_bytes=0,
+            tenant_id=tenant_id,
+            status="NOTIFIED_INVENTORY_SHORTAGE",
+        )
+        mailbox.add_sent(sent_msg)
+        logger.info("Outbound shortage notice email dispatched to %s for %s (%s)", recipient_email, order_number, sent_msg.dispatch_id)
         return sent_msg
 
 

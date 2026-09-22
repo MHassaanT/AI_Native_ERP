@@ -12,6 +12,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
+import asyncio
 from typing import Any
 import urllib.parse
 import uuid
@@ -24,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp.config import settings
 from erp.db.models.tenant import TenantOAuthConnection
 from erp.db.session import async_session_factory
+from erp.events.email_classifier import EmailIntent, classify_inbound_email
 from erp.events.email_gateway import (
     EmailAttachment,
     IngestedEmailMessage,
@@ -31,6 +33,7 @@ from erp.events.email_gateway import (
     mailbox,
 )
 from erp.orchestration.orchestrator import chief_orchestrator
+from erp.orchestration.worker import dag_executor
 
 logger = logging.getLogger(__name__)
 
@@ -494,34 +497,70 @@ class GmailIntegrationService:
                     )
                 )
 
-        event_type = (
-            "erp.supplychain.invoice_received"
-            if "invoice" in subject.lower() or "bill" in subject.lower()
-            else "erp.crm.inbound_rfq_email"
+        recipient = headers.get("to", "inbox@company.internal")
+        classification = classify_inbound_email(
+            sender=sender,
+            subject=subject,
+            body_text=body_text,
+            recipient=recipient,
         )
 
         try:
             tenant_uuid = uuid.UUID(str(tenant_id))
         except Exception:
             tenant_uuid = settings.DEFAULT_TENANT_ID
-        dag = chief_orchestrator.build_rfq_workflow_dag(
-            tenant_id=tenant_uuid,
-            rfq_payload={
-                "customer_name": sender,
-                "customer_email": sender,
-                "inquiry_text": body_text or subject,
-                "attachments": [a.filename for a in attachments],
-            },
-        )
+
+        # If system alert, security notification, or non-commercial email, filter it out
+        if classification.intent == EmailIntent.SYSTEM_NOTIFICATION:
+            logger.info("Filtered non-commercial system email from %s: '%s'", sender, subject)
+            return IngestedEmailMessage(
+                message_id=msg_data.get("id", f"msg_{uuid.uuid4().hex[:8]}"),
+                sender=sender,
+                recipient=recipient,
+                subject=subject,
+                body_text=body_text,
+                attachments=attachments,
+                event_type=classification.event_type,
+                tenant_id=tenant_id,
+                status="FILTERED_NOTIFICATION",
+                associated_dag_id=None,
+            )
+
+        cust_name = sender.split("<")[0].strip().replace('"', "") or "Enterprise Customer"
+
+        # Build appropriate DAG
+        if classification.intent == EmailIntent.CUSTOMER_ORDER:
+            dag = chief_orchestrator.build_order_fulfillment_workflow_dag(
+                tenant_id=tenant_uuid,
+                order_payload={
+                    "customer_name": cust_name,
+                    "customer_email": sender,
+                    "inquiry_text": f"Subject: {subject}\n\n{body_text}",
+                    "attachments": [a.filename for a in attachments],
+                },
+            )
+        else:
+            dag = chief_orchestrator.build_rfq_workflow_dag(
+                tenant_id=tenant_uuid,
+                rfq_payload={
+                    "customer_name": cust_name,
+                    "customer_email": sender,
+                    "inquiry_text": f"Subject: {subject}\n\n{body_text}",
+                    "attachments": [a.filename for a in attachments],
+                },
+            )
+
+        # Trigger DAG execution across agent mesh immediately
+        asyncio.create_task(dag_executor.execute_dag(dag))
 
         return IngestedEmailMessage(
             message_id=msg_data.get("id", f"msg_{uuid.uuid4().hex[:8]}"),
             sender=sender,
-            recipient=headers.get("to", "inbox@company.internal"),
+            recipient=recipient,
             subject=subject,
             body_text=body_text,
             attachments=attachments,
-            event_type=event_type,
+            event_type=classification.event_type,
             tenant_id=tenant_id,
             status="DISPATCHED_TO_MESH",
             associated_dag_id=dag.dag_id,

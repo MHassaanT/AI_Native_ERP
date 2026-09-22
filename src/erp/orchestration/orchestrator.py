@@ -85,6 +85,61 @@ class ChiefOrchestrator:
         self.active_dags[dag.dag_id] = dag
         return dag
 
+    def build_order_fulfillment_workflow_dag(
+        self,
+        tenant_id: uuid.UUID,
+        order_payload: dict[str, Any],
+    ) -> TaskDAG:
+        """Constructs an end-to-end autonomous fulfillment DAG for customer purchase orders."""
+        dag = TaskDAG(
+            dag_id=f"dag_order_{uuid.uuid4().hex[:6]}",
+            tenant_id=str(tenant_id),
+            customer_name=order_payload.get("customer_name") or "Commercial Customer",
+            inquiry_text=order_payload.get("inquiry_text") or f"Inbound Order from {order_payload.get('customer_name')}",
+        )
+
+        # Node 1: Extract & Validate Order Document
+        t1 = dag.add_node(
+            name="Extract Order & Buyer Entity",
+            agent_id="REVENUE",
+            input_payload={**order_payload, "tenant_id": str(tenant_id)},
+        )
+
+        # Node 2: Check Warehouse Stock Availability & Feasibility
+        t2 = dag.add_node(
+            name="Check Inventory & Stock Availability",
+            agent_id="SUPPLY_CHAIN",
+            dependencies=[t1.task_id],
+            input_payload={"tenant_id": str(tenant_id)},
+        )
+
+        # Node 3: Auto-Provision Customer & Confirmed Sales Order
+        t3 = dag.add_node(
+            name="Auto-Provision Customer & Sales Order",
+            agent_id="REVENUE",
+            dependencies=[t1.task_id, t2.task_id],
+            input_payload={"tenant_id": str(tenant_id)},
+        )
+
+        # Node 4: Fulfill Delivery & Commit General Ledger
+        t4 = dag.add_node(
+            name="Fulfill Delivery & Post Invoice to Ledger",
+            agent_id="FINANCIAL_CONTROLLER",
+            dependencies=[t3.task_id],
+            input_payload={"tenant_id": str(tenant_id)},
+        )
+
+        # Node 5: Dispatch Order Confirmation & Invoice PDF
+        dag.add_node(
+            name="Dispatch Order Confirmation & Invoice",
+            agent_id="REVENUE",
+            dependencies=[t4.task_id],
+            input_payload={"tenant_id": str(tenant_id)},
+        )
+
+        self.active_dags[dag.dag_id] = dag
+        return dag
+
     def get_dags(self, tenant_id: uuid.UUID | str | None = None) -> list[TaskDAG]:
         """Returns list of DAGs sorted newest first, filtered by tenant when available."""
         dags = list(self.active_dags.values())

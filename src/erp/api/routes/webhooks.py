@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from erp.api.deps import DbSessionDep, TenantIdDep
+from erp.events.email_classifier import EmailIntent, classify_inbound_email
 from erp.events.email_gateway import (
     EmailAttachment,
     IngestedEmailMessage,
@@ -55,25 +56,62 @@ async def ingest_email_webhook(
     tenant_id: TenantIdDep,
 ):
     """Processes inbound email from commercial customers or suppliers, extracts intent, and triggers DAG."""
-    subject_lower = payload.subject.lower()
-    body_lower = payload.body_text.lower()
-
-    if "invoice" in subject_lower or "invoice" in payload.recipient.lower() or "bill" in subject_lower:
-        event_type = "erp.supplychain.invoice_received"
-    else:
-        event_type = "erp.crm.inbound_rfq_email"
-
+    classification = classify_inbound_email(
+        sender=payload.sender,
+        subject=payload.subject,
+        body_text=payload.body_text,
+        recipient=payload.recipient,
+    )
     cust_name = payload.sender.split("<")[0].strip().replace('"', "") or "Enterprise Customer"
 
-    dag = chief_orchestrator.build_rfq_workflow_dag(
-        tenant_id=tenant_id,
-        rfq_payload={
-            "customer_name": cust_name,
-            "customer_email": payload.sender,
-            "inquiry_text": payload.body_text,
-            "attachments": payload.attachments,
-        },
-    )
+    # Filter out automated system notifications (Google alerts, noreply, security warnings)
+    if classification.intent == EmailIntent.SYSTEM_NOTIFICATION:
+        ingested = IngestedEmailMessage(
+            sender=payload.sender,
+            recipient=payload.recipient,
+            subject=payload.subject,
+            body_text=payload.body_text,
+            attachments=[
+                EmailAttachment(filename=att, content_type="application/pdf", size_bytes=10240)
+                for att in payload.attachments
+            ],
+            event_type=classification.event_type,
+            tenant_id=str(tenant_id),
+            status="FILTERED_NOTIFICATION",
+            associated_dag_id=None,
+        )
+        mailbox.add_inbox(ingested)
+        return {
+            "status": "FILTERED",
+            "intent": classification.intent.value,
+            "reason": classification.summary_reason,
+            "event_type": classification.event_type,
+            "message_id": ingested.message_id,
+            "dag_id": None,
+            "subtasks_spawned": 0,
+        }
+
+    # Route Customer Order vs RFQ vs Supplier Invoice
+    if classification.intent == EmailIntent.CUSTOMER_ORDER:
+        dag = chief_orchestrator.build_order_fulfillment_workflow_dag(
+            tenant_id=tenant_id,
+            order_payload={
+                "customer_name": cust_name,
+                "customer_email": payload.sender,
+                "inquiry_text": f"Subject: {payload.subject}\n\n{payload.body_text}",
+                "attachments": payload.attachments,
+            },
+        )
+    else:
+        dag = chief_orchestrator.build_rfq_workflow_dag(
+            tenant_id=tenant_id,
+            rfq_payload={
+                "customer_name": cust_name,
+                "customer_email": payload.sender,
+                "inquiry_text": f"Subject: {payload.subject}\n\n{payload.body_text}",
+                "attachments": payload.attachments,
+            },
+        )
 
     ingested = IngestedEmailMessage(
         sender=payload.sender,
@@ -84,7 +122,7 @@ async def ingest_email_webhook(
             EmailAttachment(filename=att, content_type="application/pdf", size_bytes=10240)
             for att in payload.attachments
         ],
-        event_type=event_type,
+        event_type=classification.event_type,
         tenant_id=str(tenant_id),
         status="DISPATCHED_TO_MESH",
         associated_dag_id=dag.dag_id,
@@ -96,7 +134,8 @@ async def ingest_email_webhook(
 
     return {
         "status": "INGESTED",
-        "event_type": event_type,
+        "intent": classification.intent.value,
+        "event_type": classification.event_type,
         "message_id": ingested.message_id,
         "dag_id": dag.dag_id,
         "subtasks_spawned": len(dag.nodes),

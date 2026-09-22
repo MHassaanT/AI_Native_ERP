@@ -417,11 +417,37 @@ function AgentsContent() {
                     {node.output_result && (
                       <div className="rounded border border-cream-200 bg-cream-100/70 p-2 text-[10px] font-mono text-cream-800 space-y-0.5">
                         <span className="text-[9px] text-cream-500 font-bold block uppercase">Agent Output:</span>
+                        {node.output_result.po_number && (
+                          <div>PO#: <span className="font-semibold text-cream-900">{node.output_result.po_number}</span></div>
+                        )}
                         {node.output_result.requested_sku && (
                           <div>SKU: <span className="font-semibold text-cream-900">{node.output_result.requested_sku}</span></div>
                         )}
                         {node.output_result.quantity && (
                           <div>Qty: <span className="font-semibold text-cream-900">{node.output_result.quantity}</span></div>
+                        )}
+                        {node.output_result.is_in_stock !== undefined && (
+                          <div>
+                            Stock:{" "}
+                            <span className={node.output_result.is_in_stock ? "text-sage-800 font-semibold" : "text-terracotta-700 font-semibold"}>
+                              {node.output_result.is_in_stock ? "Available" : "Shortage"} (Avail: {node.output_result.available_qty ?? "N/A"})
+                            </span>
+                          </div>
+                        )}
+                        {node.output_result.order_number && (
+                          <div>SO#: <span className="font-semibold text-cream-900">{node.output_result.order_number}</span> (Allocated: {node.output_result.stock_reserved ?? 0})</div>
+                        )}
+                        {node.output_result.delivery_note_number && (
+                          <div>DN#: <span className="font-semibold text-cream-900">{node.output_result.delivery_note_number}</span></div>
+                        )}
+                        {node.output_result.invoice_number && (
+                          <div>Inv#: <span className="font-semibold text-cream-900">{node.output_result.invoice_number}</span> (${node.output_result.invoice_amount ?? ""})</div>
+                        )}
+                        {node.output_result.general_ledger_status && (
+                          <div className="text-sage-800 font-semibold">GL: {node.output_result.general_ledger_status}</div>
+                        )}
+                        {node.output_result.confirmation_dispatched && (
+                          <div className="text-sage-800">Email: Dispatched to buyer</div>
                         )}
                         {node.output_result.material_cost !== undefined && (
                           <div>Cost: <span className="font-semibold text-cream-900">${node.output_result.material_cost}</span></div>

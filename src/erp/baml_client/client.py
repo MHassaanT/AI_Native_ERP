@@ -182,13 +182,33 @@ class BamlClient:
 
         urgency = "EXPEDITED" if any(u in rfq_text.upper() for u in ["ASAP", "URGENT", "EXPEDITED", "RUSH"]) else "STANDARD"
 
-        # Look for quantity
-        qty_match = re.search(r"\b(\d+)\s*(?:units?|pcs?|nos|pieces?|kg)?\b", rfq_text, re.IGNORECASE)
-        qty = Decimal(qty_match.group(1)) if qty_match else Decimal("100.0000")
+        # Look for explicit quantity with unit or keywords
+        qty_match = re.search(
+            r"(?:quantity|qty|order of|order for)\s*[:=]?\s*(\d+(?:\.\d+)?)"
+            r"|\b(\d+(?:\.\d+)?)\s*(?:units?|pcs?|pieces?|nos|items?|kg)\b",
+            rfq_text,
+            re.IGNORECASE,
+        )
+        if qty_match:
+            qty_str = qty_match.group(1) or qty_match.group(2)
+            qty = Decimal(qty_str)
+        else:
+            generic_qty = re.search(r"\b(\d+)\b", rfq_text)
+            qty = Decimal(generic_qty.group(1)) if generic_qty else Decimal("100.0000")
 
-        # Look for SKU / enclosure code
-        sku_match = re.search(r"(FG-[A-Z0-9-]+|[A-Z]{2,4}-\d{3,5})", rfq_text)
-        sku = sku_match.group(1) if sku_match else "SKU-UNSPECIFIED"
+        # Look for SKU / enclosure code (prioritize FG- prefix and avoid PO-/INV- matches)
+        sku_match = re.search(r"\b(FG-[A-Z0-9-]+)\b", rfq_text)
+        if not sku_match:
+            sku_match = re.search(r"\b(?!PO-)(?!INV-)([A-Z]{2,4}-\d{3,5})\b", rfq_text)
+        sku = sku_match.group(1) if sku_match else "FG-ENCLOSURE-IP67"
+
+        # Look for target unit price
+        price_match = re.search(r"(?:\$|USD\s*)(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:/unit|per unit)", rfq_text, re.IGNORECASE)
+        if price_match:
+            price_val = price_match.group(1) or price_match.group(2)
+            unit_price = Decimal(price_val)
+        else:
+            unit_price = Decimal("1200.0000") if "ENCLOSURE" in sku else Decimal("48.5000")
 
         if "siemens" in rfq_text.lower():
             cust_name = "Siemens Energy AG"
@@ -218,7 +238,7 @@ class BamlClient:
                     requested_sku=sku,
                     quantity=qty,
                     uom="Nos",
-                    target_unit_price=Decimal("48.5000"),
+                    target_unit_price=unit_price,
                     custom_specifications="Industrial standard specification",
                 )
             ],
