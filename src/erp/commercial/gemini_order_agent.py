@@ -266,6 +266,12 @@ class GeminiEmailOrderAnalyzer:
                         item["line_total"] = item["requested_qty"] * catalog_match["standard_rate"]
                         item["available_stock"] = catalog_match["available_qty"]
                         item["is_in_stock"] = catalog_match["available_qty"] >= item["requested_qty"]
+                        item["catalog_status"] = "EXACT_MATCH"
+
+            all_cat = all(it.get("catalog_status") in ("EXACT_MATCH", "FUZZY_MATCH") for it in parsed.get("items", []))
+            all_stk = all(it.get("is_in_stock", False) for it in parsed.get("items", []))
+            parsed["can_fulfill"] = bool(parsed.get("is_order", False) and all_cat and all_stk)
+            parsed["total_price"] = sum(item.get("line_total", 0.0) for item in parsed.get("items", []))
 
             return EmailOrderAnalysis(**parsed)
 
@@ -276,7 +282,7 @@ class GeminiEmailOrderAnalyzer:
         subject: str,
         body_text: str,
     ) -> EmailOrderAnalysis:
-        """High-precision deterministic grounded catalog matcher when offline or without API key."""
+        """High-precision deterministic grounded catalog matcher supporting multi-line items."""
         combined = f"{subject}\n{body_text}".strip()
         combined_lower = combined.lower()
 
@@ -305,133 +311,133 @@ class GeminiEmailOrderAnalyzer:
         po_match = re.search(r"\b(PO[-_\s]?[A-Za-z0-9-]+)\b", combined, re.IGNORECASE)
         po_ref = po_match.group(1).upper().replace(" ", "-") if po_match else f"PO-{uuid.uuid4().hex[:6].upper()}"
 
-        # 3. Extract Quantities
-        qty_match = re.search(
-            r"(?:quantity|qty|order of|order for)\s*[:=]?\s*(\d+(?:\.\d+)?)"
-            r"|\b(\d+(?:\.\d+)?)\s*(?:units?|pcs?|pieces?|nos|items?|kg)\b",
-            combined,
-            re.IGNORECASE,
-        )
-        if qty_match:
-            qty_val = float(qty_match.group(1) or qty_match.group(2))
-        else:
-            generic_qty = re.search(r"\b(\d+)\b", combined)
-            qty_val = float(generic_qty.group(1)) if generic_qty else 10.0
+        # 3. Extract All Ordered Products and Quantities
+        found_pairs: list[tuple[str, float]] = []
 
-        # 4. Extract SKU / Item Token from Email
-        # Prioritize explicit order phrases with units (e.g. '20 pieces of CHASHM-002') in body before subject
-        sku_with_unit = re.search(
-            r"(?:pieces|units|pcs|items|nos)\s+(?:of|for)\s+([A-Za-z0-9_-]+)",
-            body_text,
-            re.IGNORECASE,
-        ) or re.search(
-            r"(?:pieces|units|pcs|items|nos)\s+(?:of|for)\s+([A-Za-z0-9_-]+)",
-            combined,
-            re.IGNORECASE,
-        )
-
-        if sku_with_unit:
-            raw_sku = sku_with_unit.group(1).strip()
+        if body_text.startswith("Subject:"):
+            parts = body_text.split("\n\n", 1)
+            subj = parts[0].replace("Subject:", "").strip()
+            clean_body = parts[1] if len(parts) > 1 else ""
+            if not subject:
+                subject = subj
         else:
-            # Check for alphanumeric SKUs with dashes in body then subject (e.g. FG-ENCLOSURE-IP67, CHASHM-002)
-            sku_token_match = re.search(
-                r"\b(FG-[A-Za-z0-9-]+|[A-Za-z0-9]{2,15}(?:-[A-Za-z0-9]+)+)\b",
-                body_text,
-            ) or re.search(
-                r"\b(FG-[A-Za-z0-9-]+|[A-Za-z0-9]{2,15}(?:-[A-Za-z0-9]+)+)\b",
-                combined,
-            )
+            clean_body = body_text
+
+        # Prioritize body_text where order details are specified, fallback to subject+body
+        text_to_scan = clean_body if len(clean_body.strip()) > 5 else combined
+
+        # 1. Search known catalog items with strict hyphen-aware boundaries
+        sorted_cat = sorted(catalog, key=lambda c: len(c["item_code"]), reverse=True)
+        for c in sorted_cat:
+            cat_pat = re.compile(r"(?<![-A-Za-z0-9_])" + re.escape(c["item_code"]) + r"(?![-A-Za-z0-9_])", re.IGNORECASE)
+            if cat_pat.search(text_to_scan):
+                before_m = re.search(r"(?<![-A-Za-z0-9_])(\d+(?:\.\d+)?)\s*(?:pieces|units|pcs|items|nos|box|boxes)?\s*(?:of)?\s*" + re.escape(c["item_code"]) + r"(?![-A-Za-z0-9_])", text_to_scan, re.IGNORECASE)
+                after_m = re.search(r"(?<![-A-Za-z0-9_])" + re.escape(c["item_code"]) + r"(?![-A-Za-z0-9_])\s*[:=-]\s*(\d+(?:\.\d+)?)\s*(?:pieces|units|pcs|items|nos)?", text_to_scan, re.IGNORECASE)
+                if before_m:
+                    qty = float(before_m.group(1))
+                    if not any(p[0].lower() == c["item_code"].lower() for p in found_pairs):
+                        found_pairs.append((c["item_code"], qty))
+                elif after_m:
+                    qty = float(after_m.group(1))
+                    if not any(p[0].lower() == c["item_code"].lower() for p in found_pairs):
+                        found_pairs.append((c["item_code"], qty))
+                elif not found_pairs:
+                    qty_gen = re.search(r"(?<![-A-Za-z0-9_])(\d+(?:\.\d+)?)\s*(?:pieces|units|pcs|items|nos|box|boxes)", text_to_scan, re.IGNORECASE)
+                    qty = float(qty_gen.group(1)) if qty_gen else 10.0
+                    found_pairs.append((c["item_code"], qty))
+
+        # 2. Search for other/unknown SKU patterns (e.g. uncatalogued items)
+        pattern_qty_sku = re.compile(r"(?<![-A-Za-z0-9_])(\d+(?:\.\d+)?)\s*(?:pieces|units|pcs|items|nos|box|boxes)?\s*(?:of)?\s+([A-Za-z0-9_-]{3,30})(?![-A-Za-z0-9_])", re.IGNORECASE)
+        for m in pattern_qty_sku.finditer(text_to_scan):
+            qty = float(m.group(1))
+            token = m.group(2).strip()
+            if not token.isdigit() and not token.upper().startswith(("PO-", "INV-", "DN-", "SO-", "REF-")):
+                if token.lower() not in {"order", "units", "pieces", "pcs", "prompt", "delivery", "accept", "purchase", "total", "regards", "customer", "please"}:
+                    if not any(p[0].lower() == token.lower() for p in found_pairs):
+                        found_pairs.append((token, qty))
+
+        # Pattern: "<SKU> [:=-] <quantity>"
+        pattern_sku_qty = re.compile(r"(?<![-A-Za-z0-9_])([A-Za-z0-9_-]{3,30})(?![-A-Za-z0-9_])\s*[:=-]\s*(\d+(?:\.\d+)?)\s*(?:pieces|units|pcs|items|nos)?", re.IGNORECASE)
+        for m in pattern_sku_qty.finditer(text_to_scan):
+            token = m.group(1).strip()
+            qty = float(m.group(2))
+            if not token.isdigit() and not token.upper().startswith(("PO-", "INV-", "DN-", "SO-", "REF-")):
+                if token.lower() not in {"order", "units", "pieces", "pcs", "prompt", "delivery", "accept", "purchase", "total", "regards", "customer", "please"}:
+                    if not any(p[0].lower() == token.lower() for p in found_pairs):
+                        found_pairs.append((token, qty))
+
+        # Fallback: Check combined text if body yielded nothing
+        if not found_pairs:
+            for c in sorted_cat:
+                cat_pat = re.compile(r"(?<![-A-Za-z0-9_])" + re.escape(c["item_code"]) + r"(?![-A-Za-z0-9_])", re.IGNORECASE)
+                if cat_pat.search(combined):
+                    before_m = re.search(r"(?<![-A-Za-z0-9_])(\d+(?:\.\d+)?)\s*(?:pieces|units|pcs|items|nos|box|boxes)?\s*(?:of)?\s*" + re.escape(c["item_code"]) + r"(?![-A-Za-z0-9_])", combined, re.IGNORECASE)
+                    qty = float(before_m.group(1)) if before_m else 10.0
+                    if not any(p[0].lower() == c["item_code"].lower() for p in found_pairs):
+                        found_pairs.append((c["item_code"], qty))
+
+        # Fallback for unknown SKU tokens
+        if not found_pairs:
+            sku_token_match = re.search(r"\b(FG-[A-Za-z0-9-]+|[A-Za-z0-9]{2,15}(?:-[A-Za-z0-9]+)+)\b", combined)
             if sku_token_match and not sku_token_match.group(1).upper().startswith(("PO-", "INV-", "DN-", "SO-")):
-                raw_sku = sku_token_match.group(1).strip()
+                found_pairs.append((sku_token_match.group(1).strip(), 10.0))
             else:
-                # Check for phrase "order for <item>" in body
-                order_phrase = re.search(r"order\s+(?:of|for)\s+([A-Za-z0-9_-]+)", body_text, re.IGNORECASE)
-                if order_phrase and order_phrase.group(1).lower() not in ("chashm", "company", "quote", "the"):
-                    raw_sku = order_phrase.group(1).strip()
-                else:
-                    # Match against catalog (check longest catalog item codes first to avoid substring confusion!)
-                    found_cat = None
-                    sorted_cat = sorted(catalog, key=lambda c: len(c["item_code"]), reverse=True)
-                    for c in sorted_cat:
-                        if c["item_code"].lower() in combined_lower:
-                            found_cat = c["item_code"]
-                            break
-                    raw_sku = found_cat or "UNKNOWN-ITEM"
+                found_pairs.append(("UNKNOWN-ITEM", 10.0))
 
-        # 5. Match against tenant catalog
-        matched_catalog_item = None
-        for c in catalog:
-            if c["item_code"].strip().lower() == raw_sku.lower():
-                matched_catalog_item = c
-                break
+        # 4. Ground and Analyze Each Item Against Tenant Catalog
+        items: list[AnalyzedItemLine] = []
+        all_catalog_matched = True
+        all_in_stock = True
 
-        # Build AnalyzedItemLine
-        if matched_catalog_item:
-            avail = matched_catalog_item["available_qty"]
-            is_in_stock = avail >= qty_val
-            unit_price = matched_catalog_item["standard_rate"]
-            line_total = qty_val * unit_price
+        for raw_sku, qty_val in found_pairs:
+            matched_cat = next((c for c in catalog if c["item_code"].strip().lower() == raw_sku.lower()), None)
+            if matched_cat:
+                avail = matched_cat["available_qty"]
+                in_stk = avail >= qty_val
+                rate = matched_cat["standard_rate"]
+                lt = qty_val * rate
+                if not in_stk:
+                    all_in_stock = False
 
-            item_line = AnalyzedItemLine(
-                raw_item_query=raw_sku,
-                requested_qty=qty_val,
-                matched_item_code=matched_catalog_item["item_code"],
-                matched_item_name=matched_catalog_item["item_name"],
-                item_id=matched_catalog_item["item_id"],
-                catalog_status="EXACT_MATCH",
-                unit_price=unit_price,
-                line_total=line_total,
-                available_stock=avail,
-                is_in_stock=is_in_stock,
-            )
-            items = [item_line]
-            total_price = line_total
-
-            if is_in_stock:
-                can_fulfill = True
-                action = "FULFILL_AND_INVOICE"
-                explanation = f"Item '{item_line.matched_item_code}' is in catalog and {avail:,.0f} units are available in warehouse."
-                draft_resp = (
-                    f"Dear {cust_name},\n\n"
-                    f"Thank you for your order! We have confirmed your purchase for {qty_val:,.0f} units of "
-                    f"{item_line.matched_item_code} ({item_line.matched_item_name}) at ${unit_price:,.2f} each.\n\n"
-                    f"Total Amount: ${total_price:,.2f} USD\n\n"
-                    f"Your items have been allocated from our warehouse and dispatched. Please find your official "
-                    f"Sales Invoice attached.\n\n"
-                    f"Best regards,\nAutonomous Revenue & Fulfillment Agent"
+                items.append(
+                    AnalyzedItemLine(
+                        raw_item_query=raw_sku,
+                        requested_qty=qty_val,
+                        matched_item_code=matched_cat["item_code"],
+                        matched_item_name=matched_cat["item_name"],
+                        item_id=matched_cat["item_id"],
+                        catalog_status="EXACT_MATCH",
+                        unit_price=rate,
+                        line_total=lt,
+                        available_stock=avail,
+                        is_in_stock=in_stk,
+                    )
                 )
             else:
-                can_fulfill = False
-                action = "BACKORDER_SHORTAGE"
-                explanation = f"Item '{item_line.matched_item_code}' is in catalog, but requested {qty_val:,.0f} exceeds available stock ({avail:,.0f})."
-                draft_resp = (
-                    f"Dear {cust_name},\n\n"
-                    f"Thank you for your order for {qty_val:,.0f} units of {item_line.matched_item_code}.\n\n"
-                    f"We currently have {avail:,.0f} units available in stock. We have placed your order on priority "
-                    f"backorder and initiated an immediate manufacturing replenishment. The estimated lead time is 7 business days.\n\n"
-                    f"Best regards,\nAutonomous Supply Chain Operations"
+                all_catalog_matched = False
+                all_in_stock = False
+                items.append(
+                    AnalyzedItemLine(
+                        raw_item_query=raw_sku,
+                        requested_qty=qty_val,
+                        matched_item_code=None,
+                        matched_item_name=None,
+                        item_id=None,
+                        catalog_status="NOT_IN_CATALOG",
+                        unit_price=0.0,
+                        line_total=0.0,
+                        available_stock=0.0,
+                        is_in_stock=False,
+                    )
                 )
 
-        else:
-            can_fulfill = False
+        total_price = sum(item.line_total for item in items)
+        can_fulfill = bool(is_order and all_catalog_matched and all_in_stock)
+
+        if not all_catalog_matched:
             action = "ITEM_NOT_IN_CATALOG"
-            explanation = f"Requested item '{raw_sku}' does not exist in the product catalog."
-            total_price = 0.0
-
-            item_line = AnalyzedItemLine(
-                raw_item_query=raw_sku,
-                requested_qty=qty_val,
-                matched_item_code=None,
-                matched_item_name=None,
-                item_id=None,
-                catalog_status="NOT_IN_CATALOG",
-                unit_price=0.0,
-                line_total=0.0,
-                available_stock=0.0,
-                is_in_stock=False,
-            )
-            items = [item_line]
-
+            missing = [it.raw_item_query for it in items if it.catalog_status == "NOT_IN_CATALOG"]
+            explanation = f"Requested item(s) {', '.join(missing)} do not exist in the product catalog."
             alts = [
                 {
                     "item_code": c["item_code"],
@@ -444,15 +450,42 @@ class GeminiEmailOrderAnalyzer:
             alt_lines = "\n".join(
                 [f"- {a['item_code']}: {a['item_name']} (${a['standard_rate']:,.2f} each, {a['available_qty']:,.0f} available)" for a in alts]
             )
-
             draft_resp = (
                 f"Dear {cust_name},\n\n"
-                f"Thank you for reaching out to us. We received your request for {qty_val:,.0f} units of '{raw_sku}'.\n\n"
-                f"However, '{raw_sku}' is not currently available in our product catalog. "
+                f"Thank you for contacting us. We received your order request for {', '.join(missing)}.\n\n"
+                f"However, the following product(s) are not currently available in our product catalog: {', '.join(missing)}.\n\n"
                 f"Our available products and current stock include:\n\n"
                 f"{alt_lines}\n\n"
                 f"Please let us know if you would like to proceed with an order for any of these available items.\n\n"
                 f"Best regards,\nAutonomous Sales & Customer Success"
+            )
+        elif not all_in_stock:
+            action = "BACKORDER_SHORTAGE"
+            short_items = [it.matched_item_code for it in items if not it.is_in_stock]
+            explanation = f"Stock shortage for item(s): {', '.join(short_items)}."
+            draft_resp = (
+                f"Dear {cust_name},\n\n"
+                f"Thank you for your order. We have verified stock for your requested items.\n\n"
+                f"We currently have insufficient on-hand inventory to immediately fulfill: {', '.join(short_items)}. "
+                f"We have automatically placed your order on priority backorder and initiated a manufacturing replenishment. "
+                f"The estimated delivery lead time is 7 business days.\n\n"
+                f"Best regards,\nAutonomous Supply Chain Operations"
+            )
+        else:
+            action = "FULFILL_AND_INVOICE"
+            explanation = f"All {len(items)} requested item(s) are in catalog and in stock."
+            lines_summary = "\n".join(
+                f"- {it.requested_qty:,.0f} units of {it.matched_item_code} ({it.matched_item_name}) @ ${it.unit_price:,.2f} = ${it.line_total:,.2f}"
+                for it in items
+            )
+            draft_resp = (
+                f"Dear {cust_name},\n\n"
+                f"Thank you for your order! We have confirmed your purchase for the following items:\n\n"
+                f"{lines_summary}\n\n"
+                f"Total Amount: ${total_price:,.2f} USD\n\n"
+                f"Your items have been allocated from our warehouse and dispatched. Please find your official "
+                f"Sales Invoice attached.\n\n"
+                f"Best regards,\nAutonomous Revenue & Fulfillment Agent"
             )
 
         return EmailOrderAnalysis(

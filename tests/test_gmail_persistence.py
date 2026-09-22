@@ -234,3 +234,99 @@ async def test_disconnect_clears_db_and_memory():
         assert record.is_connected is False
         assert record.access_token is None
         assert record.refresh_token is None
+
+
+@pytest.mark.asyncio
+async def test_gmail_sync_deduplication_and_mark_read():
+    """Verifies that calling sync_inbox multiple times never duplicates messages or re-triggers workflows."""
+    from erp.events.email_gateway import mailbox
+
+    tenant_id = uuid.uuid4()
+    str_tid = str(tenant_id)
+
+    async with async_session_factory() as session:
+        tenant = Tenant(
+            tenant_id=tenant_id,
+            tenant_slug=f"tenant-{str_tid[:8]}",
+            company_name="Echo Tech",
+            currency="USD",
+        )
+        session.add(tenant)
+        await session.commit()
+
+    conn = GmailConnectionState(
+        is_connected=True,
+        connected_email="orders@echotech.com",
+        tenant_id=str_tid,
+        access_token="ya29.echo_valid_token",
+        refresh_token="1//echo_refresh",
+        expires_at=time.time() + 3600,
+        is_configured=True,
+    )
+    await gmail_service.save_connection_to_db(str_tid, conn)
+    gmail_service.connections[str_tid] = conn
+
+    # Mock Gmail API HTTP responses
+    mock_messages_list = {
+        "messages": [
+            {"id": "msg_echo_001", "threadId": "t_001"},
+            {"id": "msg_echo_002", "threadId": "t_002"},
+        ]
+    }
+
+    def make_msg_detail(msg_id: str):
+        return {
+            "id": msg_id,
+            "snippet": f"Order inquiry for {msg_id}",
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": "Customer <client@test.com>"},
+                    {"name": "To", "value": "orders@echotech.com"},
+                    {"name": "Subject", "value": f"Order Subject {msg_id}"},
+                ],
+                "parts": [],
+            },
+        }
+
+    modified_message_ids = []
+
+    async def mock_get(url, headers=None, **kwargs):
+        resp = AsyncMock()
+        resp.is_success = True
+        resp.status_code = 200
+        if "messages?q=" in url:
+            resp.json = lambda: mock_messages_list
+        elif "messages/msg_echo_001" in url:
+            resp.json = lambda: make_msg_detail("msg_echo_001")
+        elif "messages/msg_echo_002" in url:
+            resp.json = lambda: make_msg_detail("msg_echo_002")
+        else:
+            resp.json = lambda: {}
+        return resp
+
+    async def mock_post(url, headers=None, json=None, **kwargs):
+        resp = AsyncMock()
+        resp.is_success = True
+        resp.status_code = 200
+        resp.json = lambda: {"id": "modified"}
+        if "modify" in url:
+            for mid in ["msg_echo_001", "msg_echo_002"]:
+                if mid in url:
+                    modified_message_ids.append(mid)
+        return resp
+
+    with patch("httpx.AsyncClient.get", side_effect=mock_get), \
+         patch("httpx.AsyncClient.post", side_effect=mock_post):
+
+        # First sync: processes 2 messages
+        sync_1 = await gmail_service.sync_inbox(str_tid)
+        assert len(sync_1) == 2
+        assert {m.message_id for m in sync_1} == {"msg_echo_001", "msg_echo_002"}
+        assert "msg_echo_001" in gmail_service.processed_message_ids[str_tid]
+        assert "msg_echo_002" in gmail_service.processed_message_ids[str_tid]
+        assert "msg_echo_001" in modified_message_ids
+        assert "msg_echo_002" in modified_message_ids
+
+        # Second sync: Gmail still returns the same list, but deduplication drops them completely!
+        sync_2 = await gmail_service.sync_inbox(str_tid)
+        assert len(sync_2) == 0

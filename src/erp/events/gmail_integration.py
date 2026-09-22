@@ -65,6 +65,7 @@ class GmailIntegrationService:
 
     def __init__(self):
         self.connections: dict[str, GmailConnectionState] = {}
+        self.processed_message_ids: dict[str, set[str]] = {}
         # Ensure any stale synthetic data is thoroughly purged
         mailbox.inbox.clear()
         mailbox.sent.clear()
@@ -438,6 +439,10 @@ class GmailIntegrationService:
         if not conn.is_connected or not conn.access_token:
             raise ValueError("Gmail account is not connected. Please connect via Google OAuth 2.0 first.")
 
+        str_id = str(tenant_id)
+        if str_id not in self.processed_message_ids:
+            self.processed_message_ids[str_id] = set()
+
         synced_emails: list[IngestedEmailMessage] = []
 
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -451,7 +456,14 @@ class GmailIntegrationService:
                 err_body = list_resp.text
                 raise ValueError(f"Gmail API query failed ({list_resp.status_code}): {err_body}")
 
-            msg_ids = [m["id"] for m in list_resp.json().get("messages", [])[:10]]
+            raw_msg_ids = [m["id"] for m in list_resp.json().get("messages", [])[:10]]
+            # Filter out already processed messages
+            msg_ids = [
+                m_id for m_id in raw_msg_ids
+                if m_id not in self.processed_message_ids[str_id]
+                and not any(m.message_id == m_id for m in mailbox.inbox)
+            ]
+
             for m_id in msg_ids:
                 msg_resp = await client.get(
                     f"{GMAIL_API_BASE}/messages/{m_id}?format=full",
@@ -463,6 +475,17 @@ class GmailIntegrationService:
                     if parsed:
                         mailbox.add_inbox(parsed)
                         synced_emails.append(parsed)
+                        self.processed_message_ids[str_id].add(m_id)
+
+                        # Mark message as READ in Gmail to prevent repeated retrieval
+                        try:
+                            await client.post(
+                                f"{GMAIL_API_BASE}/messages/{m_id}/modify",
+                                headers=headers,
+                                json={"removeLabelIds": ["UNREAD"]},
+                            )
+                        except Exception as e:
+                            logger.warning("Could not mark message %s as read in Gmail: %s", m_id, e)
 
         conn.last_synced_at = datetime.now(UTC)
         conn.synced_messages_count += len(synced_emails)

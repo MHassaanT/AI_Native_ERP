@@ -67,6 +67,8 @@ class EmailStorage:
         self.sent: list[SentEmailMessage] = []
 
     def add_inbox(self, msg: IngestedEmailMessage):
+        if any(existing.message_id == msg.message_id for existing in self.inbox):
+            return
         self.inbox.insert(0, msg)
         if len(self.inbox) > 100:
             self.inbox.pop()
