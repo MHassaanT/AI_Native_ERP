@@ -235,45 +235,67 @@ class GeminiEmailOrderAnalyzer:
             "}"
         )
 
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        configured_model = os.getenv("GEMINI_MODEL", getattr(settings, "GEMINI_MODEL", "gemini-3.6-flash"))
+        clean_model = configured_model.removeprefix("models/")
+        candidate_models = [clean_model]
+        for fallback in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
+
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
-                endpoint,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "response_mime_type": "application/json",
-                        "temperature": 0.1,
-                    },
-                },
-            )
-            if not resp.is_success:
-                logger.warning("Gemini API error (%s): %s", resp.status_code, resp.text)
-                return None
+            for model_name in candidate_models:
+                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                try:
+                    resp = await client.post(
+                        endpoint,
+                        json={
+                            "contents": [{"parts": [{"text": prompt}]}],
+                            "generationConfig": {
+                                "response_mime_type": "application/json",
+                                "temperature": 0.1,
+                            },
+                        },
+                    )
+                    if resp.status_code == 404:
+                        logger.warning("Gemini model %s returned 404; trying fallback model.", model_name)
+                        continue
+                    if not resp.is_success:
+                        logger.warning("Gemini API error (%s) for model %s: %s", resp.status_code, model_name, resp.text)
+                        continue
 
-            data = resp.json()
-            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-            parsed = json.loads(raw_text)
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        logger.warning("Gemini API returned no candidates for model %s", model_name)
+                        continue
 
-            # Map matched item_ids back from catalog
-            for item in parsed.get("items", []):
-                matched_code = item.get("matched_item_code")
-                if matched_code:
-                    catalog_match = next((c for c in catalog if c["item_code"].lower() == matched_code.lower()), None)
-                    if catalog_match:
-                        item["item_id"] = catalog_match["item_id"]
-                        item["unit_price"] = catalog_match["standard_rate"]
-                        item["line_total"] = item["requested_qty"] * catalog_match["standard_rate"]
-                        item["available_stock"] = catalog_match["available_qty"]
-                        item["is_in_stock"] = catalog_match["available_qty"] >= item["requested_qty"]
-                        item["catalog_status"] = "EXACT_MATCH"
+                    raw_text = candidates[0]["content"]["parts"][0]["text"]
+                    parsed = json.loads(raw_text)
 
-            all_cat = all(it.get("catalog_status") in ("EXACT_MATCH", "FUZZY_MATCH") for it in parsed.get("items", []))
-            all_stk = all(it.get("is_in_stock", False) for it in parsed.get("items", []))
-            parsed["can_fulfill"] = bool(parsed.get("is_order", False) and all_cat and all_stk)
-            parsed["total_price"] = sum(item.get("line_total", 0.0) for item in parsed.get("items", []))
+                    # Map matched item_ids back from catalog
+                    for item in parsed.get("items", []):
+                        matched_code = item.get("matched_item_code")
+                        if matched_code:
+                            catalog_match = next((c for c in catalog if c["item_code"].lower() == matched_code.lower()), None)
+                            if catalog_match:
+                                item["item_id"] = catalog_match["item_id"]
+                                item["unit_price"] = catalog_match["standard_rate"]
+                                item["line_total"] = item["requested_qty"] * catalog_match["standard_rate"]
+                                item["available_stock"] = catalog_match["available_qty"]
+                                item["is_in_stock"] = catalog_match["available_qty"] >= item["requested_qty"]
+                                item["catalog_status"] = "EXACT_MATCH"
 
-            return EmailOrderAnalysis(**parsed)
+                    all_cat = all(it.get("catalog_status") in ("EXACT_MATCH", "FUZZY_MATCH") for it in parsed.get("items", []))
+                    all_stk = all(it.get("is_in_stock", False) for it in parsed.get("items", []))
+                    parsed["can_fulfill"] = bool(parsed.get("is_order", False) and all_cat and all_stk)
+                    parsed["total_price"] = sum(item.get("line_total", 0.0) for item in parsed.get("items", []))
+
+                    return EmailOrderAnalysis(**parsed)
+                except Exception as ex:
+                    logger.warning("Error calling Gemini model %s: %s", model_name, ex)
+                    continue
+
+            return None
 
     def _deterministic_catalog_analysis(
         self,

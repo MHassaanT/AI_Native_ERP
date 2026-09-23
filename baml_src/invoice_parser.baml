@@ -24,7 +24,7 @@ class InvoiceDocumentExtraction {
 }
 
 function ExtractInvoiceMetadata(invoice_pdf: image, ocr_extracted_text: string) -> InvoiceDocumentExtraction {
-    client "google/gemini-2.0-flash"
+    client "google/gemini-3.6-flash"
     prompt #"
         You are an autonomous Accounts Payable Specialist embedded in an AI-Native ERP.
         Analyze the attached invoice image and OCR stream. Extract all structural accounting metadata.

@@ -87,6 +87,7 @@ class Settings(BaseSettings):
 
     # Google Gemini AI
     GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-3.6-flash"
 
     # Inbound SMTP Gateway (False by default in production web containers to prevent port conflict)
     ENABLE_SMTP_GATEWAY: bool = False

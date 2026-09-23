@@ -20,7 +20,7 @@ class RFQDocumentExtraction {
 }
 
 function ExtractRFQMetadata(inquiry_email_body: string, attachment_document: image?) -> RFQDocumentExtraction {
-    client "google/gemini-2.0-flash"
+    client "google/gemini-3.6-flash"
     prompt #"
         You are an autonomous Revenue & CRM Specialist embedded in an AI-Native ERP.
         Parse the customer's inbound commercial RFQ email and attached engineering specifications.

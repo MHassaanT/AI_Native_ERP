@@ -274,8 +274,14 @@ class BamlClient:
         mime_type: str,
         schema_cls: type,
     ):
-        """Invokes Google Gemini multimodal API (Gemini 2.0 Flash / 1.5 Pro) with structured JSON output."""
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={self.api_key}"
+        """Invokes Google Gemini multimodal API (Gemini 3.6 Flash / fallback) with structured JSON output."""
+        configured_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        clean_model = configured_model.removeprefix("models/")
+        candidate_models = [clean_model]
+        for fallback in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
+
         parts = [{"text": f"{prompt}\nContext Document / Text:\n{context_text}"}]
         
         if attachment_bytes:
@@ -286,18 +292,35 @@ class BamlClient:
                 }
             })
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                endpoint,
-                json={
-                    "contents": [{"parts": parts}],
-                    "generationConfig": {"response_mime_type": "application/json"},
-                },
-            )
-            data = resp.json()
-            raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
-            parsed = json.loads(raw_json)
-            return schema_cls(**parsed)
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for model_name in candidate_models:
+                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
+                try:
+                    resp = await client.post(
+                        endpoint,
+                        json={
+                            "contents": [{"parts": parts}],
+                            "generationConfig": {"response_mime_type": "application/json"},
+                        },
+                    )
+                    if resp.status_code == 404:
+                        logger.warning("Gemini multimodal model %s returned 404, trying fallback.", model_name)
+                        continue
+                    if not resp.is_success:
+                        logger.warning("Gemini API error (%s) for %s: %s", resp.status_code, model_name, resp.text)
+                        continue
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        continue
+                    raw_json = candidates[0]["content"]["parts"][0]["text"]
+                    parsed = json.loads(raw_json)
+                    return schema_cls(**parsed)
+                except Exception as ex:
+                    logger.warning("Failed calling Gemini multimodal with model %s: %s", model_name, ex)
+                    continue
+
+        raise RuntimeError("All Gemini multimodal candidate models failed.")
 
 
 baml_client = BamlClient()

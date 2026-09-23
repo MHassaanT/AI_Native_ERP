@@ -1248,3 +1248,102 @@ async def test_gemini_email_order_multi_item_fulfillment():
             assert stock_relay.current_qty == Decimal("490.0000")
 
 
+@pytest.mark.asyncio
+async def test_gemini_order_agent_model_fallback_on_404():
+    """Verifies that if a model (such as deprecated gemini-2.0-flash) returns 404,
+    _call_gemini automatically falls back to subsequent candidate models (gemini-3.6-flash, etc.).
+    """
+    import os
+    from unittest.mock import AsyncMock, patch
+    from erp.commercial.gemini_order_agent import gemini_order_analyzer
+
+    mock_catalog = [
+        {
+            "item_id": str(uuid.uuid4()),
+            "item_code": "CHASHM-001",
+            "item_name": "Wall Mounted Sensor",
+            "standard_rate": 10.0,
+            "available_qty": 500.0,
+            "stock_uom": "Nos",
+        }
+    ]
+
+    attempted_models = []
+
+    async def mock_post(url, json=None, **kwargs):
+        resp = AsyncMock()
+        for m in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash", "custom-deprecated-model"]:
+            if f"models/{m}:" in url:
+                attempted_models.append(m)
+                if m == "custom-deprecated-model":
+                    resp.is_success = False
+                    resp.status_code = 404
+                    resp.text = '{"error": {"code": 404, "message": "Model not available"}}'
+                    return resp
+                else:
+                    resp.is_success = True
+                    resp.status_code = 200
+                    resp.json = lambda: {
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [
+                                        {
+                                            "text": json_dumps({
+                                                "is_order": True,
+                                                "intent": "ORDER",
+                                                "confidence": 0.99,
+                                                "customer_name": "Hassaan Tahir",
+                                                "customer_email": "misterhassan58@gmail.com",
+                                                "po_reference": "PO-123",
+                                                "items": [
+                                                    {
+                                                        "raw_item_query": "CHASHM-001",
+                                                        "requested_qty": 20.0,
+                                                        "matched_item_code": "CHASHM-001",
+                                                        "matched_item_name": "Wall Mounted Sensor",
+                                                        "catalog_status": "EXACT_MATCH",
+                                                        "unit_price": 10.0,
+                                                        "line_total": 200.0,
+                                                        "available_stock": 500.0,
+                                                        "is_in_stock": True,
+                                                    }
+                                                ],
+                                                "can_fulfill": True,
+                                                "fulfillment_action": "FULFILL_AND_INVOICE",
+                                                "total_price": 200.0,
+                                                "explanation": "Valid order.",
+                                                "recommended_alternatives": [],
+                                                "draft_email_response": "Order confirmed.",
+                                            })
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                    return resp
+        resp.is_success = False
+        resp.status_code = 500
+        return resp
+
+    from json import dumps as json_dumps
+
+    with patch.dict(os.environ, {"GEMINI_MODEL": "custom-deprecated-model"}), \
+         patch("httpx.AsyncClient.post", side_effect=mock_post):
+        res = await gemini_order_analyzer._call_gemini(
+            catalog=mock_catalog,
+            sender="Hassaan Tahir <misterhassan58@gmail.com>",
+            subject="Order",
+            body_text="20 pieces of CHASHM-001",
+            api_key="fake-test-key",
+        )
+
+        assert res is not None
+        assert res.is_order is True
+        assert res.total_price == 200.0
+        assert attempted_models[0] == "custom-deprecated-model"
+        assert attempted_models[1] == "gemini-3.6-flash"
+
+
+
