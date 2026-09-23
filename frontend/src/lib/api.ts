@@ -159,6 +159,9 @@ export const api = {
     fetchWithTenant("/workforce/expense/audit", { method: "POST", body: JSON.stringify(data) }),
   evaluateShiftTrade: (data: any) =>
     fetchWithTenant("/workforce/shift-trade/evaluate", { method: "POST", body: JSON.stringify(data) }),
+  getShifts: () => fetchWithTenant("/workforce/shifts"),
+  createShift: (data: any) =>
+    fetchWithTenant("/workforce/shifts", { method: "POST", body: JSON.stringify(data) }),
 
   // --- Commercial & Dynamic Pricing ---
   getCustomers: () => fetchWithTenant("/commercial/customers"),
