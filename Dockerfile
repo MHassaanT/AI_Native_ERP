@@ -1,5 +1,5 @@
 # Multi-Stage / Production Dockerfile for AI-Native ERP Backend
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # Prevent Python from writing .pyc files and buffer output
 ENV PYTHONDONTWRITEBYTECODE=1 \
