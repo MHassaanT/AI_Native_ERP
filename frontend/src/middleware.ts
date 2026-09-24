@@ -1,6 +1,26 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
+function isTokenValid(token: string | undefined): boolean {
+  if (!token) return false;
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return false;
+    let base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (base64.length % 4) {
+      base64 += "=";
+    }
+    const jsonStr = atob(base64);
+    const payload = JSON.parse(jsonStr);
+    if (payload.exp && payload.exp * 1000 < Date.now()) {
+      return false; // Token expired
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -14,17 +34,29 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const token = request.cookies.get("ai_erp_token")?.value;
+  const rawToken = request.cookies.get("ai_erp_token")?.value;
+  const hasValidToken = isTokenValid(rawToken);
   const isAuthPage = pathname === "/login" || pathname === "/signup";
 
-  // If user is NOT logged in and trying to access ANY protected page (including /), redirect to /signup
-  if (!token && !isAuthPage) {
-    const signupUrl = new URL("/signup", request.url);
-    return NextResponse.redirect(signupUrl);
+  // If user has an invalid/expired token in cookies, clear it immediately
+  if (rawToken && !hasValidToken) {
+    const response = isAuthPage
+      ? NextResponse.next()
+      : NextResponse.redirect(new URL("/login", request.url));
+    response.cookies.delete("ai_erp_token");
+    return response;
   }
 
-  // If user IS logged in and visits /login or /signup, redirect to /
-  if (token && isAuthPage) {
+  // If user is NOT logged in and trying to access ANY protected page (including /), redirect to /login
+  if (!hasValidToken && !isAuthPage) {
+    const loginUrl = new URL("/login", request.url);
+    const response = NextResponse.redirect(loginUrl);
+    if (rawToken) response.cookies.delete("ai_erp_token");
+    return response;
+  }
+
+  // If user IS logged in with a valid token and visits /login or /signup, redirect to dashboard /
+  if (hasValidToken && isAuthPage) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 

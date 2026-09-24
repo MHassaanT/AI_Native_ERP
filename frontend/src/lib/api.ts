@@ -1,4 +1,4 @@
-import { getToken, getUser } from "./auth";
+import { getToken, getUser, clearAuth } from "./auth";
 
 const API_BASE = "/api/v1";
 const DEFAULT_TENANT = "00000000-0000-0000-0000-000000000001";
@@ -24,6 +24,19 @@ export async function fetchWithTenant(endpoint: string, options: RequestInit = {
     ...options,
     headers,
   });
+
+  if (res.status === 401) {
+    clearAuth();
+    if (typeof window !== "undefined") {
+      const isAuthPage =
+        window.location.pathname === "/login" || window.location.pathname === "/signup";
+      if (!isAuthPage) {
+        window.location.href = "/login";
+      }
+    }
+    const err = await res.json().catch(() => ({ detail: "Session expired. Please sign in again." }));
+    throw new Error(err.detail || "Session expired. Please sign in again.");
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

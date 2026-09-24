@@ -17,7 +17,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 
     if (!authStatus && !isPublic) {
       setIsAuthorized(false);
-      router.replace("/signup");
+      router.replace("/login");
     } else if (authStatus && isPublic) {
       setIsAuthorized(true);
       router.replace("/");
@@ -44,7 +44,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       <div className="min-h-[70vh] flex flex-col items-center justify-center">
         <div className="flex items-center gap-2 text-xs font-mono text-cream-600">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-cream-800 border-t-transparent" />
-          <span>Redirecting to organization signup...</span>
+          <span>Redirecting to login portal...</span>
         </div>
       </div>
     );
