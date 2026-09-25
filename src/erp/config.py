@@ -55,6 +55,10 @@ class Settings(BaseSettings):
         url = self.DATABASE_URL
         if url.startswith("postgres://"):
             return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql+psycopg://"):
+            return url.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql+psycopg2://"):
+            return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
         if url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
             return url.replace("postgresql://", "postgresql+asyncpg://", 1)
         return url
