@@ -14,6 +14,7 @@ import {
   Sparkles,
   Layers,
   Check,
+  Building2,
 } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -24,7 +25,7 @@ export default function AccountsPayablePage() {
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"invoices" | "pos" | "grns">("invoices");
+  const [activeTab, setActiveTab] = useState<"invoices" | "pos" | "grns" | "suppliers">("invoices");
 
   const [matchingId, setMatchingId] = useState<string | null>(null);
   const [matchResult, setMatchResult] = useState<any | null>(null);
@@ -51,6 +52,14 @@ export default function AccountsPayablePage() {
   const [newGrnNumber, setNewGrnNumber] = useState("");
   const [selectedGrnPoId, setSelectedGrnPoId] = useState("");
   const [creatingGrn, setCreatingGrn] = useState(false);
+
+  const [showCreateSupplierModal, setShowCreateSupplierModal] = useState(false);
+  const [newSupplierCode, setNewSupplierCode] = useState("");
+  const [newSupplierName, setNewSupplierName] = useState("");
+  const [newSupplierTaxId, setNewSupplierTaxId] = useState("");
+  const [newSupplierCurrency, setNewSupplierCurrency] = useState("USD");
+  const [newSupplierTerms, setNewSupplierTerms] = useState("30");
+  const [creatingSupplier, setCreatingSupplier] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
@@ -285,6 +294,39 @@ export default function AccountsPayablePage() {
     }
   };
 
+  const handleCreateSupplier = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSupplierCode.trim() || !newSupplierName.trim()) {
+      setError("Supplier code and supplier name are required.");
+      return;
+    }
+    setCreatingSupplier(true);
+    setError(null);
+    try {
+      const created = await api.createSupplier({
+        supplier_code: newSupplierCode.trim().toUpperCase(),
+        supplier_name: newSupplierName.trim(),
+        tax_id: newSupplierTaxId.trim() || null,
+        currency: newSupplierCurrency || "USD",
+        payment_terms_days: parseInt(newSupplierTerms, 10) || 30,
+        otif_score: 100.0,
+      });
+
+      setShowCreateSupplierModal(false);
+      setNewSupplierCode("");
+      setNewSupplierName("");
+      setNewSupplierTaxId("");
+      setSuccessMsg(`Supplier "${created.supplier_name}" (${created.supplier_code}) registered successfully.`);
+      setSelectedSupplierId(created.supplier_id);
+      setActiveTab("suppliers");
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || "Failed to create supplier.");
+    } finally {
+      setCreatingSupplier(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -318,6 +360,18 @@ export default function AccountsPayablePage() {
           >
             <Sparkles className="h-3.5 w-3.5 text-sage-700" />
             <span>{seeding ? "Provisioning..." : "Seed Sample P2P Flow"}</span>
+          </button>
+          <button
+            onClick={() => {
+              setNewSupplierCode(`SUP-${Math.floor(100 + Math.random() * 900)}`);
+              setNewSupplierName("");
+              setNewSupplierTaxId("");
+              setShowCreateSupplierModal(true);
+            }}
+            className="flex items-center gap-1.5 rounded-md border border-cream-300 bg-cream-100 px-3 py-1.5 text-xs font-medium text-cream-900 hover:bg-cream-200 transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>New Supplier</span>
           </button>
           <button
             onClick={() => {
@@ -521,6 +575,17 @@ export default function AccountsPayablePage() {
         >
           <Truck className="h-4 w-4" />
           <span>Goods Receipts ({goodsReceipts.length})</span>
+        </button>
+        <button
+          onClick={() => setActiveTab("suppliers")}
+          className={`pb-3 flex items-center gap-2 border-b-2 transition-colors ${
+            activeTab === "suppliers"
+              ? "border-cream-900 text-cream-900 font-semibold"
+              : "border-transparent hover:text-cream-900"
+          }`}
+        >
+          <Building2 className="h-4 w-4" />
+          <span>Suppliers ({suppliers.length})</span>
         </button>
       </div>
 
@@ -756,6 +821,99 @@ export default function AccountsPayablePage() {
         </div>
       )}
 
+      {/* Tab 4: Suppliers Directory */}
+      {activeTab === "suppliers" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-cream-700">Vendor master directory with automated on-time in-full (OTIF) scoring.</p>
+            <button
+              onClick={() => {
+                setNewSupplierCode(`SUP-${Math.floor(100 + Math.random() * 900)}`);
+                setNewSupplierName("");
+                setNewSupplierTaxId("");
+                setShowCreateSupplierModal(true);
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cream-900 text-cream-50 text-xs font-medium hover:bg-cream-800 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Add Supplier</span>
+            </button>
+          </div>
+
+          {suppliers.length === 0 ? (
+            <div className="rounded-xl border border-cream-300 bg-cream-100 p-8 text-center space-y-3">
+              <Building2 className="h-8 w-8 text-cream-400 mx-auto" />
+              <div className="text-xs text-cream-800 font-medium">No suppliers registered in master directory</div>
+              <p className="text-[11px] text-cream-600 max-w-sm mx-auto">
+                Suppliers allow you to issue Purchase Orders, receive dock shipments (GRN), and verify vendor invoices.
+              </p>
+              <button
+                onClick={() => {
+                  setNewSupplierCode(`SUP-${Math.floor(100 + Math.random() * 900)}`);
+                  setNewSupplierName("");
+                  setNewSupplierTaxId("");
+                  setShowCreateSupplierModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cream-900 text-cream-50 text-xs font-medium hover:bg-cream-800 transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Register First Supplier</span>
+              </button>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-cream-300 bg-cream-100 overflow-hidden shadow-xs">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-cream-300 bg-cream-200/60 text-cream-800 font-medium text-[11px]">
+                    <th className="py-2.5 px-4">Supplier Code</th>
+                    <th className="py-2.5 px-4">Supplier Name</th>
+                    <th className="py-2.5 px-4">Tax / VAT ID</th>
+                    <th className="py-2.5 px-4">Currency</th>
+                    <th className="py-2.5 px-4">Payment Terms</th>
+                    <th className="py-2.5 px-4">OTIF Score</th>
+                    <th className="py-2.5 px-4">Status</th>
+                    <th className="py-2.5 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-cream-200">
+                  {suppliers.map((s) => (
+                    <tr key={s.supplier_id} className="hover:bg-cream-50/50 transition-colors">
+                      <td className="py-3 px-4 font-mono font-medium text-cream-900">{s.supplier_code}</td>
+                      <td className="py-3 px-4 font-medium text-cream-900">{s.supplier_name}</td>
+                      <td className="py-3 px-4 text-cream-600 font-mono text-[11px]">{s.tax_id || "—"}</td>
+                      <td className="py-3 px-4 text-cream-700 font-mono">{s.currency}</td>
+                      <td className="py-3 px-4 text-cream-700">{s.payment_terms_days} days</td>
+                      <td className="py-3 px-4 font-mono">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sage-100 text-sage-800 border border-sage-500/30">
+                          {parseFloat(s.otif_score).toFixed(1)}%
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold font-mono bg-cream-200 text-cream-800">
+                          {s.is_active ? "Active" : "Inactive"}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          onClick={() => {
+                            setSelectedSupplierId(s.supplier_id);
+                            setNewPoNumber(`PO-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
+                            setShowCreatePoModal(true);
+                          }}
+                          className="px-2.5 py-1 text-[11px] font-medium rounded-md border border-cream-300 bg-cream-50 text-cream-900 hover:bg-cream-200 transition-colors"
+                        >
+                          + Create PO
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Modal 1: Create Vendor Invoice */}
       {showCreateInvoiceModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
@@ -926,7 +1084,22 @@ export default function AccountsPayablePage() {
                     ))}
                   </select>
                 ) : (
-                  <div className="text-[11px] text-terracotta-700 italic">No suppliers. Use &quot;Seed Sample P2P Flow&quot; to auto-create.</div>
+                  <div className="flex items-center justify-between p-2 rounded bg-terracotta-50 border border-terracotta-200 text-[11px] text-terracotta-800">
+                    <span>No suppliers registered.</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCreatePoModal(false);
+                        setNewSupplierCode(`SUP-${Math.floor(100 + Math.random() * 900)}`);
+                        setNewSupplierName("");
+                        setNewSupplierTaxId("");
+                        setShowCreateSupplierModal(true);
+                      }}
+                      className="text-cream-950 font-semibold underline ml-2 hover:text-cream-800"
+                    >
+                      + Add Supplier Now
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1063,6 +1236,113 @@ export default function AccountsPayablePage() {
                   className="rounded bg-cream-900 px-4 py-1.5 font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
                 >
                   {creatingGrn ? "Recording..." : "Record GRN"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 4: Register New Supplier */}
+      {showCreateSupplierModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-xl space-y-4 animate-in fade-in zoom-in-95 duration-100">
+            <div className="flex items-center justify-between border-b border-cream-300 pb-3">
+              <div className="flex items-center gap-2">
+                <Building2 className="h-4 w-4 text-cream-800" />
+                <h3 className="font-semibold text-sm text-cream-950">Register New Supplier</h3>
+              </div>
+              <button
+                onClick={() => setShowCreateSupplierModal(false)}
+                className="text-cream-600 hover:text-cream-900 text-sm font-semibold"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateSupplier} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-medium text-cream-900 mb-1">Supplier Code</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. SUP-AERO-01"
+                  value={newSupplierCode}
+                  onChange={(e) => setNewSupplierCode(e.target.value.toUpperCase())}
+                  className="w-full rounded border border-cream-300 bg-cream-50 px-3 py-1.5 font-mono text-cream-900 focus:border-cream-900 focus:outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-cream-900 mb-1">Supplier / Vendor Legal Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Apex Aerospace Materials LLC"
+                  value={newSupplierName}
+                  onChange={(e) => setNewSupplierName(e.target.value)}
+                  className="w-full rounded border border-cream-300 bg-cream-50 px-3 py-1.5 text-cream-900 focus:border-cream-900 focus:outline-hidden"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-cream-900 mb-1">Tax / VAT ID</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. US-882910"
+                    value={newSupplierTaxId}
+                    onChange={(e) => setNewSupplierTaxId(e.target.value)}
+                    className="w-full rounded border border-cream-300 bg-cream-50 px-3 py-1.5 font-mono text-cream-900 focus:border-cream-900 focus:outline-hidden"
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium text-cream-900 mb-1">Operating Currency</label>
+                  <select
+                    value={newSupplierCurrency}
+                    onChange={(e) => setNewSupplierCurrency(e.target.value)}
+                    className="w-full rounded border border-cream-300 bg-cream-50 px-3 py-1.5 text-cream-900 focus:border-cream-900 focus:outline-hidden"
+                  >
+                    <option value="USD">USD ($)</option>
+                    <option value="EUR">EUR (€)</option>
+                    <option value="GBP">GBP (£)</option>
+                    <option value="CAD">CAD ($)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-medium text-cream-900 mb-1">Payment Terms (Days)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="365"
+                  value={newSupplierTerms}
+                  onChange={(e) => setNewSupplierTerms(e.target.value)}
+                  className="w-full rounded border border-cream-300 bg-cream-50 px-3 py-1.5 text-cream-900 focus:border-cream-900 focus:outline-hidden"
+                />
+                <span className="text-[10px] text-cream-600">Standard vendor credit period (e.g. Net 30, Net 60).</span>
+              </div>
+
+              <div className="p-2.5 rounded bg-cream-200/60 text-[11px] text-cream-700">
+                Registering a supplier assigns an initial 100.0% OTIF (On-Time In-Full) rating and enables immediate Purchase Order generation.
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-cream-300">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateSupplierModal(false)}
+                  className="rounded px-3 py-1.5 text-cream-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingSupplier}
+                  className="flex items-center gap-1.5 rounded bg-cream-900 px-4 py-1.5 font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>{creatingSupplier ? "Saving..." : "Create Supplier"}</span>
                 </button>
               </div>
             </form>
