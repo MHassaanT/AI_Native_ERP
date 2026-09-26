@@ -431,6 +431,7 @@ async def execute_invoice_matching(
     invoice_id: uuid.UUID,
     tenant_id: TenantIdDep,
     db: DbSessionDep,
+    human_approved: bool = Query(default=False),
 ):
     """Executes automated 3-way match across invoice, PO, and GRN. Commits to GL if within tolerance."""
     try:
@@ -438,6 +439,7 @@ async def execute_invoice_matching(
             session=db,
             tenant_id=tenant_id,
             invoice_id=invoice_id,
+            human_approved=human_approved,
         )
     except ValueError as e:
         raise HTTPException(

@@ -21,6 +21,7 @@ from erp.db.models.purchasing import (
 )
 from erp.events.outbox import OutboxManager
 from erp.ledger.engine import LedgerCommitResult, TransactionProposal, ledger_engine
+from erp.ledger.exceptions import AutonomyCeilingExceeded
 from erp.ledger.invariants import LedgerLineProposal
 from erp.workflows.accounts_payable.dispute_generator import (
     VendorDisputeNotice,
@@ -54,6 +55,7 @@ class ThreeWayMatcher:
         invoice_id: uuid.UUID,
         po_id: uuid.UUID | None = None,
         grn_id: uuid.UUID | None = None,
+        human_approved: bool = False,
     ) -> ThreeWayMatchResult:
         """Executes 3-way matching and either commits ledger settlement or triggers dispute notice."""
         # 1. Fetch Invoice
@@ -321,7 +323,7 @@ class ThreeWayMatcher:
                 source_document_type="AUTOMATED_AP_MATCH",
                 source_document_id=invoice.invoice_id,
                 entries=entries,
-                human_in_the_loop_approved=False,
+                human_in_the_loop_approved=human_approved,
                 agent_id="SUPPLY_CHAIN_AP",
                 verification_context={
                     "po_number": po.po_number,
@@ -330,14 +332,37 @@ class ThreeWayMatcher:
                 },
             )
 
-            ledger_commit = await ledger_engine.commit_transaction(
-                session=session, proposal=proposal
-            )
-            logger.info(
-                "3-way match SUCCESS for invoice %s. Ledger committed %s",
-                invoice.invoice_number,
-                ledger_commit.transaction_id,
-            )
+            try:
+                ledger_commit = await ledger_engine.commit_transaction(
+                    session=session, proposal=proposal
+                )
+                logger.info(
+                    "3-way match SUCCESS for invoice %s. Ledger committed %s",
+                    invoice.invoice_number,
+                    ledger_commit.transaction_id,
+                )
+            except AutonomyCeilingExceeded as e:
+                invoice.matching_status = "STAGED"
+                invoice.variance_percentage = tolerance.overall_variance_percentage
+                invoice.dispute_reason = (
+                    f"Tier 3 Financial Ceiling Exceeded: Amount ${invoice.total_amount:,.2f} exceeds "
+                    f"autonomous ceiling (${e.ceiling_amount:,.2f}). Requires human supervisor authorization to post to General Ledger."
+                )
+                logger.warning(
+                    "3-way match for invoice %s requires human authorization: %s",
+                    invoice.invoice_number,
+                    e,
+                )
+                await session.flush()
+                return ThreeWayMatchResult(
+                    invoice_id=invoice.invoice_id,
+                    invoice_number=invoice.invoice_number,
+                    is_matched=True,
+                    matching_status="STAGED",
+                    tolerance_summary=tolerance,
+                    ledger_result=None,
+                    dispute_notice=None,
+                )
         else:
             # Mark DISPUTED
             invoice.matching_status = "DISPUTED"

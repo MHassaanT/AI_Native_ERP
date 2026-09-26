@@ -99,8 +99,8 @@ export const api = {
   getInvoices: () => fetchWithTenant("/ap/invoices"),
   createInvoice: (data: any) =>
     fetchWithTenant("/ap/invoices", { method: "POST", body: JSON.stringify(data) }),
-  matchInvoice: (invoiceId: string) =>
-    fetchWithTenant(`/ap/match/${invoiceId}`, { method: "POST" }),
+  matchInvoice: (invoiceId: string, humanApproved: boolean = false) =>
+    fetchWithTenant(`/ap/match/${invoiceId}${humanApproved ? "?human_approved=true" : ""}`, { method: "POST" }),
 
   // --- Bank Reconciliation ---
   getReceivables: () => fetchWithTenant("/reconciliation/orders"),

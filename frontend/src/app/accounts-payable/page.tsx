@@ -99,12 +99,12 @@ export default function AccountsPayablePage() {
     loadData();
   }, []);
 
-  const handleMatch = async (invoiceId: string) => {
+  const handleMatch = async (invoiceId: string, humanApproved: boolean = false) => {
     setMatchingId(invoiceId);
     setError(null);
     setMatchResult(null);
     try {
-      const result = await api.matchInvoice(invoiceId);
+      const result = await api.matchInvoice(invoiceId, humanApproved);
       setMatchResult(result);
       await loadData();
     } catch (err: any) {
@@ -476,20 +476,24 @@ export default function AccountsPayablePage() {
       {matchResult && (
         <div
           className={`rounded-lg border p-4 text-xs space-y-2 ${
-            matchResult.is_matched
+            matchResult.matching_status === "MATCHED"
               ? "border-sage-500/30 bg-sage-50 text-sage-900"
+              : matchResult.matching_status === "STAGED"
+              ? "border-amber-500/40 bg-amber-50 text-amber-950"
               : "border-terracotta-500/30 bg-terracotta-50 text-terracotta-900"
           }`}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5 font-semibold text-sm">
-              {matchResult.is_matched ? (
+              {matchResult.matching_status === "MATCHED" ? (
                 <CheckCircle2 className="h-5 w-5 text-sage-700" />
+              ) : matchResult.matching_status === "STAGED" ? (
+                <ShieldAlert className="h-5 w-5 text-amber-700" />
               ) : (
                 <ShieldAlert className="h-5 w-5 text-terracotta-700" />
               )}
               <span>
-                Invoice {matchResult.invoice_number}: {matchResult.matching_status}
+                Invoice {matchResult.invoice_number}: {matchResult.matching_status === "STAGED" ? "STAGED (APPROVAL REQUIRED)" : matchResult.matching_status}
               </span>
             </div>
             <span className="font-mono text-[11px] px-2.5 py-0.5 rounded bg-cream-100 border border-cream-300 font-semibold text-cream-800">
@@ -516,10 +520,44 @@ export default function AccountsPayablePage() {
               </div>
               <div>
                 Outcome:{" "}
-                <span className={matchResult.is_matched ? "text-sage-700 font-bold" : "text-terracotta-700 font-bold"}>
-                  {matchResult.is_matched ? "PASSED TOLERANCE" : "BLOCKED FOR DISPUTE"}
+                <span
+                  className={
+                    matchResult.matching_status === "MATCHED"
+                      ? "text-sage-700 font-bold"
+                      : matchResult.matching_status === "STAGED"
+                      ? "text-amber-800 font-bold"
+                      : "text-terracotta-700 font-bold"
+                  }
+                >
+                  {matchResult.matching_status === "MATCHED"
+                    ? "PASSED TOLERANCE"
+                    : matchResult.matching_status === "STAGED"
+                    ? "PASSED TOLERANCE (STAGED)"
+                    : "BLOCKED FOR DISPUTE"}
                 </span>
               </div>
+            </div>
+          )}
+
+          {matchResult.matching_status === "STAGED" && (
+            <div className="bg-white/90 p-3.5 rounded border border-amber-300 text-[11px] font-mono text-amber-950 space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="font-bold text-xs flex items-center gap-1.5 text-amber-900">
+                  <ShieldAlert className="h-4 w-4 text-amber-700" />
+                  <span>Tier 3 Financial Ceiling Exceeded (&gt; $25,000.00)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleMatch(matchResult.invoice_id, true)}
+                  disabled={matchingId === matchResult.invoice_id}
+                  className="rounded bg-amber-600 hover:bg-amber-700 text-white font-sans text-xs font-semibold px-3 py-1.5 shadow-xs transition-colors disabled:opacity-50 flex items-center gap-1.5 justify-center"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <span>{matchingId === matchResult.invoice_id ? "Authorizing..." : "Authorize & Post to GL Now"}</span>
+                </button>
+              </div>
+              <p>&bull; 3-Way Reconciliation: Quantities and unit pricing are 100% compliant with Purchase Order and GRN.</p>
+              <p>&bull; Financial Governance: Per statutory ledger ceilings, transactions exceeding $25,000.00 require human supervisor sign-off before General Ledger commitment.</p>
             </div>
           )}
 
@@ -663,6 +701,11 @@ export default function AccountsPayablePage() {
                             &bull; {inv.dispute_reason}
                           </div>
                         )}
+                        {inv.matching_status === "STAGED" && (
+                          <div className="text-[10px] text-amber-800 font-sans mt-0.5 max-w-xs truncate" title={inv.dispute_reason || "Amount > $25,000: Human authorization required"}>
+                            &bull; {inv.dispute_reason || "Amount > $25,000: Human authorization required"}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-cream-700">{inv.invoice_date}</td>
                       <td className="py-3 px-4 font-mono font-bold text-cream-900">
@@ -676,12 +719,14 @@ export default function AccountsPayablePage() {
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold font-mono ${
                             inv.matching_status === "MATCHED"
                               ? "bg-sage-100 text-sage-800 border border-sage-500/30"
+                              : inv.matching_status === "STAGED"
+                              ? "bg-amber-100 text-amber-900 border border-amber-500/40"
                               : inv.matching_status === "DISPUTED"
                               ? "bg-terracotta-100 text-terracotta-800 border border-terracotta-500/30"
                               : "bg-cream-200 text-cream-800 border border-cream-300"
                           }`}
                         >
-                          {inv.matching_status}
+                          {inv.matching_status === "STAGED" ? "STAGED (APPROVAL REQ)" : inv.matching_status}
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -692,6 +737,16 @@ export default function AccountsPayablePage() {
                             className="rounded border border-cream-400 bg-cream-900 px-2.5 py-1 text-[11px] font-medium text-cream-50 hover:bg-cream-800 transition-colors disabled:opacity-50"
                           >
                             {matchingId === inv.invoice_id ? "Evaluating Match..." : "Execute 3-Way Match"}
+                          </button>
+                        ) : inv.matching_status === "STAGED" ? (
+                          <button
+                            onClick={() => handleMatch(inv.invoice_id, true)}
+                            disabled={matchingId === inv.invoice_id}
+                            className="inline-flex items-center gap-1.5 rounded border border-amber-500 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100 transition-colors disabled:opacity-50 shadow-2xs"
+                            title="Tolerances matched 100%. Authorize transaction (> $25,000) to commit to General Ledger."
+                          >
+                            <CheckCircle2 className={`h-3 w-3 text-amber-700 ${matchingId === inv.invoice_id ? "animate-spin" : ""}`} />
+                            <span>{matchingId === inv.invoice_id ? "Posting..." : "Authorize & Post to GL"}</span>
                           </button>
                         ) : inv.matching_status === "DISPUTED" ? (
                           <button

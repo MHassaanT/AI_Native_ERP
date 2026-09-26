@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+import pytest
+
 from erp.workflows.accounts_payable.dispute_generator import dispute_generator
 from erp.workflows.accounts_payable.tolerance import (
     evaluate_three_way_tolerances,
@@ -94,3 +96,207 @@ class TestThreeWayMatchingTolerances:
         assert notice.dispute_reason != ""
         assert notice.action_recommended != ""
         assert "exceeds allowable" in notice.dispute_reason
+
+
+class TestThreeWayMatcherCeilingAndApproval:
+    """Verifies that high-value invoices (> $25k Tier 3) are STAGED rather than crashing, and post when human approved."""
+
+    @pytest.mark.asyncio
+    async def test_high_value_invoice_staged_when_unapproved(self):
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from erp.ledger.exceptions import AutonomyCeilingExceeded
+        from erp.workflows.accounts_payable.three_way_matcher import three_way_matcher
+
+        tenant_id = uuid.uuid4()
+        invoice_id = uuid.uuid4()
+        po_id = uuid.uuid4()
+        grn_id = uuid.uuid4()
+        supplier_id = uuid.uuid4()
+
+        invoice = MagicMock()
+        invoice.tenant_id = tenant_id
+        invoice.invoice_id = invoice_id
+        invoice.invoice_number = "INV-60K"
+        invoice.matching_status = "PENDING"
+        invoice.po_id = po_id
+        invoice.grn_id = grn_id
+        invoice.supplier_id = supplier_id
+        invoice.total_amount = Decimal("60000.0000")
+        invoice.currency = "USD"
+        invoice.variance_percentage = Decimal("0.0000")
+        invoice.dispute_reason = None
+
+        supplier = MagicMock()
+        supplier.supplier_code = "SUP-TITAN"
+        supplier.supplier_name = "Titan Supply"
+
+        po = MagicMock()
+        po.po_number = "PO-2026-60K"
+
+        po_item = MagicMock()
+        po_item.quantity = Decimal("100.0000")
+        po_item.unit_price = Decimal("600.0000")
+
+        grn = MagicMock()
+        grn.grn_number = "GRN-2026-60K"
+
+        grn_item = MagicMock()
+        grn_item.quantity_received = Decimal("100.0000")
+        grn_item.unit_price = Decimal("600.0000")
+
+        inv_item = MagicMock()
+        inv_item.item_code = "RAW-TITANIUM"
+        inv_item.quantity = Decimal("100.0000")
+        inv_item.unit_price = Decimal("600.0000")
+
+        session = AsyncMock()
+
+        def mock_execute(stmt):
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = invoice
+            res.scalar_one.return_value = po
+            res.all.return_value = [(po_item, "RAW-TITANIUM")]
+            res_scalars = MagicMock()
+            res_scalars.first.return_value = grn
+            res_scalars.all.return_value = [inv_item]
+            res.scalars.return_value = res_scalars
+            return res
+
+        session.execute = AsyncMock(side_effect=[
+            # 1: invoice
+            MagicMock(scalar_one_or_none=MagicMock(return_value=invoice)),
+            # 2: supplier
+            MagicMock(scalar_one_or_none=MagicMock(return_value=supplier)),
+            # 3: PO
+            MagicMock(scalar_one=MagicMock(return_value=po)),
+            # 4: PO items
+            MagicMock(all=MagicMock(return_value=[(po_item, "RAW-TITANIUM")])),
+            # 5: GRN
+            MagicMock(scalar_one=MagicMock(return_value=grn)),
+            # 6: GRN items
+            MagicMock(all=MagicMock(return_value=[(grn_item, "RAW-TITANIUM")])),
+            # 7: Invoice items
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[inv_item])))),
+        ])
+
+        with patch("erp.workflows.accounts_payable.three_way_matcher.ledger_engine.commit_transaction") as mock_commit:
+            mock_commit.side_effect = AutonomyCeilingExceeded(
+                total_amount=Decimal("60000.0000"),
+                ceiling_amount=Decimal("25000.0000"),
+                tier="TIER_3",
+            )
+
+            result = await three_way_matcher.match_invoice(
+                session=session,
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                po_id=po_id,
+                grn_id=grn_id,
+                human_approved=False,
+            )
+
+            assert result.is_matched is True
+            assert result.matching_status == "STAGED"
+            assert invoice.matching_status == "STAGED"
+            assert "Tier 3 Financial Ceiling Exceeded" in invoice.dispute_reason
+            assert result.ledger_result is None
+
+    @pytest.mark.asyncio
+    async def test_high_value_invoice_commits_when_human_approved(self):
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from erp.ledger.engine import LedgerCommitResult
+        from erp.workflows.accounts_payable.three_way_matcher import three_way_matcher
+
+        tenant_id = uuid.uuid4()
+        invoice_id = uuid.uuid4()
+        po_id = uuid.uuid4()
+        grn_id = uuid.uuid4()
+        supplier_id = uuid.uuid4()
+
+        invoice = MagicMock()
+        invoice.tenant_id = tenant_id
+        invoice.invoice_id = invoice_id
+        invoice.invoice_number = "INV-60K"
+        invoice.matching_status = "STAGED"
+        invoice.po_id = po_id
+        invoice.grn_id = grn_id
+        invoice.supplier_id = supplier_id
+        invoice.total_amount = Decimal("60000.0000")
+        invoice.currency = "USD"
+        invoice.variance_percentage = Decimal("0.0000")
+        invoice.dispute_reason = "Previously staged"
+
+        supplier = MagicMock()
+        supplier.supplier_code = "SUP-TITAN"
+        supplier.supplier_name = "Titan Supply"
+
+        po = MagicMock()
+        po.po_number = "PO-2026-60K"
+
+        po_item = MagicMock()
+        po_item.quantity = Decimal("100.0000")
+        po_item.unit_price = Decimal("600.0000")
+
+        grn = MagicMock()
+        grn.grn_number = "GRN-2026-60K"
+
+        grn_item = MagicMock()
+        grn_item.quantity_received = Decimal("100.0000")
+        grn_item.unit_price = Decimal("600.0000")
+
+        inv_item = MagicMock()
+        inv_item.item_code = "RAW-TITANIUM"
+        inv_item.quantity = Decimal("100.0000")
+        inv_item.unit_price = Decimal("600.0000")
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=invoice)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=supplier)),
+            MagicMock(scalar_one=MagicMock(return_value=po)),
+            MagicMock(all=MagicMock(return_value=[(po_item, "RAW-TITANIUM")])),
+            MagicMock(scalar_one=MagicMock(return_value=grn)),
+            MagicMock(all=MagicMock(return_value=[(grn_item, "RAW-TITANIUM")])),
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[inv_item])))),
+        ])
+
+        with patch("erp.workflows.accounts_payable.three_way_matcher.ledger_engine.commit_transaction") as mock_commit:
+            from datetime import date
+            from erp.ledger.ceilings import AutonomyTier, CeilingEvaluationResult
+
+            mock_commit.return_value = LedgerCommitResult(
+                transaction_id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                posting_date=date.today(),
+                total_volume=Decimal("60000.0000"),
+                lines_committed=2,
+                autonomy_evaluation=CeilingEvaluationResult(
+                    tier=AutonomyTier.TIER_3,
+                    total_amount=Decimal("60000.0000"),
+                    requires_human_approval=True,
+                    requires_notification=True,
+                    is_approved=True,
+                ),
+                outbox_event_id=uuid.uuid4(),
+            )
+
+            result = await three_way_matcher.match_invoice(
+                session=session,
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                po_id=po_id,
+                grn_id=grn_id,
+                human_approved=True,
+            )
+
+            assert result.is_matched is True
+            assert result.matching_status == "MATCHED"
+            assert invoice.matching_status == "MATCHED"
+            assert invoice.dispute_reason is None
+            assert result.ledger_result is not None
+            mock_commit.assert_called_once()
+            call_proposal = mock_commit.call_args[1]["proposal"]
+            assert call_proposal.human_in_the_loop_approved is True
+
