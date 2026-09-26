@@ -134,7 +134,7 @@ export function Sidebar({
 
       {/* 2. Tenant Context Badge (Expanded only) */}
       {!isRail && currentUser && (
-        <div className="px-3 pt-3 pb-1">
+        <div className="px-3 pt-3 pb-1 space-y-1.5">
           <div className="flex items-center gap-2 p-2 rounded-lg border border-cream-300 bg-cream-100/70 shadow-2xs">
             <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-sage-50 border border-sage-500/20 text-sage-600">
               <Building2 className="h-3.5 w-3.5" />
@@ -148,6 +148,19 @@ export function Sidebar({
               </span>
             </div>
           </div>
+
+          {currentUser.setup_complete === false && (
+            <Link
+              href="/setup"
+              onClick={onCloseMobile}
+              className="flex items-center justify-between p-2 rounded-lg border border-amberGold-500/30 bg-amberGold-50 text-[11px] text-amberGold-700 hover:bg-amberGold-100 transition-colors font-medium"
+            >
+              <span>Setup Pending &rarr;</span>
+              <span className="font-mono text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amberGold-200">
+                Action Required
+              </span>
+            </Link>
+          )}
         </div>
       )}
 

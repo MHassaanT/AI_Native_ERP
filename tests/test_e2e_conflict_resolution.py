@@ -44,6 +44,7 @@ async def test_multi_agent_conflict_resolution_and_fallbacks():
                 "email": email,
                 "password": "PasswordARB123!",
                 "full_name": "Autonomous Arbiter",
+                "auto_provision": True,
             },
         )
         assert reg_res.status_code == 201, reg_res.text

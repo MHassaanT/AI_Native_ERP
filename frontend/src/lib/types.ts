@@ -278,3 +278,101 @@ export interface MeshExecutionSummary {
   status: string;
   output_summary: Record<string, any>;
 }
+
+// Stage 1 & 2: Setup Wizard Types
+export interface CountryInfo {
+  country_name: string;
+  country_code: string;
+  currency: string;
+  currency_symbol: string;
+  timezone: string;
+  fiscal_year_start: string;
+  fiscal_year_end: string;
+}
+
+export interface IndustryInfo {
+  name: string;
+  default_modules: string[];
+  cost_centers_count: number;
+  warehouses_count: number;
+  valuation_method: string;
+}
+
+export interface ModuleCatalogItem {
+  slug: string;
+  name: string;
+  icon: string;
+  description: string;
+}
+
+export interface SetupStatus {
+  tenant_id: string;
+  company_name: string;
+  is_complete: boolean;
+  setup_completed_at?: string;
+  country?: string;
+  industry?: string;
+  currency?: string;
+  enabled_modules: string[];
+}
+
+export interface CompleteSetupPayload {
+  country: string;
+  industry: string;
+  currency: string;
+  timezone: string;
+  fiscal_year_start?: string;
+  fiscal_year_end?: string;
+  company_size: string;
+  chart_of_accounts: string;
+  enabled_modules: string[];
+  generate_demo_data: boolean;
+}
+
+export interface CompleteSetupResponse {
+  success: boolean;
+  message: string;
+  access_token: string;
+  token_type: string;
+  provisioned_summary: {
+    accounts_count: number;
+    cost_centers_count: number;
+    warehouses_count: number;
+    fiscal_periods_count: number;
+    modules_count: number;
+    demo_data_seeded: boolean;
+  };
+}
+
+// Stage 3: In-App Module Onboarding Types
+export interface OnboardingStepItem {
+  step_id: string;
+  step_key: string;
+  step_title: string;
+  step_description?: string;
+  action_type: "CREATE_ENTRY" | "VIEW_REPORT" | "CONFIGURE_SETTING" | "VIEW_DOCS";
+  reference_entity?: string;
+  target_route?: string;
+  is_complete: boolean;
+  completed_at?: string;
+  sort_order: number;
+}
+
+export interface OnboardingModuleProgress {
+  module_slug: string;
+  module_name: string;
+  module_description: string;
+  icon: string;
+  is_complete: boolean;
+  total_steps: number;
+  completed_steps: number;
+  steps: OnboardingStepItem[];
+}
+
+export interface OnboardingOverview {
+  overall_progress_pct: number;
+  total_steps: number;
+  completed_steps: number;
+  is_all_complete: boolean;
+  modules: OnboardingModuleProgress[];
+}

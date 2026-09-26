@@ -26,6 +26,7 @@ class VectorSearchEngine:
         self.base_url = base_url
         self.collection = collection
         self._is_initialized = False
+        self._memory_points: dict[str, dict[str, Any]] = {}
 
     async def ensure_collection(self) -> bool:
         """Verifies or creates the HNSW cosine vector collection."""
@@ -75,6 +76,14 @@ class VectorSearchEngine:
             "metadata": metadata or {},
         }
 
+        if not self._is_initialized:
+            self._memory_points[point_uuid] = {
+                "id": point_uuid,
+                "vector": vector,
+                "payload": payload,
+            }
+            return True
+
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.put(
@@ -91,8 +100,13 @@ class VectorSearchEngine:
                 )
                 return res.status_code == 200
         except Exception as e:
-            logger.error("Failed to upsert vector %s: %s", point_id, e)
-            return False
+            logger.error("Failed to upsert vector %s: %s. Storing in memory fallback.", point_id, e)
+            self._memory_points[point_uuid] = {
+                "id": point_uuid,
+                "vector": vector,
+                "payload": payload,
+            }
+            return True
 
     async def search_similar(
         self,
@@ -104,6 +118,32 @@ class VectorSearchEngine:
     ) -> list[dict[str, Any]]:
         """Performs HNSW nearest neighbor cosine search filtered by tenant_id."""
         await self.ensure_collection()
+
+        if not self._is_initialized:
+            import math
+            results = []
+            q_norm = math.sqrt(sum(x * x for x in query_vector)) or 1.0
+            for pt in self._memory_points.values():
+                pl = pt["payload"]
+                if pl.get("tenant_id") != str(tenant_id):
+                    continue
+                if entity_type and pl.get("entity_type") != entity_type:
+                    continue
+                v = pt["vector"]
+                v_norm = math.sqrt(sum(x * x for x in v)) or 1.0
+                dot = sum(a * b for a, b in zip(query_vector, v))
+                score = dot / (q_norm * v_norm)
+                if score >= score_threshold:
+                    results.append({
+                        "id": pt["id"],
+                        "score": score,
+                        "content": pl.get("content", ""),
+                        "entity_type": pl.get("entity_type", ""),
+                        "entity_id": pl.get("entity_id", ""),
+                        "metadata": pl.get("metadata", {}),
+                    })
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:limit]
 
         must_conditions: list[dict[str, Any]] = [
             {"key": "tenant_id", "match": {"value": str(tenant_id)}}

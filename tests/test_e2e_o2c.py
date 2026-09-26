@@ -55,6 +55,7 @@ async def test_order_to_cash_full_lifecycle():
                 "email": email,
                 "password": "PasswordO2C123!",
                 "full_name": "O2C Director",
+                "auto_provision": True,
             },
         )
         assert reg_res.status_code == 201, reg_res.text

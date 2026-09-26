@@ -10,14 +10,18 @@ from erp.api.routes.inventory_rop import router as inventory_rop_router
 from erp.api.routes.iot_telemetry import router as iot_telemetry_router
 from erp.api.routes.ledger import router as ledger_router
 from erp.api.routes.mcp import router as mcp_router
+from erp.api.routes.onboarding import router as onboarding_router
 from erp.api.routes.production_schedule import router as production_schedule_router
 from erp.api.routes.quality import router as quality_router
 from erp.api.routes.reconciliation import router as reconciliation_router
+from erp.api.routes.setup import router as setup_router
 from erp.api.routes.webhooks import router as webhooks_router
 from erp.api.routes.workforce import router as workforce_router
 
 __all__ = [
     "auth_router",
+    "setup_router",
+    "onboarding_router",
     "health_router",
     "ledger_router",
     "agents_router",

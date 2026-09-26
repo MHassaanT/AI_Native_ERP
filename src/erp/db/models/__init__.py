@@ -32,6 +32,11 @@ from erp.db.models.sales import (
     SalesOrderItem,
     SalesQuotation,
 )
+from erp.db.models.onboarding import (
+    OnboardingProgress,
+    OnboardingStep,
+    TenantSettings,
+)
 from erp.db.models.tenant import Tenant, TenantOAuthConnection
 from erp.db.models.user import User
 
@@ -40,6 +45,9 @@ __all__ = [
     "TenantMixin",
     "TimestampMixin",
     "Tenant",
+    "TenantSettings",
+    "OnboardingProgress",
+    "OnboardingStep",
     "TenantOAuthConnection",
     "User",
     "OperatorCertificationRecord",

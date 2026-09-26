@@ -60,6 +60,24 @@ export const api = {
 
   getMe: () => fetchWithTenant("/auth/me"),
 
+  // --- Setup Wizard ---
+  getSetupStatus: () => fetchWithTenant("/setup/status"),
+  getSetupCountries: () => fetchWithTenant("/setup/countries"),
+  getSetupIndustries: () => fetchWithTenant("/setup/industries"),
+  getSetupCharts: (country: string) =>
+    fetchWithTenant(`/setup/charts?country=${encodeURIComponent(country)}`),
+  completeSetup: (data: any) =>
+    fetchWithTenant("/setup/complete", { method: "POST", body: JSON.stringify(data) }),
+
+  // --- In-App Module Onboarding ---
+  getOnboardingProgress: () => fetchWithTenant("/onboarding/progress"),
+  completeOnboardingStep: (stepId: string) =>
+    fetchWithTenant(`/onboarding/steps/${encodeURIComponent(stepId)}/complete`, { method: "POST" }),
+  validateOnboardingStep: (stepId: string) =>
+    fetchWithTenant(`/onboarding/steps/${encodeURIComponent(stepId)}/validate`, { method: "POST" }),
+  skipOnboardingModule: (moduleSlug: string) =>
+    fetchWithTenant(`/onboarding/modules/${encodeURIComponent(moduleSlug)}/skip`, { method: "POST" }),
+
   getHealth: () => fetchWithTenant("/health"),
   getAgentStates: () => fetchWithTenant("/agents/states"),
   dispatchRFQ: (data: { customer_name: string; inquiry_text: string }) =>

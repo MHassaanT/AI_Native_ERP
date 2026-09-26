@@ -41,7 +41,7 @@ export default function SignupPage() {
       });
 
       setAuth(res.access_token, res.user);
-      window.location.href = "/";
+      window.location.href = "/setup";
     } catch (err: any) {
       setError(err.message || "Registration failed. Please check the details.");
     } finally {
@@ -56,13 +56,13 @@ export default function SignupPage() {
         <div className="text-center space-y-2">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-cream-300 bg-cream-100 text-[11px] font-mono text-cream-800">
             <Sparkles className="h-3 w-3 text-sage-600" />
-            <span>Autonomous Enterprise Tenant Onboarding</span>
+            <span>Autonomous Enterprise Tenant Registration</span>
           </div>
           <h1 className="text-2xl font-semibold tracking-tight text-cream-900">
             Create Your Enterprise Organization
           </h1>
           <p className="text-xs text-cream-700 max-w-md mx-auto">
-            Instant autonomous blueprint provisioning: Chart of Accounts, factory floor workstations, warehouse catalog, and SOC 2 cryptographic Genesis block.
+            Stage 1: Register your master tenant credentials. You will then configure your localized Chart of Accounts, fiscal calendar, and industry modules in the Setup Wizard.
           </p>
         </div>
 
@@ -163,20 +163,15 @@ export default function SignupPage() {
               </div>
             </div>
 
-            {/* Autonomous Provisioning Blueprint Note */}
+            {/* Next Step Preview Note */}
             <div className="rounded-lg border border-cream-300 bg-cream-50 p-3 text-[11px] text-cream-700 space-y-1.5">
               <div className="font-semibold text-cream-900 flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5 text-sage-600" />
-                <span>Automated Blueprint Provisioning Checklist:</span>
+                <span>Next Step: Enterprise Setup Wizard</span>
               </div>
-              <ul className="grid grid-cols-2 gap-1 text-[10px] text-cream-600 font-mono">
-                <li>&bull; Double-Entry Chart of Accounts</li>
-                <li>&bull; Cost Centers (PLANT, CORP, SALES)</li>
-                <li>&bull; 4 CNC & Molding Workstations</li>
-                <li>&bull; Initial Inventory Stock & Warehouse</li>
-                <li>&bull; Safety Certified Operator Roster</li>
-                <li>&bull; SHA-256 SOC 2 Genesis Hash Block</li>
-              </ul>
+              <p className="text-[11px] text-cream-600">
+                You will tailor your country fiscal calendar, currency, localized Chart of Accounts, and factory modules before launch.
+              </p>
             </div>
 
             <button
@@ -185,10 +180,10 @@ export default function SignupPage() {
               className="w-full flex items-center justify-center gap-2 rounded-lg border border-cream-400 bg-cream-900 px-4 py-2.5 text-xs font-medium text-cream-50 hover:bg-cream-800 transition-colors disabled:opacity-50"
             >
               {loading ? (
-                <span>Provisioning Ledger & Factory Blueprint...</span>
+                <span>Creating Organization...</span>
               ) : (
                 <>
-                  <span>Create Organization & Launch ERP</span>
+                  <span>Register & Proceed to Setup Wizard</span>
                   <ArrowRight className="h-3.5 w-3.5" />
                 </>
               )}

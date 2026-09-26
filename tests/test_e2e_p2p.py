@@ -53,6 +53,7 @@ async def test_procure_to_pay_full_lifecycle_and_discrepancy_detection():
                 "email": email,
                 "password": "PasswordP2P123!",
                 "full_name": "Procurement Lead",
+                "auto_provision": True,
             },
         )
         assert reg_res.status_code == 201, reg_res.text

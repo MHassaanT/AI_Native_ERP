@@ -10,6 +10,7 @@ export interface UserProfile {
   role: string;
   company_name: string;
   tenant_slug: string;
+  setup_complete?: boolean;
 }
 
 const TOKEN_KEY = "ai_erp_token";

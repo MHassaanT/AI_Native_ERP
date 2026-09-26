@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { getUser } from "@/lib/auth";
+import { ModuleOnboardingWidget } from "@/components/module-onboarding";
 
 export default function OverviewPage() {
   const [user, setUser] = useState<any>(null);
@@ -248,85 +249,8 @@ export default function OverviewPage() {
         })}
       </div>
 
-      {/* Clean Slate Onboarding Banner (When Tenant Has Fresh Clean DB) */}
-      {isFreshTenant && (
-        <div className="rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-cream-300 pb-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="flex h-2 w-2 rounded-full bg-sage-500" />
-                <h2 className="text-sm font-semibold text-cream-900">
-                  Clean Tenant Partition Initialized
-                </h2>
-              </div>
-              <p className="text-xs text-cream-700 mt-1">
-                Your organization starts with a completely fresh database. Standard GAAP Chart of Accounts & Genesis Block #0 are verified.
-              </p>
-            </div>
-            <span className="font-mono text-[11px] text-cream-700">
-              Tenant ID: {user?.tenant_id ? `${user.tenant_id.slice(0, 8)}...` : "Isolated"}
-            </span>
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Link
-              href="/inventory"
-              className="group flex flex-col justify-between rounded-lg border border-cream-300 bg-cream-50 p-4 hover:border-cream-400 hover:bg-cream-100/70 transition-all"
-            >
-              <div className="flex items-center justify-between text-cream-700 group-hover:text-cream-900">
-                <Package className="h-4 w-4" />
-                <ArrowRight className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-cream-900">1. Setup Inventory</div>
-                <div className="text-[11px] text-cream-700 mt-0.5">Register SKUs & safety stock</div>
-              </div>
-            </Link>
-
-            <Link
-              href="/production"
-              className="group flex flex-col justify-between rounded-lg border border-cream-300 bg-cream-50 p-4 hover:border-cream-400 hover:bg-cream-100/70 transition-all"
-            >
-              <div className="flex items-center justify-between text-cream-700 group-hover:text-cream-900">
-                <Wrench className="h-4 w-4" />
-                <ArrowRight className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-cream-900">2. Add Workstations</div>
-                <div className="text-[11px] text-cream-700 mt-0.5">Configure shop floor machines</div>
-              </div>
-            </Link>
-
-            <Link
-              href="/accounts-payable"
-              className="group flex flex-col justify-between rounded-lg border border-cream-300 bg-cream-50 p-4 hover:border-cream-400 hover:bg-cream-100/70 transition-all"
-            >
-              <div className="flex items-center justify-between text-cream-700 group-hover:text-cream-900">
-                <FileCheck className="h-4 w-4" />
-                <ArrowRight className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-cream-900">3. Accounts Payable</div>
-                <div className="text-[11px] text-cream-700 mt-0.5">Create POs & run 3-way match</div>
-              </div>
-            </Link>
-
-            <Link
-              href="/workforce"
-              className="group flex flex-col justify-between rounded-lg border border-cream-300 bg-cream-50 p-4 hover:border-cream-400 hover:bg-cream-100/70 transition-all"
-            >
-              <div className="flex items-center justify-between text-cream-700 group-hover:text-cream-900">
-                <Users className="h-4 w-4" />
-                <ArrowRight className="h-3.5 w-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-              <div className="mt-3">
-                <div className="text-xs font-semibold text-cream-900">4. Register Staff</div>
-                <div className="text-[11px] text-cream-700 mt-0.5">Add operators & certifications</div>
-              </div>
-            </Link>
-          </div>
-        </div>
-      )}
+      {/* Dynamic Grounded In-App Module Onboarding Widget */}
+      <ModuleOnboardingWidget />
 
       {/* Two Column Section */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

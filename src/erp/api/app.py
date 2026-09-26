@@ -17,9 +17,11 @@ from erp.api.routes import (
     iot_telemetry_router,
     ledger_router,
     mcp_router,
+    onboarding_router,
     production_schedule_router,
     quality_router,
     reconciliation_router,
+    setup_router,
     webhooks_router,
     workforce_router,
 )
@@ -69,6 +71,8 @@ def create_app() -> FastAPI:
 
     # Mount Route Handlers
     app.include_router(auth_router, prefix=settings.API_V1_STR)
+    app.include_router(setup_router, prefix=settings.API_V1_STR)
+    app.include_router(onboarding_router, prefix=settings.API_V1_STR)
     app.include_router(health_router, prefix=settings.API_V1_STR)
     app.include_router(ledger_router, prefix=settings.API_V1_STR)
     app.include_router(agents_router, prefix=settings.API_V1_STR)

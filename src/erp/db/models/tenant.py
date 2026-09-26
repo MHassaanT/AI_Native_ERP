@@ -2,9 +2,9 @@
 
 import uuid
 
-from datetime import datetime
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from datetime import date, datetime
+from sqlalchemy import Boolean, Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from erp.db.models.base import Base, TimestampMixin
@@ -21,6 +21,14 @@ class Tenant(Base, TimestampMixin):
     tenant_slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     company_name: Mapped[str] = mapped_column(String(255), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    country: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+    fiscal_year_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fiscal_year_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    company_size: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    setup_completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    enabled_modules: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     plan_tier: Mapped[str] = mapped_column(String(32), nullable=False, default="ENTERPRISE")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
@@ -29,6 +37,9 @@ class Tenant(Base, TimestampMixin):
     )
     oauth_connections: Mapped[list["TenantOAuthConnection"]] = relationship(
         back_populates="tenant", cascade="all, delete-orphan"
+    )
+    settings: Mapped["TenantSettings | None"] = relationship(  # type: ignore[name-defined] # noqa: F821
+        back_populates="tenant", uselist=False, cascade="all, delete-orphan"
     )
 
     __table_args__ = (Index("idx_tenant_slug", "tenant_slug", unique=True),)

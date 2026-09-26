@@ -44,6 +44,7 @@ async def test_production_and_shop_floor_full_lifecycle():
                 "email": email,
                 "password": "PasswordMFG123!",
                 "full_name": "Plant Manager",
+                "auto_provision": True,
             },
         )
         assert reg_res.status_code == 201, reg_res.text
