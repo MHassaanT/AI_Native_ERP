@@ -314,13 +314,48 @@ async def create_supplier_invoice(
     req: CreateInvoiceRequest, tenant_id: TenantIdDep, db: DbSessionDep
 ):
     """Registers a vendor invoice with line items for 3-way matching."""
+    # Check for duplicate invoice number for the same tenant and supplier
+    existing = (
+        await db.execute(
+            select(SupplierInvoice).where(
+                SupplierInvoice.tenant_id == tenant_id,
+                SupplierInvoice.supplier_id == req.supplier_id,
+                SupplierInvoice.invoice_number == req.invoice_number,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Invoice '{req.invoice_number}' already exists for this supplier (status: {existing.matching_status}). "
+                "If goods were received after the invoice was recorded, please use 'Re-evaluate Match' on the existing invoice."
+            ),
+        )
+
+    # If grn_id is not provided, check if a GRN already exists for po_id
+    grn_id = req.grn_id
+    if not grn_id and req.po_id:
+        po_grn = (
+            await db.execute(
+                select(GoodsReceiptNote)
+                .where(
+                    GoodsReceiptNote.tenant_id == tenant_id,
+                    GoodsReceiptNote.po_id == req.po_id,
+                )
+                .order_by(GoodsReceiptNote.created_at.desc())
+            )
+        ).scalars().first()
+        if po_grn:
+            grn_id = po_grn.grn_id
+
     total_amount = req.subtotal + req.tax_amount
     inv = SupplierInvoice(
         tenant_id=tenant_id,
         invoice_number=req.invoice_number,
         supplier_id=req.supplier_id,
         po_id=req.po_id,
-        grn_id=req.grn_id,
+        grn_id=grn_id,
         invoice_date=req.invoice_date,
         currency=req.currency,
         subtotal=req.subtotal,
@@ -334,30 +369,53 @@ async def create_supplier_invoice(
 
     from erp.db.models.inventory import Item
 
-    for itm in req.items:
-        item_id = itm.item_id
-        if not item_id:
-            db_item = (
-                await db.execute(
-                    select(Item).where(
-                        Item.tenant_id == tenant_id,
-                        Item.item_code == itm.item_code,
+    if req.items:
+        for itm in req.items:
+            item_id = itm.item_id
+            if not item_id:
+                db_item = (
+                    await db.execute(
+                        select(Item).where(
+                            Item.tenant_id == tenant_id,
+                            Item.item_code == itm.item_code,
+                        )
                     )
-                )
-            ).scalar_one_or_none()
-            if db_item:
-                item_id = db_item.item_id
+                ).scalar_one_or_none()
+                if db_item:
+                    item_id = db_item.item_id
 
-        inv_item = SupplierInvoiceItem(
-            tenant_id=tenant_id,
-            invoice_id=inv.invoice_id,
-            item_id=item_id,
-            item_code=itm.item_code,
-            quantity=itm.quantity,
-            unit_price=itm.unit_price,
-            line_total=itm.quantity * itm.unit_price,
-        )
-        db.add(inv_item)
+            inv_item = SupplierInvoiceItem(
+                tenant_id=tenant_id,
+                invoice_id=inv.invoice_id,
+                item_id=item_id,
+                item_code=itm.item_code,
+                quantity=itm.quantity,
+                unit_price=itm.unit_price,
+                line_total=itm.quantity * itm.unit_price,
+            )
+            db.add(inv_item)
+    elif req.po_id:
+        po_items = (
+            await db.execute(
+                select(PurchaseOrderItem, Item.item_code)
+                .join(Item, PurchaseOrderItem.item_id == Item.item_id)
+                .where(
+                    PurchaseOrderItem.tenant_id == tenant_id,
+                    PurchaseOrderItem.po_id == req.po_id,
+                )
+            )
+        ).all()
+        for po_item, code in po_items:
+            inv_item = SupplierInvoiceItem(
+                tenant_id=tenant_id,
+                invoice_id=inv.invoice_id,
+                item_id=po_item.item_id,
+                item_code=code,
+                quantity=po_item.quantity,
+                unit_price=po_item.unit_price,
+                line_total=po_item.quantity * po_item.unit_price,
+            )
+            db.add(inv_item)
 
     await db.flush()
     return inv

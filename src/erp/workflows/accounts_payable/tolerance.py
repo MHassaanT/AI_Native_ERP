@@ -24,6 +24,8 @@ class LineItemMatchEvaluation(BaseModel):
 class ThreeWayToleranceSummary(BaseModel):
     is_fully_matched: bool
     overall_variance_percentage: Decimal
+    quantity_variance_percentage: Decimal = Decimal("0.0000")
+    price_variance_percentage: Decimal = Decimal("0.0000")
     discrepancies: list[str] = Field(default_factory=list)
     line_evaluations: list[LineItemMatchEvaluation] = Field(default_factory=list)
 
@@ -40,6 +42,7 @@ def evaluate_three_way_tolerances(
     line_evals = []
     discrepancies = []
     max_price_var = Decimal("0.0000")
+    max_qty_var = Decimal("0.0000")
 
     for inv_line in invoice_lines:
         code = inv_line["item_code"]
@@ -51,6 +54,8 @@ def evaluate_three_way_tolerances(
             discrepancies.append(
                 f"SKU mismatch: Item '{code}' on invoice does not exist in Purchase Order."
             )
+            max_qty_var = max(max_qty_var, Decimal("1.0000"))
+            max_price_var = max(max_price_var, Decimal("1.0000"))
             line_evals.append(
                 LineItemMatchEvaluation(
                     item_code=code,
@@ -70,12 +75,19 @@ def evaluate_three_way_tolerances(
 
         po_line = po_item_map[code]
         po_price = Decimal(str(po_line["unit_price"]))
+        po_qty = Decimal(str(po_line.get("quantity", inv_qty)))
 
         # 2. Quantity(Invoice) <= Quantity(GRN)
         grn_line = grn_item_map.get(code)
         grn_qty = Decimal(str(grn_line["quantity"])) if grn_line else Decimal("0.0000")
         is_qty_valid = inv_qty <= grn_qty
         if not is_qty_valid:
+            if po_qty > 0:
+                qty_diff = max(inv_qty - grn_qty, Decimal("0.0000"))
+                line_qty_var = qty_diff / po_qty
+            else:
+                line_qty_var = Decimal("1.0000")
+            max_qty_var = max(max_qty_var, line_qty_var)
             discrepancies.append(
                 f"Quantity violation on '{code}': Billed {inv_qty} exceeds warehouse received {grn_qty}."
             )
@@ -119,6 +131,8 @@ def evaluate_three_way_tolerances(
     return ThreeWayToleranceSummary(
         is_fully_matched=is_all_matched,
         overall_variance_percentage=(max_price_var * 100).quantize(Decimal("0.0001")),
+        quantity_variance_percentage=(max_qty_var * 100).quantize(Decimal("0.0001")),
+        price_variance_percentage=(max_price_var * 100).quantize(Decimal("0.0001")),
         discrepancies=discrepancies,
         line_evaluations=line_evals,
     )

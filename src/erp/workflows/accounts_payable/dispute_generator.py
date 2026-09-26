@@ -18,6 +18,8 @@ class VendorDisputeNotice(BaseModel):
     discrepancy_details: list[str]
     resolution_instructions: str
     formatted_notice: str
+    dispute_reason: str = ""
+    action_recommended: str = ""
 
 
 class DisputeGenerator:
@@ -57,6 +59,13 @@ class DisputeGenerator:
             f"================================================================="
         )
 
+        reason = (
+            "; ".join(tolerance_summary.discrepancies)
+            if tolerance_summary.discrepancies
+            else "Discrepancy detected during 3-way matching"
+        )
+        action = "Submit credit memo or corrected invoice via portal within 5 business days."
+
         return VendorDisputeNotice(
             dispute_id=dispute_id,
             invoice_number=invoice_number,
@@ -64,8 +73,10 @@ class DisputeGenerator:
             created_at=now,
             overall_variance_percentage=tolerance_summary.overall_variance_percentage,
             discrepancy_details=tolerance_summary.discrepancies,
-            resolution_instructions="Submit credit memo or corrected invoice via portal within 5 business days.",
+            resolution_instructions=action,
             formatted_notice=formatted,
+            dispute_reason=reason,
+            action_recommended=action,
         )
 
 

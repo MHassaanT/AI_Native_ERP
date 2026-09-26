@@ -65,12 +65,26 @@ class ThreeWayMatcher:
         if not invoice:
             raise ValueError(f"Supplier invoice '{invoice_id}' not found.")
 
-        target_po_id = po_id or invoice.po_id
-        target_grn_id = grn_id or invoice.grn_id
+        # If already matched and posted, return matched result to avoid duplicate postings
+        if invoice.matching_status == "MATCHED":
+            return ThreeWayMatchResult(
+                invoice_id=invoice.invoice_id,
+                invoice_number=invoice.invoice_number,
+                is_matched=True,
+                matching_status="MATCHED",
+                tolerance_summary=ThreeWayToleranceSummary(
+                    is_fully_matched=True,
+                    overall_variance_percentage=invoice.variance_percentage,
+                    discrepancies=[],
+                ),
+                ledger_result=None,
+                dispute_notice=None,
+            )
 
-        if not target_po_id or not target_grn_id:
+        target_po_id = po_id or invoice.po_id
+        if not target_po_id:
             raise ValueError(
-                f"Cannot perform 3-way match: missing PO ({target_po_id}) or GRN ({target_grn_id}) link."
+                f"Cannot perform 3-way match: invoice '{invoice.invoice_number}' is not linked to a Purchase Order."
             )
 
         # 2. Fetch Supplier
@@ -81,9 +95,95 @@ class ThreeWayMatcher:
                     Supplier.supplier_id == invoice.supplier_id,
                 )
             )
-        ).scalar_one()
+        ).scalar_one_or_none()
+        if not sup:
+            raise ValueError(f"Supplier for invoice '{invoice.invoice_number}' not found.")
 
-        # 3. Fetch Purchase Order and Line Items
+        # 3. Dynamic GRN Resolution:
+        # Check if an explicit grn_id was passed, or if the PO has a recorded GRN
+        target_grn_id = grn_id
+        if not target_grn_id and target_po_id:
+            po_grn = (
+                await session.execute(
+                    select(GoodsReceiptNote)
+                    .where(
+                        GoodsReceiptNote.tenant_id == tenant_id,
+                        GoodsReceiptNote.po_id == target_po_id,
+                    )
+                    .order_by(GoodsReceiptNote.created_at.desc())
+                )
+            ).scalars().first()
+            if po_grn:
+                target_grn_id = po_grn.grn_id
+                invoice.grn_id = target_grn_id
+
+        if not target_grn_id and invoice.grn_id:
+            # Check if invoice.grn_id belongs to target_po_id
+            stored_grn = (
+                await session.execute(
+                    select(GoodsReceiptNote).where(
+                        GoodsReceiptNote.tenant_id == tenant_id,
+                        GoodsReceiptNote.grn_id == invoice.grn_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if stored_grn and stored_grn.po_id == target_po_id:
+                target_grn_id = invoice.grn_id
+
+        # If no GRN exists for this PO yet, mark DISPUTED gracefully
+        if not target_grn_id:
+            invoice.matching_status = "DISPUTED"
+            invoice.variance_percentage = Decimal("0.0000")
+            discrepancy_msg = (
+                "Missing Goods Receipt Note (GRN): Goods have not been received or confirmed into warehouse stock."
+            )
+            invoice.dispute_reason = discrepancy_msg
+
+            tolerance = ThreeWayToleranceSummary(
+                is_fully_matched=False,
+                overall_variance_percentage=Decimal("0.0000"),
+                quantity_variance_percentage=Decimal("100.0000"),
+                price_variance_percentage=Decimal("0.0000"),
+                discrepancies=[discrepancy_msg],
+                line_evaluations=[],
+            )
+
+            dispute_doc = dispute_generator.generate_notice(
+                invoice_number=invoice.invoice_number,
+                supplier_code=sup.supplier_code,
+                supplier_name=sup.supplier_name,
+                tolerance_summary=tolerance,
+            )
+
+            await OutboxManager.enqueue_event(
+                session=session,
+                tenant_id=tenant_id,
+                aggregate_type="INVOICE",
+                aggregate_id=str(invoice.invoice_id),
+                event_type="erp.supplychain.invoice_disputed",
+                payload={
+                    "invoice_number": invoice.invoice_number,
+                    "supplier_code": sup.supplier_code,
+                    "variance_percentage": "0.0000",
+                    "dispute_id": dispute_doc.dispute_id,
+                },
+            )
+            logger.warning(
+                "3-way match FAILED for invoice %s (missing GRN). Marked DISPUTED.",
+                invoice.invoice_number,
+            )
+            await session.flush()
+            return ThreeWayMatchResult(
+                invoice_id=invoice.invoice_id,
+                invoice_number=invoice.invoice_number,
+                is_matched=False,
+                matching_status=invoice.matching_status,
+                tolerance_summary=tolerance,
+                ledger_result=None,
+                dispute_notice=dispute_doc,
+            )
+
+        # 4. Fetch Purchase Order and Line Items
         po = (
             await session.execute(
                 select(PurchaseOrder).where(
@@ -113,7 +213,7 @@ class ThreeWayMatcher:
             for line, code in po_lines_db
         ]
 
-        # 4. Fetch GRN
+        # 5. Fetch GRN
         grn = (
             await session.execute(
                 select(GoodsReceiptNote).where(
@@ -123,7 +223,7 @@ class ThreeWayMatcher:
             )
         ).scalar_one()
 
-        # 4. Fetch actual GRN line items from DB
+        # Fetch actual GRN line items from DB
         grn_items_db = (
             await session.execute(
                 select(GoodsReceiptNoteItem, Item.item_code)

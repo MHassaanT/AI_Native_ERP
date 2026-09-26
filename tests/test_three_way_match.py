@@ -51,6 +51,20 @@ class TestThreeWayMatchingTolerances:
         summary = evaluate_three_way_tolerances(invoice_lines, po_lines, grn_lines)
         assert summary.is_fully_matched is False
         assert any("Quantity violation" in d for d in summary.discrepancies)
+        assert summary.quantity_variance_percentage > Decimal("0.0000")
+        assert summary.price_variance_percentage == Decimal("0.0000")
+
+    def test_missing_grn_zero_received_evaluates_correctly(self):
+        # Invoiced 100 units @ $220, PO has 100 units @ $220, but GRN received is 0
+        invoice_lines = [{"item_code": "RAW-TITANIUM", "quantity": 100, "unit_price": "220.0000"}]
+        po_lines = [{"item_code": "RAW-TITANIUM", "quantity": 100, "unit_price": "220.0000"}]
+        grn_lines = []
+
+        summary = evaluate_three_way_tolerances(invoice_lines, po_lines, grn_lines)
+        assert summary.is_fully_matched is False
+        assert any("Quantity violation" in d for d in summary.discrepancies)
+        assert summary.quantity_variance_percentage == Decimal("100.0000")
+        assert summary.price_variance_percentage == Decimal("0.0000")
 
     def test_sku_mismatch_fails(self):
         invoice_lines = [{"item_code": "UNKNOWN-SKU-99", "quantity": 100, "unit_price": "10.00"}]
@@ -77,3 +91,6 @@ class TestThreeWayMatchingTolerances:
         assert notice.invoice_number == "INV-2026-DISPUTE-01"
         assert "DISCREPANCY NOTICE" in notice.formatted_notice
         assert "DISPUTED" in notice.formatted_notice
+        assert notice.dispute_reason != ""
+        assert notice.action_recommended != ""
+        assert "exceeds allowable" in notice.dispute_reason

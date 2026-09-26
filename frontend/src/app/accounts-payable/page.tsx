@@ -39,6 +39,7 @@ export default function AccountsPayablePage() {
   const [newSubtotal, setNewSubtotal] = useState("");
   const [selectedPoId, setSelectedPoId] = useState("");
   const [creatingInvoice, setCreatingInvoice] = useState(false);
+  const [invoiceModalError, setInvoiceModalError] = useState<string | null>(null);
 
   const [showCreatePoModal, setShowCreatePoModal] = useState(false);
   const [newPoNumber, setNewPoNumber] = useState("");
@@ -195,22 +196,23 @@ export default function AccountsPayablePage() {
   const handleCreateInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPoId) {
-      setError("Please select an active Purchase Order to match against.");
+      setInvoiceModalError("Please select an active Purchase Order to match against.");
       return;
     }
     setCreatingInvoice(true);
+    setInvoiceModalError(null);
     setError(null);
     try {
       const po = purchaseOrders.find((p) => p.po_id === selectedPoId);
       if (!po) throw new Error("Selected PO not found.");
 
-      const grn = goodsReceipts.find((g) => g.po_id === selectedPoId) || goodsReceipts[0];
+      const matchingGrn = goodsReceipts.find((g) => g.po_id === selectedPoId);
 
       await api.createInvoice({
         invoice_number: newInvNumber.trim(),
         supplier_id: po.supplier_id,
         po_id: po.po_id,
-        grn_id: grn ? grn.grn_id : null,
+        grn_id: matchingGrn ? matchingGrn.grn_id : null,
         invoice_date: new Date().toISOString().split("T")[0],
         subtotal: parseFloat(newSubtotal),
         tax_amount: 0,
@@ -219,10 +221,11 @@ export default function AccountsPayablePage() {
       setShowCreateInvoiceModal(false);
       setNewInvNumber("");
       setNewSubtotal("");
+      setInvoiceModalError(null);
       setActiveTab("invoices");
       await loadData();
     } catch (err: any) {
-      setError(err.message || "Failed to create invoice.");
+      setInvoiceModalError(err.message || "Failed to create invoice.");
     } finally {
       setCreatingInvoice(false);
     }
@@ -385,6 +388,7 @@ export default function AccountsPayablePage() {
           </button>
           <button
             onClick={() => {
+              setInvoiceModalError(null);
               setNewInvNumber(`INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
               setShowCreateInvoiceModal(true);
             }}
@@ -498,13 +502,13 @@ export default function AccountsPayablePage() {
               <div>
                 Qty Variance:{" "}
                 <span className="font-bold">
-                  {matchResult.tolerance_summary.quantity_variance_percentage}%
+                  {matchResult.tolerance_summary.quantity_variance_percentage ?? "0.00"}%
                 </span>
               </div>
               <div>
                 Price Variance:{" "}
                 <span className="font-bold">
-                  {matchResult.tolerance_summary.price_variance_percentage}%
+                  {matchResult.tolerance_summary.price_variance_percentage ?? "0.00"}%
                 </span>
               </div>
               <div>
@@ -522,8 +526,19 @@ export default function AccountsPayablePage() {
           {matchResult.dispute_notice && (
             <div className="bg-white/80 p-3 rounded border border-terracotta-300 text-[11px] font-mono text-terracotta-900 space-y-1">
               <div className="font-bold">Vendor Dispute Notice Generated:</div>
-              <p>&bull; Reason: {matchResult.dispute_notice.dispute_reason}</p>
-              <p>&bull; Recommended Action: {matchResult.dispute_notice.action_recommended}</p>
+              <p>
+                &bull; Reason:{" "}
+                {matchResult.dispute_notice.dispute_reason ||
+                  (matchResult.dispute_notice.discrepancy_details && matchResult.dispute_notice.discrepancy_details.join("; ")) ||
+                  (matchResult.tolerance_summary?.discrepancies && matchResult.tolerance_summary.discrepancies.join("; ")) ||
+                  "Variance exceeded allowable tolerance threshold"}
+              </p>
+              <p>
+                &bull; Recommended Action:{" "}
+                {matchResult.dispute_notice.action_recommended ||
+                  matchResult.dispute_notice.resolution_instructions ||
+                  "Record Goods Receipt Note (GRN) or resolve unit pricing discrepancy with vendor."}
+              </p>
               <p className="text-[10px] text-cream-600 mt-1 italic">
                 General Ledger posting held to prevent unauthorized cash leakage.
               </p>
@@ -614,6 +629,7 @@ export default function AccountsPayablePage() {
                 )}
                 <button
                   onClick={() => {
+                    setInvoiceModalError(null);
                     setNewInvNumber(`INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
                     setShowCreateInvoiceModal(true);
                   }}
@@ -640,7 +656,14 @@ export default function AccountsPayablePage() {
                 <tbody className="divide-y divide-cream-200">
                   {invoices.map((inv) => (
                     <tr key={inv.invoice_id} className="hover:bg-cream-50/50 transition-colors">
-                      <td className="py-3 px-4 font-mono font-medium text-cream-900">{inv.invoice_number}</td>
+                      <td className="py-3 px-4 font-mono font-medium text-cream-900">
+                        <div>{inv.invoice_number}</div>
+                        {inv.matching_status === "DISPUTED" && inv.dispute_reason && (
+                          <div className="text-[10px] text-terracotta-700 font-sans mt-0.5 max-w-xs truncate" title={inv.dispute_reason}>
+                            &bull; {inv.dispute_reason}
+                          </div>
+                        )}
+                      </td>
                       <td className="py-3 px-4 text-cream-700">{inv.invoice_date}</td>
                       <td className="py-3 px-4 font-mono font-bold text-cream-900">
                         ${parseFloat(inv.total_amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -670,8 +693,21 @@ export default function AccountsPayablePage() {
                           >
                             {matchingId === inv.invoice_id ? "Evaluating Match..." : "Execute 3-Way Match"}
                           </button>
+                        ) : inv.matching_status === "DISPUTED" ? (
+                          <button
+                            onClick={() => handleMatch(inv.invoice_id)}
+                            disabled={matchingId === inv.invoice_id}
+                            className="inline-flex items-center gap-1.5 rounded border border-terracotta-400 bg-terracotta-50 px-2.5 py-1 text-[11px] font-medium text-terracotta-900 hover:bg-terracotta-100 transition-colors disabled:opacity-50 shadow-2xs"
+                            title="Re-run 3-way match after recording GRN or resolving dispute"
+                          >
+                            <RefreshCw className={`h-3 w-3 text-terracotta-700 ${matchingId === inv.invoice_id ? "animate-spin" : ""}`} />
+                            <span>{matchingId === inv.invoice_id ? "Re-evaluating..." : "Re-evaluate Match"}</span>
+                          </button>
                         ) : (
-                          <span className="text-[11px] text-cream-500 font-mono italic">Evaluated</span>
+                          <span className="inline-flex items-center gap-1 text-[11px] text-sage-800 font-mono font-medium">
+                            <CheckCircle2 className="h-3.5 w-3.5 text-sage-600" />
+                            <span>Matched &amp; Posted</span>
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -952,6 +988,15 @@ export default function AccountsPayablePage() {
               </div>
             ) : (
               <form onSubmit={handleCreateInvoice} className="space-y-4 text-xs">
+                {invoiceModalError && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-terracotta-50 border border-terracotta-300 text-terracotta-900 text-xs">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-terracotta-700 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <div className="font-semibold text-terracotta-900">Registration Error</div>
+                      <p className="text-[11px] leading-relaxed text-terracotta-800">{invoiceModalError}</p>
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="block font-medium text-cream-900 mb-1">Invoice Reference #</label>
                   <input
