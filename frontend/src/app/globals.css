@@ -29,3 +29,43 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #B4A897;
 }
+
+/* POS Thermal & Tax Invoice Print Styling */
+@media print {
+  html, body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  #pos-printable-receipt,
+  #pos-printable-receipt * {
+    visibility: visible !important;
+  }
+
+  #pos-printable-receipt {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    max-width: 480px !important;
+    margin: 0 auto !important;
+    padding: 24px !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  .no-print,
+  .no-print * {
+    display: none !important;
+    visibility: hidden !important;
+  }
+}

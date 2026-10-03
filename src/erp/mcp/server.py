@@ -8,6 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp.mcp.schemas import MCPRequest, MCPResponse, MCPToolDefinition
 from erp.mcp.tools.ap_tools import tool_execute_three_way_match
 from erp.mcp.tools.banking_tools import tool_reconcile_bank_transaction
+from erp.mcp.tools.billing_tools import (
+    tool_evaluate_budget_compliance,
+    tool_issue_dunning_notices,
+    tool_stage_pos_checkout,
+    tool_trigger_subscription_billing,
+)
 from erp.mcp.tools.commercial_tools import (
     tool_calculate_landed_margin_price,
     tool_generate_pdf_quote,
@@ -190,6 +196,45 @@ AVAILABLE_TOOLS: list[MCPToolDefinition] = [
             "required": ["customer_name", "sku", "quantity", "unit_price"],
         },
     ),
+    MCPToolDefinition(
+        name="stage_pos_checkout",
+        description="Processes a point of sale (POS) retail transaction with instant inventory deduction and double-entry GL commit.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "opening_id": {"type": "string"},
+                "customer_id": {"type": "string"},
+                "items": {"type": "array", "items": {"type": "object"}},
+                "payment_method": {"type": "string", "default": "CASH"},
+                "paid_amount": {"type": "number"},
+            },
+            "required": ["opening_id", "customer_id", "items"],
+        },
+    ),
+    MCPToolDefinition(
+        name="evaluate_budget_compliance",
+        description="Evaluates whether a proposed expense complies with the budget for a cost center and account.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "fiscal_year": {"type": "integer"},
+                "cost_center": {"type": "string"},
+                "account_code": {"type": "string"},
+                "proposed_expense": {"type": "number"},
+            },
+            "required": ["fiscal_year", "cost_center", "account_code", "proposed_expense"],
+        },
+    ),
+    MCPToolDefinition(
+        name="issue_dunning_notices",
+        description="Scans overdue customer receivables, applies dunning fee and interest policies, and issues notices.",
+        inputSchema={"type": "object"},
+    ),
+    MCPToolDefinition(
+        name="trigger_subscription_billing",
+        description="Executes recurring subscription renewals, advances next billing dates, and generates sales invoices.",
+        inputSchema={"type": "object"},
+    ),
 ]
 
 
@@ -209,7 +254,12 @@ class MCPServer:
             "authorize_expense_payout": tool_authorize_expense_payout,
             "calculate_landed_margin_price": tool_calculate_landed_margin_price,
             "generate_pdf_quote": tool_generate_pdf_quote,
+            "stage_pos_checkout": tool_stage_pos_checkout,
+            "evaluate_budget_compliance": tool_evaluate_budget_compliance,
+            "issue_dunning_notices": tool_issue_dunning_notices,
+            "trigger_subscription_billing": tool_trigger_subscription_billing,
         }
+
 
     async def handle_request(
         self,

@@ -22,6 +22,13 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
+  Store,
+  Briefcase,
+  Receipt,
+  ShoppingBag,
+  Headset,
+  BarChart3,
+  Truck,
 } from "lucide-react";
 import { getUser, clearAuth, UserProfile } from "@/lib/auth";
 
@@ -50,15 +57,23 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Commercial & Operations",
     items: [
       { href: "/commercial", label: "Commercial & Sales", icon: DollarSign },
+      { href: "/crm", label: "CRM & Support Desk", icon: Headset },
+      { href: "/procurement", label: "Procurement & Buying", icon: ShoppingBag },
+      { href: "/pos", label: "Point of Sale (POS)", icon: Store },
       { href: "/production", label: "Production & BOM", icon: Factory },
       { href: "/quality", label: "Quality & IoT Sensors", icon: Activity },
       { href: "/inventory", label: "Inventory & Warehouses", icon: Layers },
+      { href: "/subcontracting", label: "Subcontracting Ops", icon: Truck },
       { href: "/maintenance", label: "Maintenance Hub", icon: Wrench },
+      { href: "/assets", label: "Fixed Assets & Dep.", icon: Building2 },
+      { href: "/projects", label: "Projects & Timesheets", icon: Briefcase },
     ],
   },
   {
     title: "Finance & Governance",
     items: [
+      { href: "/reports", label: "Reports & Analytics", icon: BarChart3 },
+      { href: "/billing", label: "Billing & Subscriptions", icon: Receipt },
       { href: "/accounts-payable", label: "3-Way Invoice Match", icon: FileCheck },
       { href: "/bank-reconciliation", label: "Bank Reconciliation", icon: Landmark },
       { href: "/ledger", label: "General Ledger", icon: BookOpen },
@@ -66,6 +81,7 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
 ];
+
 
 interface SidebarProps {
   isCollapsed: boolean;

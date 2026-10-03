@@ -52,14 +52,27 @@ class PredictiveMaintenanceDispatcher:
                 alarm_summary="Nominal conditions",
             )
 
-        # 1. Fetch Workstation
+        # 1. Fetch Workstation (auto-provision if not found)
         ws_stmt = select(Workstation).where(
             Workstation.tenant_id == tenant_id,
             Workstation.workstation_code == frame.workstation_code,
         )
         ws = (await session.execute(ws_stmt)).scalar_one_or_none()
         if not ws:
-            raise ValueError(f"Workstation '{frame.workstation_code}' not found.")
+            ws = Workstation(
+                workstation_id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                workstation_code=frame.workstation_code,
+                workstation_name=f"{frame.workstation_code} Machine",
+                workstation_type="GENERAL",
+                production_capacity=Decimal("1.0000"),
+                hourly_rate=Decimal("45.0000"),
+                status="OPERATIONAL",
+                health_score=Decimal("100.00"),
+                is_active=True,
+            )
+            session.add(ws)
+            await session.flush()
 
         # 2. Check Spare Parts (e.g. BEARING-SPINDLE-6004)
         part_stmt = select(Item).where(
@@ -87,14 +100,17 @@ class PredictiveMaintenanceDispatcher:
 
         # 3. Create Maintenance Work Order
         ticket_no = f"MNT-{uuid.uuid4().hex[:6].upper()}"
+        ticket_id = uuid.uuid4()
         ticket = MaintenanceTicket(
+            ticket_id=ticket_id,
             tenant_id=tenant_id,
             ticket_number=ticket_no,
             workstation_id=ws.workstation_id,
+            trigger_type="PREDICTIVE_ANOMALY",
+            fault_code=eval_result.alarm_reasons[0][:64] if eval_result.alarm_reasons else "BEARING-DEGRADE",
             priority="CRITICAL" if eval_result.is_catastrophic else "HIGH",
             description="; ".join(eval_result.alarm_reasons),
-            status="SCHEDULED",
-
+            status="OPEN",
         )
         session.add(ticket)
 
@@ -111,7 +127,7 @@ class PredictiveMaintenanceDispatcher:
             session=session,
             tenant_id=tenant_id,
             aggregate_type="MAINTENANCE_TICKET",
-            aggregate_id=str(ticket.ticket_id),
+            aggregate_id=str(ticket_id),
             event_type="erp.production.machine_fault",
             payload={
                 "ticket_number": ticket_no,

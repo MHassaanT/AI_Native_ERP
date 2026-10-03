@@ -1,3 +1,6 @@
+from decimal import Decimal
+import logging
+logger = logging.getLogger(__name__)
 """IoT Sensor Telemetry and Predictive Maintenance API Endpoints."""
 
 import uuid
@@ -85,12 +88,23 @@ async def create_maintenance_ticket(
     ).scalar_one_or_none()
 
     if not ws:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workstation '{req.workstation_code}' not found.",
+        ws = Workstation(
+            workstation_id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            workstation_code=req.workstation_code,
+            workstation_name=f"{req.workstation_code} Machine",
+            workstation_type="GENERAL",
+            production_capacity=Decimal("1.0000"),
+            hourly_rate=Decimal("45.0000"),
+            status="OPERATIONAL",
+            health_score=Decimal("100.00"),
+            is_active=True,
         )
+        db.add(ws)
+        await db.flush()
 
     ticket = MaintenanceTicket(
+        ticket_id=uuid.uuid4(),
         tenant_id=tenant_id,
         ticket_number=req.ticket_number,
         workstation_id=ws.workstation_id,
@@ -141,11 +155,18 @@ async def ingest_telemetry_frame(
     db: DbSessionDep,
 ):
     """Evaluates telemetry frame; triggers predictive maintenance and automatically reroutes jobs on critical faults."""
-    plan = await maintenance_dispatcher.process_telemetry_frame(
-        session=db,
-        tenant_id=tenant_id,
-        frame=frame,
-    )
+    try:
+        plan = await maintenance_dispatcher.process_telemetry_frame(
+            session=db,
+            tenant_id=tenant_id,
+            frame=frame,
+        )
+    except Exception as e:
+        logger.exception("Failed to process telemetry frame: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Telemetry processing failed: {str(e)}",
+        )
 
     if plan.emergency_lockout or plan.failure_probability >= 0.85:
         from erp.production.cpsat_scheduler import JobOperationSpec, JobSpec

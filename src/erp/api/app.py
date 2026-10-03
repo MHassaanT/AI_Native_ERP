@@ -9,21 +9,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from erp.api.routes import (
     agents_router,
     ap_router,
+    assets_router,
     audit_soc2_router,
     auth_router,
+    billing_router,
     commercial_router,
+    crm_router,
     health_router,
+    hr_router,
     inventory_rop_router,
     iot_telemetry_router,
     ledger_router,
+    maintenance_router,
     mcp_router,
     onboarding_router,
+    payroll_router,
+    procurement_router,
     production_schedule_router,
+    projects_router,
     quality_router,
     reconciliation_router,
     setup_router,
+    stock_router,
+    support_router,
     webhooks_router,
     workforce_router,
+    reports_router,
+    subcontracting_router,
+    companies_router,
+    currency_router,
 )
 from erp.config import settings
 from erp.events.email_gateway import email_gateway
@@ -75,8 +89,10 @@ def create_app() -> FastAPI:
     app.include_router(onboarding_router, prefix=settings.API_V1_STR)
     app.include_router(health_router, prefix=settings.API_V1_STR)
     app.include_router(ledger_router, prefix=settings.API_V1_STR)
+    app.include_router(billing_router, prefix=settings.API_V1_STR)
     app.include_router(agents_router, prefix=settings.API_V1_STR)
     app.include_router(ap_router, prefix=settings.API_V1_STR)
+    app.include_router(procurement_router, prefix=settings.API_V1_STR)
     app.include_router(reconciliation_router, prefix=settings.API_V1_STR)
     app.include_router(mcp_router, prefix=settings.API_V1_STR)
     app.include_router(inventory_rop_router, prefix=settings.API_V1_STR)
@@ -84,9 +100,22 @@ def create_app() -> FastAPI:
     app.include_router(iot_telemetry_router, prefix=settings.API_V1_STR)
     app.include_router(workforce_router, prefix=settings.API_V1_STR)
     app.include_router(commercial_router, prefix=settings.API_V1_STR)
+    app.include_router(stock_router, prefix=settings.API_V1_STR)
+    app.include_router(hr_router, prefix=settings.API_V1_STR)
+    app.include_router(payroll_router, prefix=settings.API_V1_STR)
     app.include_router(audit_soc2_router, prefix=settings.API_V1_STR)
+    app.include_router(crm_router, prefix=settings.API_V1_STR)
+    app.include_router(support_router, prefix=settings.API_V1_STR)
     app.include_router(webhooks_router, prefix=settings.API_V1_STR)
     app.include_router(quality_router, prefix=settings.API_V1_STR)
+    app.include_router(assets_router, prefix=settings.API_V1_STR)
+    app.include_router(projects_router, prefix=settings.API_V1_STR)
+    app.include_router(maintenance_router, prefix=settings.API_V1_STR)
+    app.include_router(reports_router, prefix=settings.API_V1_STR)
+    app.include_router(subcontracting_router, prefix=settings.API_V1_STR)
+    app.include_router(companies_router, prefix=settings.API_V1_STR)
+    app.include_router(currency_router, prefix=settings.API_V1_STR)
+
 
     @app.get("/", include_in_schema=False)
     @app.get("/health", include_in_schema=False)
