@@ -28,6 +28,7 @@ import {
   ShoppingBag,
   Headset,
   BarChart3,
+  ShieldCheck,
   Truck,
 } from "lucide-react";
 import { getUser, clearAuth, UserProfile } from "@/lib/auth";
@@ -49,7 +50,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/inbox", label: "Email / RFQ Hub", icon: Mail },
-      { href: "/agents", label: "Agent Mesh & DAGs", icon: Cpu },
+      { href: "/agents", label: "Autonomous Workforce", icon: Cpu },
+      { href: "/approvals", label: "HITL Approvals", icon: ShieldCheck },
       { href: "/workforce", label: "Workforce & Shifts", icon: Users },
     ],
   },

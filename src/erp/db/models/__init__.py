@@ -116,6 +116,18 @@ from erp.db.models.onboarding import (
     OnboardingStep,
     TenantSettings,
 )
+from erp.db.models.agents import (
+    AgentApproval,
+    AgentCommunication,
+    AgentDefinition,
+    AgentDomain,
+    AgentExecutionRun,
+    AgentStepLog,
+    ApprovalStatus,
+    AutonomyLevel,
+    ChannelType,
+    RiskLevel,
+)
 from erp.db.models.billing import (
     AdvancePaymentAllocation,
     Budget,
@@ -357,4 +369,14 @@ __all__ = [
     "InterCompanyTransaction",
     "CurrencyExchangeRate",
     "ExchangeRateRevaluation",
+    "AgentDefinition",
+    "AgentExecutionRun",
+    "AgentStepLog",
+    "AgentApproval",
+    "AgentCommunication",
+    "AutonomyLevel",
+    "AgentDomain",
+    "ApprovalStatus",
+    "RiskLevel",
+    "ChannelType",
 ]

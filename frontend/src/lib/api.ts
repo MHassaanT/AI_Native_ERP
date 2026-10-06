@@ -1016,4 +1016,35 @@ export const api = {
   getExchangeRevaluations: () => fetchWithTenant("/currency/revaluation"),
   executeExchangeRevaluation: (data: any) =>
     fetchWithTenant("/currency/revaluation", { method: "POST", body: JSON.stringify(data) }),
+  // --- Autonomous Workforce Platform & HITL Approvals ---
+  listAutonomousAgents: () => fetchWithTenant("/agents"),
+  runAutonomousAgent: (slug: string, triggerType: string = "MANUAL") =>
+    fetchWithTenant(`/agents/${encodeURIComponent(slug)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ trigger_type: triggerType }),
+    }),
+  runAllAutonomousAgents: () =>
+    fetchWithTenant("/agents/run-all", { method: "POST" }),
+  listAutonomousRuns: (limit: number = 30) =>
+    fetchWithTenant(`/agents/runs?limit=${limit}`),
+  listAutonomousCommunications: (limit: number = 30) =>
+    fetchWithTenant(`/agents/communications?limit=${limit}`),
+  listApprovals: (status?: string, domain?: string) => {
+    const q = new URLSearchParams();
+    if (status) q.append("status", status);
+    if (domain) q.append("domain", domain);
+    const qs = q.toString();
+    return fetchWithTenant(`/approvals${qs ? `?${qs}` : ""}`);
+  },
+  approveRequest: (approvalId: string, notes?: string, modifiedPayload?: any) =>
+    fetchWithTenant(`/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ reviewer_notes: notes, modified_payload: modifiedPayload }),
+    }),
+  rejectRequest: (approvalId: string, notes?: string) =>
+    fetchWithTenant(`/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reviewer_notes: notes }),
+    }),
 };
+

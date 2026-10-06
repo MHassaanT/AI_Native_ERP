@@ -2,6 +2,7 @@
 
 from erp.api.routes.agents import router as agents_router
 from erp.api.routes.ap import router as ap_router
+from erp.api.routes.approvals import router as approvals_router
 from erp.api.routes.assets import router as assets_router
 from erp.api.routes.audit_soc2 import router as audit_soc2_router
 from erp.api.routes.auth import router as auth_router
@@ -35,6 +36,7 @@ from erp.api.routes.currency import router as currency_router
 __all__ = [
     "agents_router",
     "ap_router",
+    "approvals_router",
     "assets_router",
     "audit_soc2_router",
     "auth_router",
