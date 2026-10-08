@@ -8,9 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from erp.api.routes import (
-    agents_router,
     ap_router,
-    approvals_router,
     assets_router,
     audit_soc2_router,
     auth_router,
@@ -41,12 +39,12 @@ from erp.api.routes import (
     subcontracting_router,
     companies_router,
     currency_router,
+    workflows_router,
 )
 from erp.config import settings
 from erp.events.email_gateway import email_gateway
 from erp.events.producer import event_producer
 from erp.events.dispatcher import OutboxDispatcher
-from erp.agents.core.scheduler import agent_scheduler
 from erp.orchestration.persistence import mark_interrupted_dags_for_recovery
 
 logger = logging.getLogger(__name__)
@@ -56,8 +54,6 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Lifecycle manager for startup and graceful shutdown."""
     logger.info("Initializing %s in %s mode...", settings.APP_NAME, settings.ENVIRONMENT)
-    scheduler_stop = asyncio.Event()
-    scheduler_task = None
     outbox_stop = asyncio.Event()
     outbox_task = None
     app.state.event_consumer_enabled = False
@@ -83,22 +79,12 @@ async def lifespan(app: FastAPI):
     else:
         app.state.outbox_dispatcher_enabled = False
         app.state.outbox_dispatcher_status = "disabled_by_configuration"
-    if settings.ENABLE_AGENT_SCHEDULER:
-        scheduler_task = asyncio.create_task(
-            agent_scheduler.run(scheduler_stop), name="tenant-agent-scheduler"
-        )
-        app.state.agent_scheduler_enabled = True
-    else:
-        app.state.agent_scheduler_enabled = False
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.start()
     yield
     # Graceful shutdown
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.stop()
-    if scheduler_task:
-        scheduler_stop.set()
-        await scheduler_task
     if outbox_task:
         outbox_stop.set()
         await outbox_task
@@ -110,7 +96,7 @@ def create_app() -> FastAPI:
     """Instantiates and configures the FastAPI application."""
     app = FastAPI(
         title=settings.APP_NAME,
-        description="Autonomous Multi-Agent Enterprise Resource Planning Core Engine",
+        description="Enterprise Resource Planning API",
         version="0.1.0",
         openapi_url=f"{settings.API_V1_STR}/openapi.json",
         docs_url=f"{settings.API_V1_STR}/docs",
@@ -135,8 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(events_router, prefix=settings.API_V1_STR)
     app.include_router(ledger_router, prefix=settings.API_V1_STR)
     app.include_router(billing_router, prefix=settings.API_V1_STR)
-    app.include_router(agents_router, prefix=settings.API_V1_STR)
-    app.include_router(approvals_router, prefix=settings.API_V1_STR)
+    app.include_router(workflows_router, prefix=settings.API_V1_STR)
     app.include_router(ap_router, prefix=settings.API_V1_STR)
     app.include_router(procurement_router, prefix=settings.API_V1_STR)
     app.include_router(reconciliation_router, prefix=settings.API_V1_STR)

@@ -22,7 +22,6 @@ from erp.mcp.tools.compliance_tools import tool_evaluate_statutory_rules
 from erp.mcp.tools.ledger_tools import tool_stage_ledger_transaction
 from erp.mcp.tools.production_tools import tool_isolate_workstation, tool_solve_job_shop_schedule
 from erp.mcp.tools.supply_chain_tools import tool_calculate_dynamic_rop
-from erp.mcp.tools.workforce_tools import tool_authorize_expense_payout, tool_execute_shift_trade
 
 logger = logging.getLogger(__name__)
 
@@ -139,38 +138,6 @@ AVAILABLE_TOOLS: list[MCPToolDefinition] = [
         },
     ),
     MCPToolDefinition(
-        name="execute_shift_trade",
-        description="Evaluates statutory labor invariants (11h rest, 48h weekly max, safety certs) and commits shift trades.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "requesting_employee": {"type": "string"},
-                "target_employee": {"type": "string"},
-                "target_previous_shift_end": {"type": "string"},
-                "target_proposed_shift_start": {"type": "string"},
-            },
-            "required": [
-                "requesting_employee",
-                "target_employee",
-                "target_previous_shift_end",
-                "target_proposed_shift_start",
-            ],
-        },
-    ),
-    MCPToolDefinition(
-        name="authorize_expense_payout",
-        description="Audits expense claims against policy rules and automatically stages reimbursement under $500.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "employee_code": {"type": "string"},
-                "expense_category": {"type": "string"},
-                "total_amount": {"type": "number"},
-            },
-            "required": ["employee_code", "expense_category", "total_amount"],
-        },
-    ),
-    MCPToolDefinition(
         name="calculate_landed_margin_price",
         description="Calculates component landed cost and defends the 22% contribution margin floor.",
         inputSchema={
@@ -250,8 +217,6 @@ class MCPServer:
             "calculate_dynamic_rop": tool_calculate_dynamic_rop,
             "solve_job_shop_schedule": tool_solve_job_shop_schedule,
             "isolate_workstation": tool_isolate_workstation,
-            "execute_shift_trade": tool_execute_shift_trade,
-            "authorize_expense_payout": tool_authorize_expense_payout,
             "calculate_landed_margin_price": tool_calculate_landed_margin_price,
             "generate_pdf_quote": tool_generate_pdf_quote,
             "stage_pos_checkout": tool_stage_pos_checkout,

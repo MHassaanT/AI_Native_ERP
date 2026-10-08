@@ -395,7 +395,7 @@ async def test_autonomous_email_order_fulfillment_lifecycle():
         assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
 
         # Verify DAG state via GET endpoint
-        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        dag_res = await client.get(f"/api/v1/workflows/{dag_id}", headers=headers)
         assert dag_res.status_code == 200
         dag_details = dag_res.json()
         assert dag_details["status"] == "COMPLETED"
@@ -589,7 +589,7 @@ async def test_autonomous_email_order_shortage_backorder_lifecycle():
 
         assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
 
-        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        dag_res = await client.get(f"/api/v1/workflows/{dag_id}", headers=headers)
         assert dag_res.status_code == 200
         dag_details = dag_res.json()
         assert dag_details["status"] == "COMPLETED"
@@ -736,7 +736,7 @@ async def test_gemini_email_order_catalog_matching_fulfillment():
 
         assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
 
-        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        dag_res = await client.get(f"/api/v1/workflows/{dag_id}", headers=headers)
         assert dag_res.status_code == 200
         dag_details = dag_res.json()
         assert dag_details["status"] == "COMPLETED"
@@ -920,7 +920,7 @@ async def test_gemini_email_order_unavailable_item_recommendation():
 
         assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
 
-        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        dag_res = await client.get(f"/api/v1/workflows/{dag_id}", headers=headers)
         assert dag_res.status_code == 200
         dag_details = dag_res.json()
         assert dag_details["status"] == "COMPLETED"
@@ -1097,7 +1097,7 @@ async def test_gemini_email_order_multi_item_fulfillment():
 
         assert dag.is_finished(), f"DAG {dag_id} did not finish within timeout"
 
-        dag_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
+        dag_res = await client.get(f"/api/v1/workflows/{dag_id}", headers=headers)
         assert dag_res.status_code == 200
         dag_details = dag_res.json()
         assert dag_details["status"] == "COMPLETED"
@@ -1345,6 +1345,5 @@ async def test_gemini_order_agent_model_fallback_on_404():
         assert res.total_price == 200.0
         assert attempted_models[0] == "custom-deprecated-model"
         assert attempted_models[1] == "gemini-3.6-flash"
-
 
 

@@ -54,6 +54,9 @@ export async function fetchWithTenant(endpoint: string, options: RequestInit = {
     }
     throw new Error(errorMsg);
   }
+  if (res.status === 204) {
+    return null;
+  }
   return res.json();
 }
 
@@ -92,14 +95,11 @@ export const api = {
 
   getHealth: () => fetchWithTenant("/health"),
   getReadiness: () => fetchWithTenant("/ready"),
-  getAgentStates: () => fetchWithTenant("/agents/states"),
-  dispatchRFQ: (data: { customer_name: string; inquiry_text: string }) =>
-    fetchWithTenant("/agents/dispatch-rfq", { method: "POST", body: JSON.stringify(data) }),
-  getLatestDag: () => fetchWithTenant("/agents/dags/latest"),
-  getDag: (dagId: string) => fetchWithTenant(`/agents/dags/${encodeURIComponent(dagId)}`),
-  listDags: () => fetchWithTenant("/agents/dags"),
-  recoverDag: (dagId: string, notes: string) =>
-    fetchWithTenant(`/agents/dags/${encodeURIComponent(dagId)}/recover`, {
+  listWorkflows: () => fetchWithTenant("/workflows"),
+  getWorkflow: (workflowId: string) =>
+    fetchWithTenant(`/workflows/${encodeURIComponent(workflowId)}`),
+  recoverWorkflow: (workflowId: string, notes: string) =>
+    fetchWithTenant(`/workflows/${encodeURIComponent(workflowId)}/recover`, {
       method: "POST",
       body: JSON.stringify({ notes }),
     }),
@@ -700,6 +700,33 @@ export const api = {
   },
   getEmployeeHR: (employeeId: string) => fetchWithTenant(`/hr/employees/${employeeId}`),
 
+  // --- Recruiter-reviewed AI screening ---
+  getRecruitmentRoles: () => fetchWithTenant("/hr/recruitment/roles"),
+  createRecruitmentRole: (data: { title: string; description: string; requirements: string }) =>
+    fetchWithTenant("/hr/recruitment/roles", { method: "POST", body: JSON.stringify(data) }),
+  closeRecruitmentRole: (roleId: string) =>
+    fetchWithTenant(`/hr/recruitment/roles/${encodeURIComponent(roleId)}/close`, { method: "POST" }),
+  getCandidateApplications: (roleId?: string) =>
+    fetchWithTenant(`/hr/recruitment/applications${roleId ? `?role_id=${encodeURIComponent(roleId)}` : ""}`),
+  deleteCandidateApplication: (applicationId: string) =>
+    fetchWithTenant(`/hr/recruitment/applications/${encodeURIComponent(applicationId)}`, {
+      method: "DELETE",
+    }),
+  uploadCandidateResume: (roleId: string, formData: FormData) =>
+    fetchWithTenant(`/hr/recruitment/roles/${encodeURIComponent(roleId)}/applications`, {
+      method: "POST",
+      body: formData,
+    }),
+  evaluateCandidateApplication: (applicationId: string) =>
+    fetchWithTenant(`/hr/recruitment/applications/${encodeURIComponent(applicationId)}/evaluate`, {
+      method: "POST",
+    }),
+  draftCandidateInterviewEmail: (applicationId: string, interviewDetails: string) =>
+    fetchWithTenant(
+      `/hr/recruitment/applications/${encodeURIComponent(applicationId)}/interview-draft`,
+      { method: "POST", body: JSON.stringify({ interview_details: interviewDetails }) },
+    ),
+
   // Onboarding & Separation
   getOnboardings: (employeeId?: string) =>
     fetchWithTenant(`/hr/onboarding${employeeId ? `?employee_id=${employeeId}` : ""}`),
@@ -1035,34 +1062,4 @@ export const api = {
   getExchangeRevaluations: () => fetchWithTenant("/currency/revaluation"),
   executeExchangeRevaluation: (data: any) =>
     fetchWithTenant("/currency/revaluation", { method: "POST", body: JSON.stringify(data) }),
-  // --- Autonomous Workforce Platform & HITL Approvals ---
-  listAutonomousAgents: () => fetchWithTenant("/agents"),
-  runAutonomousAgent: (slug: string, triggerType: string = "MANUAL") =>
-    fetchWithTenant(`/agents/${encodeURIComponent(slug)}/run`, {
-      method: "POST",
-      body: JSON.stringify({ trigger_type: triggerType }),
-    }),
-  runAllAutonomousAgents: () =>
-    fetchWithTenant("/agents/run-all", { method: "POST" }),
-  listAutonomousRuns: (limit: number = 30) =>
-    fetchWithTenant(`/agents/runs?limit=${limit}`),
-  listAutonomousCommunications: (limit: number = 30) =>
-    fetchWithTenant(`/agents/communications?limit=${limit}`),
-  listApprovals: (status?: string, domain?: string) => {
-    const q = new URLSearchParams();
-    if (status) q.append("status", status);
-    if (domain) q.append("domain", domain);
-    const qs = q.toString();
-    return fetchWithTenant(`/approvals${qs ? `?${qs}` : ""}`);
-  },
-  approveRequest: (approvalId: string, notes?: string, modifiedPayload?: any) =>
-    fetchWithTenant(`/approvals/${encodeURIComponent(approvalId)}/approve`, {
-      method: "POST",
-      body: JSON.stringify({ reviewer_notes: notes, modified_payload: modifiedPayload }),
-    }),
-  rejectRequest: (approvalId: string, notes?: string) =>
-    fetchWithTenant(`/approvals/${encodeURIComponent(approvalId)}/reject`, {
-      method: "POST",
-      body: JSON.stringify({ reviewer_notes: notes }),
-    }),
 };

@@ -1,6 +1,6 @@
 # AI-Native Multi-Agent ERP
 
-Multi-Agent System (MAS) Enterprise Resource Planning architecture with opt-in interval agent scheduling.
+Enterprise Resource Planning system with durable operational workflows and tenant-scoped business data.
 
 ## Architectural Overview
 
@@ -50,9 +50,11 @@ python scripts/seed_chart_of_accounts.py
 uvicorn erp.main:app --reload --port 8000
 ```
 
-Interval scheduling is disabled by default. To run agents automatically, set `ENABLE_AGENT_SCHEDULER=True` in `.env`, restart the API, then activate only the tenant agents you intend to run from the Agents page. New agent definitions are provisioned inactive. The current scheduler supports interval schedules; cron and event-driven execution are not enabled by this worker.
+DAG workflows are persisted in `dag_execution_records` and can be inspected through the tenant-scoped `GET /api/v1/workflows` endpoints. If a process stops during a workflow, startup marks it `RECOVERY_REQUIRED`. A Finance user or tenant admin can request recovery through `POST /api/v1/workflows/{workflow_id}/recover` with an audit note; the service retries only allowlisted safe nodes and leaves customer order creation or external communication nodes held for review. Customer invoice terms are configurable in days and default to 30.
 
-DAG workflows are persisted in `dag_execution_records` and can be inspected through the tenant-scoped `GET /api/v1/agents/dags` endpoints. If a process stops during a workflow, startup marks it `RECOVERY_REQUIRED`. A Finance user or tenant admin can request recovery through `POST /api/v1/agents/dags/{dag_id}/recover` with an audit note; the service retries only allowlisted safe nodes and leaves customer order creation or external communication nodes held for review. Customer invoice terms are configurable in days and default to 30.
+Recruitment screening is available from `/recruitment`. It stores tenant-scoped job openings and extracted resume text (the uploaded PDF/DOCX binary is discarded), and can generate explainable, evidence-checked screening recommendations and interview email drafts for recruiter review. Screening sends extracted resume text, with email addresses and phone numbers redacted, to the configured LLM provider; configure a provider only when authorized to process candidate data there. AI screening is a decision-support aid only: it does not make hiring decisions, automatically reject applicants, or send email. Recruiters can delete an application and its extracted resume text from the recruitment screen. Configure `LLM_PROVIDER` and its matching API key (`OPENROUTER_API_KEY` or `GEMINI_API_KEY`) to enable screening and draft generation; missing model configuration is reported rather than replaced with fabricated results. Apply Alembic migrations through `015_hr_recruitment` to create the recruitment tables.
+
+The retired autonomous supervisor and agent approval-queue tables are removed by migration `014_remove_autonomous_workforce_and_hitl`. Applying it deletes existing supervisor run, communication, and approval-queue history. Financial transaction authorization and audit safeguards remain in place.
 
 Event consumer execution remains disabled until domain handlers are registered. When a consumer is configured, handling attempts and outcomes are persisted; tenant admins can inspect and mark dead-letter events reviewed through `/api/v1/events/dead-letters`. Review records do not replay the event.
 

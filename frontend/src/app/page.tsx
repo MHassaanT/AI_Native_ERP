@@ -3,10 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  ArrowRight,
   ArrowUpRight,
   CheckCircle2,
-  Cpu,
   DollarSign,
   FileCheck,
   Package,
@@ -14,7 +12,6 @@ import {
   ShieldCheck,
   Users,
   Wrench,
-  Zap,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { getUser } from "@/lib/auth";
@@ -22,16 +19,6 @@ import { ModuleOnboardingWidget } from "@/components/module-onboarding";
 
 export default function OverviewPage() {
   const [user, setUser] = useState<any>(null);
-  const [agentStates, setAgentStates] = useState<Record<string, string>>({
-    FINANCIAL_CONTROLLER: "IDLE",
-    SUPPLY_CHAIN: "IDLE",
-    PRODUCTION: "IDLE",
-    REVENUE: "IDLE",
-    WORKFORCE: "IDLE",
-    COMPLIANCE: "IDLE",
-  });
-  const [dispatchStatus, setDispatchStatus] = useState<string | null>(null);
-  const [dispatchedDagId, setDispatchedDagId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Live Metrics
@@ -39,15 +26,8 @@ export default function OverviewPage() {
   const [cashNote, setCashNote] = useState<string>("GAAP 1010 Account active");
   const [matchRate, setMatchRate] = useState<string>("0.0%");
   const [matchNote, setMatchNote] = useState<string>("0 invoices processed");
-  const [nodeCount, setNodeCount] = useState<number>(6);
   const [ledgerDrift, setLedgerDrift] = useState<string>("0.0000");
   const [isFreshTenant, setIsFreshTenant] = useState<boolean>(true);
-
-  // Interactive RFQ Form
-  const [showRfqModal, setShowRfqModal] = useState(false);
-  const [customerName, setCustomerName] = useState("Delta Aerospace LLC");
-  const [inquiryText, setInquiryText] = useState("Urgent order for 250 units titanium structural brackets with certified mill test reports.");
-  const [dispatching, setDispatching] = useState(false);
 
   const loadLiveData = async () => {
     setLoading(true);
@@ -55,20 +35,13 @@ export default function OverviewPage() {
       const currentUser = getUser();
       setUser(currentUser);
 
-      const [statesRes, accountsRes, invoicesRes, entriesRes] = await Promise.allSettled([
-        api.getAgentStates(),
+      const [accountsRes, invoicesRes, entriesRes] = await Promise.allSettled([
         api.getAccounts(),
         api.getInvoices(),
         api.getGLEntries(),
       ]);
 
-      // 1. Agent States
-      if (statesRes.status === "fulfilled" && statesRes.value) {
-        setAgentStates(statesRes.value);
-        setNodeCount(Object.keys(statesRes.value).length);
-      }
-
-      // 2. GL Accounts & Cash Buffer
+      // 1. GL Accounts & Cash Buffer
       if (accountsRes.status === "fulfilled" && Array.isArray(accountsRes.value)) {
         const cashAccounts = accountsRes.value.filter(
           (acc: any) =>
@@ -85,7 +58,7 @@ export default function OverviewPage() {
         }
       }
 
-      // 3. Accounts Payable 3-Way Match Rate
+      // 2. Accounts Payable 3-Way Match Rate
       if (invoicesRes.status === "fulfilled" && Array.isArray(invoicesRes.value)) {
         const invoices = invoicesRes.value;
         if (invoices.length === 0) {
@@ -101,7 +74,7 @@ export default function OverviewPage() {
         }
       }
 
-      // 4. Ledger Zero-Sum Drift
+      // 3. Ledger Zero-Sum Drift
       if (entriesRes.status === "fulfilled" && Array.isArray(entriesRes.value)) {
         const entries = entriesRes.value;
         if (entries.length === 0) {
@@ -132,25 +105,6 @@ export default function OverviewPage() {
     loadLiveData();
   }, []);
 
-  const handleSimulateRFQ = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setDispatching(true);
-    setDispatchStatus("Formulating multi-agent task DAG...");
-    try {
-      const res = await api.dispatchRFQ({
-        customer_name: customerName,
-        inquiry_text: inquiryText,
-      });
-      setDispatchedDagId(res.dag_id);
-      setDispatchStatus(`DAG '${res.dag_id}' dispatched with ${res.nodes?.length || 4} subtasks across mesh.`);
-      setShowRfqModal(false);
-    } catch (err: any) {
-      setDispatchStatus(err.message || "Failed to dispatch RFQ");
-    } finally {
-      setDispatching(false);
-    }
-  };
-
   const kpis = [
     {
       title: "13-Week Cash Buffer",
@@ -163,12 +117,6 @@ export default function OverviewPage() {
       value: matchRate,
       change: matchNote,
       icon: CheckCircle2,
-    },
-    {
-      title: "Active Autonomous Agents",
-      value: `${nodeCount} Nodes`,
-      change: "Mesh fully operational",
-      icon: Cpu,
     },
     {
       title: "Ledger Zero-Sum Drift",
@@ -194,39 +142,21 @@ export default function OverviewPage() {
             )}
           </div>
           <p className="text-xs text-cream-700 mt-1">
-            Real-time autonomous multi-agent operational synthesis and invariant monitoring.
+            Real-time operational and financial overview.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => loadLiveData()}
-            title="Refresh live metrics"
-            className="rounded-md border border-cream-300 bg-cream-100 p-1.5 text-cream-700 hover:bg-cream-200 transition-colors"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          </button>
-          <button
-            onClick={() => setShowRfqModal(true)}
-            className="inline-flex items-center gap-2 rounded-md border border-cream-400 bg-cream-900 px-3.5 py-1.5 text-xs font-medium text-cream-50 shadow-xs hover:bg-cream-800 transition-colors"
-          >
-            <Zap className="h-3.5 w-3.5 text-amberGold-500" />
-            <span>Dispatch Inbound RFQ</span>
-          </button>
-        </div>
+        <button
+          onClick={() => loadLiveData()}
+          title="Refresh live metrics"
+          className="rounded-md border border-cream-300 bg-cream-100 p-1.5 text-cream-700 hover:bg-cream-200 transition-colors"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+        </button>
       </div>
 
-      {dispatchStatus && (
-        <div className="rounded border border-sage-100 bg-sage-50 px-4 py-2 text-xs font-mono text-sage-700 flex items-center justify-between">
-          <span>&bull; {dispatchStatus}</span>
-          <Link href={dispatchedDagId ? `/agents?dag_id=${dispatchedDagId}` : "/agents"} className="text-[10px] uppercase underline hover:text-sage-800">
-            View Agent DAG &rarr;
-          </Link>
-        </div>
-      )}
-
       {/* KPI Cards Grid - Live Data */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {kpis.map((kpi) => {
           const Icon = kpi.icon;
           return (
@@ -254,41 +184,23 @@ export default function OverviewPage() {
 
       {/* Two Column Section */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Agent Mesh Status */}
         <div className="rounded-lg border border-cream-300 bg-cream-100 p-5 shadow-xs lg:col-span-2">
           <div className="flex items-center justify-between border-b border-cream-300 pb-3">
             <div>
-              <h2 className="text-sm font-semibold text-cream-900">Autonomous Agent Mesh</h2>
-              <p className="text-[11px] text-cream-700">Real-time DAG runtime status</p>
+              <h2 className="text-sm font-semibold text-cream-900">Workflow Runs</h2>
+              <p className="text-[11px] text-cream-700">Inspect workflow history and recover interrupted tasks.</p>
             </div>
             <Link
-              href="/agents"
+              href="/workflows"
               className="text-[11px] font-mono text-cream-800 hover:text-cream-900 underline flex items-center gap-1"
             >
-              <span>Inspect Orchestrator</span>
+              <span>View workflows</span>
               <ArrowUpRight className="h-3 w-3" />
             </Link>
           </div>
-
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-            {Object.entries(agentStates).map(([agent, state]) => (
-              <div
-                key={agent}
-                className="rounded border border-cream-300 bg-cream-50 p-3 flex flex-col justify-between"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] uppercase text-cream-700">
-                    {agent.replace("_", " ")}
-                  </span>
-                  <span className={`h-2 w-2 rounded-full ${state === "BUSY" ? "bg-amberGold-500 animate-pulse" : "bg-sage-500"}`} />
-                </div>
-                <div className="mt-2 text-xs font-semibold text-cream-900 font-mono">
-                  {state}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+          <p className="mt-4 text-sm text-cream-700">
+            Durable workflow records remain available here without scheduled autonomous supervisors.
+          </p>
 
         {/* Priority Conflict Engine Card */}
         <div className="rounded-lg border border-cream-300 bg-cream-100 p-5 shadow-xs">
@@ -320,67 +232,6 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* Dispatch RFQ Modal */}
-      {showRfqModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-cream-300 bg-cream-50 p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between border-b border-cream-300 pb-3">
-              <h3 className="text-sm font-semibold text-cream-900">
-                Dispatch Commercial RFQ Workflow
-              </h3>
-              <button
-                onClick={() => setShowRfqModal(false)}
-                className="text-xs text-cream-600 hover:text-cream-900 font-mono"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSimulateRFQ} className="space-y-4 text-xs">
-              <div>
-                <label className="block font-medium text-cream-800 mb-1">Customer / Inquirer Name</label>
-                <input
-                  type="text"
-                  required
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  className="w-full rounded-md border border-cream-300 bg-cream-100 px-3 py-2 text-xs font-medium text-cream-900 focus:outline-hidden focus:border-cream-500"
-                  placeholder="e.g. Apex Industrial Systems"
-                />
-              </div>
-
-              <div>
-                <label className="block font-medium text-cream-800 mb-1">Inquiry Specification</label>
-                <textarea
-                  rows={3}
-                  required
-                  value={inquiryText}
-                  onChange={(e) => setInquiryText(e.target.value)}
-                  className="w-full rounded-md border border-cream-300 bg-cream-100 px-3 py-2 text-xs font-medium text-cream-900 focus:outline-hidden focus:border-cream-500"
-                  placeholder="Specify parts, quantities, and delivery constraints..."
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2 border-t border-cream-300">
-                <button
-                  type="button"
-                  onClick={() => setShowRfqModal(false)}
-                  className="rounded-md border border-cream-300 bg-cream-100 px-3 py-1.5 text-xs text-cream-800 hover:bg-cream-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={dispatching}
-                  className="rounded-md border border-cream-400 bg-cream-900 px-3 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
-                >
-                  {dispatching ? "Synthesizing DAG..." : "Dispatch Task DAG"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

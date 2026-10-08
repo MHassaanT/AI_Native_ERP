@@ -27,8 +27,6 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     WEBHOOK_SIGNING_SECRET: str = "whsec_dev_ai_erp_2026"
     CORS_ALLOWED_ORIGINS: list[str] = Field(default_factory=list)
-    ENABLE_AGENT_SCHEDULER: bool = False
-    AGENT_SCHEDULER_POLL_SECONDS: int = Field(default=10, ge=1, le=300)
     ENABLE_OUTBOX_DISPATCHER: bool = False
     OUTBOX_DISPATCHER_POLL_SECONDS: int = Field(default=2, ge=1, le=300)
 

@@ -38,7 +38,6 @@ async def readiness_check(db: DbSessionDep, request: Request):
     return {
         "status": "ready" if db_alive and not outbox_unavailable else "degraded",
         "database": "connected" if db_alive else "unreachable",
-        "agent_scheduler_enabled": getattr(request.app.state, "agent_scheduler_enabled", False),
         "event_publishing_mode": getattr(request.app.state, "event_publishing_mode", "unknown"),
         "outbox_dispatcher_enabled": getattr(request.app.state, "outbox_dispatcher_enabled", False),
         "outbox_dispatcher_status": getattr(

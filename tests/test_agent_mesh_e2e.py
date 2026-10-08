@@ -1,4 +1,4 @@
-"""End-to-End Tests for 7-Agent Autonomous Mesh Execution Pipeline (PRD §Agent Mesh)."""
+"""Tests for deterministic commercial workflow coordination."""
 
 import uuid
 from decimal import Decimal
@@ -10,8 +10,7 @@ from erp.mesh.tracer import TraceContext
 
 
 @pytest.mark.asyncio
-async def test_agent_mesh_executes_inbound_rfq_pipeline():
-    """Verifies that the full 7-agent mesh executes the RFQ workflow across multiple domain agents."""
+async def test_mesh_executes_inbound_rfq_workflow():
     mesh = EnterpriseAgentMesh()
     tenant_id = uuid.uuid4()
 
@@ -33,23 +32,20 @@ async def test_agent_mesh_executes_inbound_rfq_pipeline():
     assert "PRODUCTION" in summary.participating_agents
     assert "COMPLIANCE" in summary.participating_agents
 
-    # Verify output metrics
-    out = summary.output_summary
-    assert out["customer_name"] == "Boeing Defense"
-    assert out["sku"] == "AERO-TITANIUM-RIB"
-    assert out["quantity"] == 150.0
-    assert out["makespan_minutes"] >= 0
-    assert out["guaranteed_margin"] >= 22.0
-    assert "compliance_token" in out
+    output = summary.output_summary
+    assert output["customer_name"] == "Boeing Defense"
+    assert output["sku"] == "AERO-TITANIUM-RIB"
+    assert output["quantity"] == 150.0
+    assert output["makespan_minutes"] >= 0
+    assert output["guaranteed_margin"] >= 22.0
+    assert "compliance_token" in output
 
 
 def test_mesh_tracer_child_span_generation():
-    """Verifies OpenTelemetry-style trace context propagation across agents."""
     root_tracer = TraceContext()
     assert root_tracer.trace_id.startswith("trace_")
     assert root_tracer.parent_span_id is None
 
-    # Spawn child span for Production agent
     child = root_tracer.create_child_span(subagent_name="PRODUCTION_SCHEDULER")
     assert child.trace_id == root_tracer.trace_id
     assert child.parent_span_id == root_tracer.span_id
@@ -57,75 +53,27 @@ def test_mesh_tracer_child_span_generation():
     assert child.span_id != root_tracer.span_id
 
 
-@pytest.mark.asyncio
-async def test_agents_api_dags_and_dispatch():
-    """Verifies that the /agents/dags endpoints return populated DAGs and execute asynchronously."""
-    import asyncio
-    from httpx import ASGITransport, AsyncClient
+def test_retired_agent_routes_are_not_registered_and_workflows_remain():
     from erp.api.app import create_app
+    from erp.db.models import Base
+    from erp.mcp.server import AVAILABLE_TOOLS
 
     app = create_app()
-    slug = f"mesh-{uuid.uuid4().hex[:6]}"
-    email = f"mesh-admin@{slug}.com"
+    paths = app.openapi()["paths"]
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        reg_res = await client.post(
-            "/api/v1/auth/register",
-            json={
-                "company_name": "Mesh Aerospace Corp",
-                "tenant_slug": slug,
-                "email": email,
-                "password": "PasswordMesh123!",
-                "full_name": "Mesh Director",
-            },
-        )
-        assert reg_res.status_code == 201, reg_res.text
-        token = reg_res.json()["access_token"]
-        headers = {"Authorization": f"Bearer {token}"}
-
-        # 1. Fetch latest (should auto-seed default baseline DAG if empty)
-        latest_res = await client.get("/api/v1/agents/dags/latest", headers=headers)
-        assert latest_res.status_code == 200, latest_res.text
-        dag_data = latest_res.json()
-        assert "dag_id" in dag_data
-        assert "nodes" in dag_data
-        assert len(dag_data["nodes"]) >= 4
-
-        # 2. Dispatch a new custom RFQ DAG
-        dispatch_res = await client.post(
-            "/api/v1/agents/dispatch-rfq",
-            json={
-                "customer_name": "Rolls-Royce Aerospace",
-                "inquiry_text": "Requesting 250 units titanium housing for Trent 1000 engine.",
-                "target_sku": "FG-ENCLOSURE-IP67",
-                "quantity": 250.0,
-            },
-            headers=headers,
-        )
-        assert dispatch_res.status_code == 200, dispatch_res.text
-        new_dag = dispatch_res.json()
-        assert new_dag["customer_name"] == "Rolls-Royce Aerospace"
-        dag_id = new_dag["dag_id"]
-
-        # Wait briefly for async execution across agents
-        await asyncio.sleep(1.5)
-
-        # 3. Fetch specific DAG by ID
-        get_res = await client.get(f"/api/v1/agents/dags/{dag_id}", headers=headers)
-        assert get_res.status_code == 200, get_res.text
-        fetched = get_res.json()
-        assert fetched["dag_id"] == dag_id
-        assert fetched["status"] == "COMPLETED"
-        # Verify node output results are populated
-        revenue_node = next(n for n in fetched["nodes"] if n["name"] == "Parse RFQ Document")
-        assert revenue_node["status"] == "COMPLETED"
-        assert revenue_node["output_result"] is not None
-        assert revenue_node["output_result"]["customer_name"] == "Rolls-Royce Aerospace"
-
-        # 4. List all DAGs
-        list_res = await client.get("/api/v1/agents/dags", headers=headers)
-        assert list_res.status_code == 200, list_res.text
-        all_dags = list_res.json()
-        assert len(all_dags) >= 1
-        assert any(d["dag_id"] == dag_id for d in all_dags)
-
+    assert "/api/v1/workflows" in paths
+    assert "/api/v1/workflows/{workflow_id}" in paths
+    assert "/api/v1/workflows/{workflow_id}/recover" in paths
+    assert not any(path.startswith("/api/v1/agents") for path in paths)
+    assert not any(path.startswith("/api/v1/approvals") for path in paths)
+    assert not {
+        "agent_definitions",
+        "agent_execution_runs",
+        "agent_step_logs",
+        "agent_approvals",
+        "agent_communications",
+    } & Base.metadata.tables.keys()
+    assert not {
+        "execute_shift_trade",
+        "authorize_expense_payout",
+    } & {tool.name for tool in AVAILABLE_TOOLS}

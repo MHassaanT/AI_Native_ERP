@@ -6,11 +6,9 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   Mail,
-  Cpu,
   Users,
   DollarSign,
   Factory,
-  Activity,
   Layers,
   Wrench,
   FileCheck,
@@ -28,7 +26,7 @@ import {
   ShoppingBag,
   Headset,
   BarChart3,
-  ShieldCheck,
+  Activity,
   Truck,
 } from "lucide-react";
 import { getUser, clearAuth, UserProfile } from "@/lib/auth";
@@ -50,9 +48,9 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/inbox", label: "Email / RFQ Hub", icon: Mail },
-      { href: "/agents", label: "Autonomous Workforce", icon: Cpu },
-      { href: "/approvals", label: "HITL Approvals", icon: ShieldCheck },
+      { href: "/workflows", label: "Workflow Runs", icon: Activity },
       { href: "/workforce", label: "Workforce & Shifts", icon: Users },
+      { href: "/recruitment", label: "Recruitment & Screening", icon: Briefcase },
     ],
   },
   {

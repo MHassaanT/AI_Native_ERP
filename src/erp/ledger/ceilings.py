@@ -12,7 +12,7 @@ from erp.ledger.exceptions import AutonomyCeilingExceeded
 class AutonomyTier(StrEnum):
     TIER_1 = "TIER_1"  # < 2,500 USD: Fully autonomous
     TIER_2 = "TIER_2"  # 2,500 to 25,000 USD: Autonomous with supervisory alert
-    TIER_3 = "TIER_3"  # > 25,000 USD: Requires Human-in-the-Loop approval
+    TIER_3 = "TIER_3"  # > 25,000 USD: Requires transaction-level manual authorization
 
 
 class CeilingEvaluationResult(BaseModel):

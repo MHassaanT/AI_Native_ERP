@@ -118,18 +118,6 @@ from erp.db.models.onboarding import (
     OnboardingStep,
     TenantSettings,
 )
-from erp.db.models.agents import (
-    AgentApproval,
-    AgentCommunication,
-    AgentDefinition,
-    AgentDomain,
-    AgentExecutionRun,
-    AgentStepLog,
-    ApprovalStatus,
-    AutonomyLevel,
-    ChannelType,
-    RiskLevel,
-)
 from erp.db.models.billing import (
     AdvancePaymentAllocation,
     Budget,
@@ -200,6 +188,7 @@ from erp.db.models.projects import (
     ProjectTask,
     Timesheet,
 )
+from erp.db.models.recruitment import CandidateApplication, RecruitmentRole
 from erp.db.models.companies import (
     Company,
     InterCompanyTransaction,
@@ -367,21 +356,13 @@ __all__ = [
     "Project",
     "ProjectTask",
     "Timesheet",
+    "RecruitmentRole",
+    "CandidateApplication",
     "Company",
     "InterCompanyTransaction",
     "CurrencyExchangeRate",
     "ExchangeRateRevaluation",
-    "AgentDefinition",
-    "AgentExecutionRun",
-    "AgentStepLog",
-    "AgentApproval",
-    "AgentCommunication",
     "DAGExecutionRecord",
     "EventProcessingRecord",
     "EventDeadLetterRecord",
-    "AutonomyLevel",
-    "AgentDomain",
-    "ApprovalStatus",
-    "RiskLevel",
-    "ChannelType",
 ]
