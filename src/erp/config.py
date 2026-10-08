@@ -1,6 +1,7 @@
 """Configuration settings for AI-Native Multi-Agent ERP."""
 
 import uuid
+import warnings
 from decimal import Decimal
 from urllib.parse import unquote, urlsplit
 
@@ -57,8 +58,15 @@ class Settings(BaseSettings):
                 )
             if database_password == "postgres":
                 raise ValueError("DATABASE_URL must not use the default PostgreSQL password in production.")
-            if not self.CORS_ALLOWED_ORIGINS or "*" in self.CORS_ALLOWED_ORIGINS:
-                raise ValueError("Production CORS_ALLOWED_ORIGINS must list explicit trusted origins.")
+            if "*" in self.CORS_ALLOWED_ORIGINS:
+                raise ValueError("Production CORS_ALLOWED_ORIGINS must not contain a wildcard.")
+            if not self.CORS_ALLOWED_ORIGINS:
+                warnings.warn(
+                    "CORS_ALLOWED_ORIGINS is empty; browser-based frontend requests will be blocked "
+                    "until trusted frontend origins are configured.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
 
     # PostgreSQL Database

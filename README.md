@@ -14,9 +14,11 @@ Multi-Agent System (MAS) Enterprise Resource Planning architecture with opt-in i
 ## Railway deployment
 
 For the backend service, set `ENVIRONMENT=production`, `DEBUG=False`, a unique
-`SECRET_KEY`, a unique `WEBHOOK_SIGNING_SECRET`, and an explicit
-`CORS_ALLOWED_ORIGINS` JSON list containing the deployed frontend origin. Set
-`DATABASE_URL` to Railway's PostgreSQL connection URL. A separate
+`SECRET_KEY`, a unique `WEBHOOK_SIGNING_SECRET`, and `DATABASE_URL` to Railway's
+PostgreSQL connection URL. Set `CORS_ALLOWED_ORIGINS` to a JSON list containing
+the deployed frontend origin, for example `["https://your-app.vercel.app"]`.
+If it is unset, the backend starts with browser access blocked until an origin
+is configured. A separate
 `POSTGRES_PASSWORD` is optional when that URL already contains a non-default
 database password. Do not include a trailing slash or wildcard origin unless
 it is part of the actual frontend origin.
