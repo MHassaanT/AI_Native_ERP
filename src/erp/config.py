@@ -2,6 +2,7 @@
 
 import uuid
 from decimal import Decimal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -44,9 +45,17 @@ class Settings(BaseSettings):
                 raise ValueError("Default development SECRET_KEY is forbidden in production.")
             if not self.WEBHOOK_SIGNING_SECRET or "dev" in self.WEBHOOK_SIGNING_SECRET.lower():
                 raise ValueError("A production WEBHOOK_SIGNING_SECRET must be configured.")
-            if not self.POSTGRES_PASSWORD or self.POSTGRES_PASSWORD == "postgres":
-                raise ValueError("A non-default POSTGRES_PASSWORD must be configured in production.")
-            if ":postgres@" in self.DATABASE_URL:
+            # Managed database providers (including Railway) expose credentials in
+            # DATABASE_URL and do not necessarily expose POSTGRES_PASSWORD separately.
+            database_password = unquote(urlsplit(self.DATABASE_URL).password or "")
+            has_database_password = (
+                database_password and database_password != "postgres"
+            ) or (self.POSTGRES_PASSWORD and self.POSTGRES_PASSWORD != "postgres")
+            if not has_database_password:
+                raise ValueError(
+                    "Configure a non-default database password in DATABASE_URL or POSTGRES_PASSWORD."
+                )
+            if database_password == "postgres":
                 raise ValueError("DATABASE_URL must not use the default PostgreSQL password in production.")
             if not self.CORS_ALLOWED_ORIGINS or "*" in self.CORS_ALLOWED_ORIGINS:
                 raise ValueError("Production CORS_ALLOWED_ORIGINS must list explicit trusted origins.")

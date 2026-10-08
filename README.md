@@ -11,6 +11,16 @@ Multi-Agent System (MAS) Enterprise Resource Planning architecture with opt-in i
 - **Immutable Audit**: Cryptographic SHA-256 hash chaining of all operational proposals and agent mutations
 - **API Shell**: Async FastAPI service with OpenAPI specification
 
+## Railway deployment
+
+For the backend service, set `ENVIRONMENT=production`, `DEBUG=False`, a unique
+`SECRET_KEY`, a unique `WEBHOOK_SIGNING_SECRET`, and an explicit
+`CORS_ALLOWED_ORIGINS` JSON list containing the deployed frontend origin. Set
+`DATABASE_URL` to Railway's PostgreSQL connection URL. A separate
+`POSTGRES_PASSWORD` is optional when that URL already contains a non-default
+database password. Do not include a trailing slash or wildcard origin unless
+it is part of the actual frontend origin.
+
 ## Quickstart
 
 ### 1. Configure local environment and start infrastructure
