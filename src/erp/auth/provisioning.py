@@ -28,11 +28,65 @@ from erp.auth.fiscal_years import get_country_info
 from erp.auth.industry_modules import get_industry_blueprint
 from erp.auth.onboarding_steps import MASTER_MODULE_STEPS
 from erp.db.models.audit import AgentAuditLog
+from erp.db.models.agents import AgentDefinition, AgentDomain, AutonomyLevel
 from erp.db.models.inventory import Warehouse
 from erp.db.models.ledger import Account, CostCenter, FiscalPeriod
 from erp.db.models.onboarding import OnboardingProgress, OnboardingStep, TenantSettings
 
 logger = logging.getLogger(__name__)
+
+AGENT_DEFINITIONS = (
+    (
+        "procurement_supervisor", "Procurement Supervisor", AgentDomain.PROCUREMENT,
+        "Monitors stock thresholds and stages sourcing recommendations.",
+    ),
+    (
+        "sales_sdr_agent", "Sales SDR Agent", AgentDomain.SALES,
+        "Reviews sales leads and prepares follow-up recommendations.",
+    ),
+    (
+        "inventory_controller", "Inventory Controller", AgentDomain.INVENTORY,
+        "Reviews inventory, expiry, and fulfillment signals.",
+    ),
+    (
+        "hr_workforce_agent", "HR Workforce Agent", AgentDomain.HR_PAYROLL,
+        "Reviews workforce attendance and HR operational signals.",
+    ),
+    (
+        "mes_quality_supervisor", "MES Quality Supervisor", AgentDomain.MANUFACTURING,
+        "Reviews manufacturing and quality signals.",
+    ),
+    (
+        "finance_compliance_agent", "Finance Compliance Agent", AgentDomain.FINANCE,
+        "Reviews finance and compliance exceptions.",
+    ),
+)
+
+
+async def ensure_agent_definitions(session: AsyncSession, tenant_id: uuid.UUID) -> int:
+    """Create any missing supervisor definitions without enabling scheduled runs."""
+    result = await session.execute(
+        select(AgentDefinition.slug).where(AgentDefinition.tenant_id == tenant_id)
+    )
+    existing = set(result.scalars().all())
+    missing = [
+        AgentDefinition(
+            tenant_id=tenant_id,
+            name=name,
+            slug=slug,
+            domain=domain,
+            description=description,
+            autonomy_level=AutonomyLevel.AUTONOMOUS,
+            trigger_type="SCHEDULED",
+            interval_seconds=300,
+            is_active=False,
+        )
+        for slug, name, domain, description in AGENT_DEFINITIONS
+        if slug not in existing
+    ]
+    session.add_all(missing)
+    await session.flush()
+    return len(missing)
 
 
 @dataclass
@@ -119,6 +173,8 @@ async def provision_tenant_blueprint(
     )
 
     blueprint = get_industry_blueprint(config.industry)
+
+    await ensure_agent_definitions(session, tenant_id)
 
     # 1. Cost Centers
     cost_centers: list[CostCenter] = []

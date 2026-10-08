@@ -6,16 +6,15 @@ ZERO mock, fake, or synthetic data.
 """
 
 import base64
-from email.message import EmailMessage
 import logging
 import os
 import re
 import time
-from datetime import UTC, datetime
-import asyncio
-from typing import Any
 import urllib.parse
 import uuid
+from datetime import UTC, datetime
+from email.message import EmailMessage
+from typing import Any
 
 import httpx
 from pydantic import BaseModel
@@ -23,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.config import settings
+from erp.db.models.events import InboundEmailRecord
 from erp.db.models.tenant import TenantOAuthConnection
 from erp.db.session import async_session_factory
 from erp.events.email_classifier import EmailIntent, classify_inbound_email
@@ -32,8 +32,6 @@ from erp.events.email_gateway import (
     SentEmailMessage,
     mailbox,
 )
-from erp.orchestration.orchestrator import chief_orchestrator
-from erp.orchestration.worker import dag_executor
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +44,33 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
+
+
+async def _persist_inbound_record(
+    record: InboundEmailRecord, session: AsyncSession | None
+) -> None:
+    async def persist(target: AsyncSession) -> None:
+        target.add(record)
+        try:
+            await target.commit()
+        except Exception:
+            await target.rollback()
+            existing = (
+                await target.execute(
+                    select(InboundEmailRecord.message_id).where(
+                        InboundEmailRecord.message_id == record.message_id,
+                        InboundEmailRecord.tenant_id == record.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                raise
+
+    if session is not None:
+        await persist(session)
+    else:
+        async with async_session_factory() as target:
+            await persist(target)
 
 
 class GmailConnectionState(BaseModel):
@@ -274,7 +299,7 @@ class GmailIntegrationService:
         env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env")
         if os.path.exists(env_path):
             try:
-                with open(env_path, "r", encoding="utf-8") as f:
+                with open(env_path, encoding="utf-8") as f:
                     content = f.read()
 
                 if "GOOGLE_CLIENT_ID=" in content:
@@ -461,10 +486,22 @@ class GmailIntegrationService:
             msg_ids = [
                 m_id for m_id in raw_msg_ids
                 if m_id not in self.processed_message_ids[str_id]
-                and not any(m.message_id == m_id for m in mailbox.inbox)
+                and not any(m.message_id.endswith(f"_{m_id}") for m in mailbox.inbox)
             ]
 
             for m_id in msg_ids:
+                durable_id = f"g_{uuid.UUID(str_id).hex}_{m_id}"
+                existing_id = (
+                    await session.execute(
+                        select(InboundEmailRecord.message_id).where(
+                            InboundEmailRecord.message_id == durable_id,
+                            InboundEmailRecord.tenant_id == uuid.UUID(str_id),
+                        )
+                    )
+                ).scalar_one_or_none() if session is not None else None
+                if existing_id:
+                    self.processed_message_ids[str_id].add(m_id)
+                    continue
                 msg_resp = await client.get(
                     f"{GMAIL_API_BASE}/messages/{m_id}?format=full",
                     headers=headers,
@@ -473,6 +510,19 @@ class GmailIntegrationService:
                     msg_data = msg_resp.json()
                     parsed = self._parse_gmail_message_payload(msg_data, tenant_id)
                     if parsed:
+                        message_record = InboundEmailRecord(
+                            message_id=parsed.message_id,
+                            tenant_id=uuid.UUID(str_id),
+                            sender=parsed.sender,
+                            recipient=parsed.recipient,
+                            subject=parsed.subject,
+                            body_text=parsed.body_text,
+                            attachment_names=[attachment.filename for attachment in parsed.attachments],
+                            event_type=parsed.event_type,
+                            status=parsed.status,
+                            associated_dag_id=None,
+                        )
+                        await _persist_inbound_record(message_record, session)
                         mailbox.add_inbox(parsed)
                         synced_emails.append(parsed)
                         self.processed_message_ids[str_id].add(m_id)
@@ -528,16 +578,14 @@ class GmailIntegrationService:
             recipient=recipient,
         )
 
-        try:
-            tenant_uuid = uuid.UUID(str(tenant_id))
-        except Exception:
-            tenant_uuid = settings.DEFAULT_TENANT_ID
+        tenant_uuid = uuid.UUID(str(tenant_id))
+        durable_message_id = f"g_{tenant_uuid.hex}_{msg_data.get('id') or uuid.uuid4().hex[:26]}"
 
         # If system alert, security notification, or non-commercial email, filter it out
         if classification.intent == EmailIntent.SYSTEM_NOTIFICATION:
             logger.info("Filtered non-commercial system email from %s: '%s'", sender, subject)
             return IngestedEmailMessage(
-                message_id=msg_data.get("id", f"msg_{uuid.uuid4().hex[:8]}"),
+                message_id=durable_message_id,
                 sender=sender,
                 recipient=recipient,
                 subject=subject,
@@ -549,35 +597,9 @@ class GmailIntegrationService:
                 associated_dag_id=None,
             )
 
-        cust_name = sender.split("<")[0].strip().replace('"', "") or "Enterprise Customer"
-
-        # Build appropriate DAG
-        if classification.intent == EmailIntent.CUSTOMER_ORDER:
-            dag = chief_orchestrator.build_order_fulfillment_workflow_dag(
-                tenant_id=tenant_uuid,
-                order_payload={
-                    "customer_name": cust_name,
-                    "customer_email": sender,
-                    "inquiry_text": f"Subject: {subject}\n\n{body_text}",
-                    "attachments": [a.filename for a in attachments],
-                },
-            )
-        else:
-            dag = chief_orchestrator.build_rfq_workflow_dag(
-                tenant_id=tenant_uuid,
-                rfq_payload={
-                    "customer_name": cust_name,
-                    "customer_email": sender,
-                    "inquiry_text": f"Subject: {subject}\n\n{body_text}",
-                    "attachments": [a.filename for a in attachments],
-                },
-            )
-
-        # Trigger DAG execution across agent mesh immediately
-        asyncio.create_task(dag_executor.execute_dag(dag))
-
+        # Gmail sync only ingests and stages messages. It never starts fulfillment.
         return IngestedEmailMessage(
-            message_id=msg_data.get("id", f"msg_{uuid.uuid4().hex[:8]}"),
+            message_id=durable_message_id,
             sender=sender,
             recipient=recipient,
             subject=subject,
@@ -585,8 +607,8 @@ class GmailIntegrationService:
             attachments=attachments,
             event_type=classification.event_type,
             tenant_id=tenant_id,
-            status="DISPATCHED_TO_MESH",
-            associated_dag_id=dag.dag_id,
+            status="HUMAN_REVIEW_REQUIRED",
+            associated_dag_id=None,
         )
 
     async def send_email_via_gmail(

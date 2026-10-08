@@ -1,5 +1,6 @@
 """FastAPI Application Factory."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from erp.api.routes import (
     commercial_router,
     crm_router,
     health_router,
+    events_router,
     hr_router,
     inventory_rop_router,
     iot_telemetry_router,
@@ -43,6 +45,9 @@ from erp.api.routes import (
 from erp.config import settings
 from erp.events.email_gateway import email_gateway
 from erp.events.producer import event_producer
+from erp.events.dispatcher import OutboxDispatcher
+from erp.agents.core.scheduler import agent_scheduler
+from erp.orchestration.persistence import mark_interrupted_dags_for_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +56,52 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Lifecycle manager for startup and graceful shutdown."""
     logger.info("Initializing %s in %s mode...", settings.APP_NAME, settings.ENVIRONMENT)
+    scheduler_stop = asyncio.Event()
+    scheduler_task = None
+    outbox_stop = asyncio.Event()
+    outbox_task = None
+    app.state.event_consumer_enabled = False
+    app.state.event_consumer_status = "disabled_no_registered_domain_handlers"
+    interrupted_dags = await mark_interrupted_dags_for_recovery()
+    if interrupted_dags:
+        logger.warning(
+            "Marked %d interrupted DAG workflows for recovery review; no side effects were replayed.",
+            interrupted_dags,
+        )
     # Start Kafka/Redpanda Event Producer
     await event_producer.start()
+    app.state.event_publishing_mode = "kafka" if event_producer.is_connected else "in_memory"
+    if settings.ENABLE_OUTBOX_DISPATCHER and event_producer.is_connected:
+        dispatcher = OutboxDispatcher(event_producer, settings.OUTBOX_DISPATCHER_POLL_SECONDS)
+        outbox_task = asyncio.create_task(dispatcher.run(outbox_stop), name="transactional-outbox-dispatcher")
+        app.state.outbox_dispatcher_enabled = True
+        app.state.outbox_dispatcher_status = "running"
+    elif settings.ENABLE_OUTBOX_DISPATCHER:
+        app.state.outbox_dispatcher_enabled = False
+        app.state.outbox_dispatcher_status = "configured_but_kafka_unavailable"
+        logger.warning("Outbox dispatcher is enabled but Kafka is unavailable; outbox rows will remain pending.")
+    else:
+        app.state.outbox_dispatcher_enabled = False
+        app.state.outbox_dispatcher_status = "disabled_by_configuration"
+    if settings.ENABLE_AGENT_SCHEDULER:
+        scheduler_task = asyncio.create_task(
+            agent_scheduler.run(scheduler_stop), name="tenant-agent-scheduler"
+        )
+        app.state.agent_scheduler_enabled = True
+    else:
+        app.state.agent_scheduler_enabled = False
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.start()
     yield
     # Graceful shutdown
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.stop()
+    if scheduler_task:
+        scheduler_stop.set()
+        await scheduler_task
+    if outbox_task:
+        outbox_stop.set()
+        await outbox_task
     await event_producer.stop()
     logger.info("Shutdown complete.")
 
@@ -78,7 +121,7 @@ def create_app() -> FastAPI:
     # CORS Configuration
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.CORS_ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -89,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(setup_router, prefix=settings.API_V1_STR)
     app.include_router(onboarding_router, prefix=settings.API_V1_STR)
     app.include_router(health_router, prefix=settings.API_V1_STR)
+    app.include_router(events_router, prefix=settings.API_V1_STR)
     app.include_router(ledger_router, prefix=settings.API_V1_STR)
     app.include_router(billing_router, prefix=settings.API_V1_STR)
     app.include_router(agents_router, prefix=settings.API_V1_STR)

@@ -151,36 +151,17 @@ async def release_quarantined_lot(
     "/arbitrate-conflict",
     summary="Arbitrate Quality statutory quarantine vs Revenue VIP shipment conflict",
 )
-async def arbitrate_quarantine_conflict(
-    req: dict[str, Any],
-    tenant_id: TenantIdDep,
-    db: DbSessionDep,
-):
-    """Arbitrates conflicting agent claims and triggers revenue fallback re-route or customer notice."""
-    from decimal import Decimal
-    from erp.orchestration.arbitration_coordinator import (
-        ConflictArbitrationRequest,
-        arbitration_coordinator,
-    )
+async def arbitrate_quarantine_conflict():
+    """Fail closed until this endpoint is backed by persisted quality and order records.
 
-    arb_req = ConflictArbitrationRequest(
-        lot_number=req["lot_number"],
-        item_id=uuid.UUID(str(req["item_id"])),
-        warehouse_id=uuid.UUID(str(req["warehouse_id"])),
-        order_id=uuid.UUID(str(req["order_id"])),
-        customer_id=uuid.UUID(str(req["customer_id"])),
-        order_quantity=Decimal(str(req.get("order_quantity", "100.0000"))),
-        order_monetary_value=Decimal(str(req.get("order_monetary_value", "50000.00"))),
-        defect_type=req.get("defect_type", "SURFACE_CRACK"),
-        defect_confidence=float(req.get("defect_confidence", 0.99)),
+    The earlier prototype accepted caller-supplied quantities and amounts, could
+    create fabricated stock, and described a customer notice as issued when none
+    was sent. Keep the route explicit while the safe domain contract is pending.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Conflict arbitration is unavailable until it can use persisted tenant quality and order records.",
     )
-
-    report = await arbitration_coordinator.arbitrate_quality_vs_revenue(
-        session=db,
-        tenant_id=tenant_id,
-        req=arb_req,
-    )
-    return report.model_dump()
 
 
 # -----------------------------------------------------------------------------

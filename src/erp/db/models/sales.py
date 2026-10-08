@@ -6,9 +6,11 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
 )
@@ -32,12 +34,16 @@ class Customer(Base, TenantMixin, TimestampMixin):
     credit_limit: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("10000.0000")
     )
+    payment_terms_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     lifetime_value: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    __table_args__ = (Index("idx_cust_tenant_code", "tenant_id", "customer_code", unique=True),)
+    __table_args__ = (
+        Index("idx_cust_tenant_code", "tenant_id", "customer_code", unique=True),
+        CheckConstraint("payment_terms_days BETWEEN 0 AND 3650", name="ck_customer_payment_terms_days"),
+    )
 
 
 class SalesQuotation(Base, TenantMixin, TimestampMixin):
@@ -87,6 +93,9 @@ class SalesOrder(Base, TenantMixin, TimestampMixin):
     delivery_date: Mapped[date] = mapped_column(Date, nullable=False)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIRMED")
+    fulfillment_warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=True
+    )
 
     items: Mapped[list["SalesOrderItem"]] = relationship(
         back_populates="sales_order", cascade="all, delete-orphan"
@@ -233,4 +242,3 @@ class SalesInvoiceItem(Base, TenantMixin, TimestampMixin):
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
 
     sales_invoice: Mapped["SalesInvoice"] = relationship(back_populates="items")
-

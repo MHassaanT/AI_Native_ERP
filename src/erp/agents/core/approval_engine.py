@@ -18,6 +18,14 @@ from erp.db.session import async_session_factory
 
 logger = logging.getLogger(__name__)
 
+
+class ApprovalNotFoundError(LookupError):
+    """The approval does not exist within the caller's tenant."""
+
+
+class ApprovalConflictError(RuntimeError):
+    """The approval has already reached a terminal decision."""
+
 # High-Risk Actions that MUST pause for human verification
 HIGH_RISK_ACTION_POLICIES = {
     "CREATE_PURCHASE_ORDER": (RiskLevel.HIGH, "Finance", "Supplier financial commitment requires managerial sign-off."),
@@ -27,6 +35,11 @@ HIGH_RISK_ACTION_POLICIES = {
     "ISSUE_DUNNING_LEGAL_NOTICE": (RiskLevel.HIGH, "Finance", "Legal/dunning collection notice dispatch requires collections manager sign-off."),
     "MODIFY_CREDIT_LIMIT": (RiskLevel.HIGH, "Finance", "Customer credit exposure alteration requires credit committee sign-off."),
     "ISOLATE_WORKSTATION": (RiskLevel.HIGH, "Operations", "Physical production floor line halt requires plant supervisor sign-off."),
+}
+SUPPORTED_APPROVAL_ACTIONS = {
+    "CREATE_PURCHASE_ORDER",
+    "POST_GL_JOURNAL",
+    "MODIFY_CREDIT_LIMIT",
 }
 
 
@@ -60,6 +73,8 @@ class ApprovalEngine:
         agent_id: Optional[uuid.UUID] = None,
     ) -> AgentApproval:
         """Creates a pending approval in PostgreSQL and halts execution until human review."""
+        if action_type not in SUPPORTED_APPROVAL_ACTIONS:
+            raise ValueError(f"Approval action '{action_type}' is not enabled for execution.")
         if not risk_level or not required_role:
             _, eval_risk, eval_role, _ = self.evaluate_risk(action_type, action_payload)
             risk_level = risk_level or eval_risk
@@ -90,118 +105,217 @@ class ApprovalEngine:
     async def resolve_approval(
         self,
         approval_id: uuid.UUID,
+        tenant_id: uuid.UUID,
         decision: ApprovalStatus,
-        reviewer_id: Optional[uuid.UUID] = None,
+        reviewer_id: uuid.UUID,
+        reviewer_role: str,
         reviewer_notes: Optional[str] = None,
         modified_payload: Optional[Dict[str, Any]] = None,
     ) -> AgentApproval:
         """Updates approval record with human decision and executes domain action if approved."""
         async with async_session_factory() as session:
-            query = select(AgentApproval).where(AgentApproval.approval_id == approval_id)
+            query = (
+                select(AgentApproval)
+                .where(
+                    AgentApproval.approval_id == approval_id,
+                    AgentApproval.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
             res = await session.execute(query)
             approval = res.scalar_one_or_none()
             if not approval:
-                raise ValueError(f"Approval {approval_id} not found.")
+                raise ApprovalNotFoundError(f"Approval {approval_id} not found.")
+
+            if approval.status != ApprovalStatus.PENDING:
+                raise ApprovalConflictError("Only pending approvals can be resolved.")
+            if decision not in (ApprovalStatus.APPROVED, ApprovalStatus.MODIFIED, ApprovalStatus.REJECTED):
+                raise ValueError("Unsupported approval decision.")
+
+            role_aliases = {
+                "TENANT_ADMIN": {"Finance", "HR", "Operations", "Admin"},
+                "CONTROLLER": {"Finance"},
+                "HR_MANAGER": {"HR"},
+                "PLANT_MANAGER": {"Operations"},
+                "OPERATIONS_MANAGER": {"Operations"},
+            }
+            if approval.required_role not in role_aliases.get(reviewer_role, set()):
+                raise PermissionError("Reviewer does not have the role required for this approval.")
 
             approval.status = decision
             approval.reviewed_by = reviewer_id
             approval.reviewer_notes = reviewer_notes
             approval.modified_payload = modified_payload
             approval.reviewed_at = datetime.now(timezone.utc)
+            execution_result = None
+            if decision in (ApprovalStatus.APPROVED, ApprovalStatus.MODIFIED):
+                approval.action_execution_status = "RUNNING"
+                # Domain records, decision, and result commit in this one database
+                # transaction. A rollback leaves the request pending and no action committed.
+                execution_result = await self._execute_approved_action(approval, session)
+                approval.action_execution_status = "SUCCEEDED"
+                approval.action_execution_result = execution_result
+            else:
+                approval.action_execution_status = "NOT_REQUIRED"
             await session.commit()
             await session.refresh(approval)
 
-        if decision in [ApprovalStatus.APPROVED, ApprovalStatus.MODIFIED]:
-            await self._execute_approved_action(approval)
-
         return approval
 
-    async def _execute_approved_action(self, approval: AgentApproval) -> Dict[str, Any]:
-        """Dispatches the approved payload to the real ERP domain workflow."""
+    async def _execute_approved_action(
+        self, approval: AgentApproval, session: AsyncSession
+    ) -> Dict[str, Any]:
+        """Run the supported database-only approval action in the decision transaction."""
         payload = approval.modified_payload or approval.action_payload
         action = approval.action_type
         tenant_id = approval.tenant_id
+        logger.info("Executing approval action %s for tenant %s", action, tenant_id)
 
-        logger.info(f"Executing approved action {action} for tenant {tenant_id}...")
+        if action == "CREATE_PURCHASE_ORDER":
+            from datetime import date
+            from decimal import Decimal
 
-        async with async_session_factory() as session:
-            if action == "CREATE_PURCHASE_ORDER":
-                from datetime import date
-                from decimal import Decimal
-                from erp.db.models.purchasing import PurchaseOrder, PurchaseOrderItem
+            from erp.db.models.inventory import Item
+            from erp.db.models.purchasing import PurchaseOrder, PurchaseOrderItem, Supplier
 
-                po = PurchaseOrder(
-                    tenant_id=tenant_id,
-                    po_number=f"PO-AUTO-{uuid.uuid4().hex[:6].upper()}",
-                    supplier_id=uuid.UUID(payload["supplier_id"]),
-                    order_date=date.today(),
-                    currency="USD",
-                    subtotal=Decimal(str(payload.get("grand_total", 0.0))),
-                    tax_amount=Decimal("0.0000"),
-                    total_amount=Decimal(str(payload.get("grand_total", 0.0))),
-                    status="SUBMITTED",
+            supplier_id = uuid.UUID(str(payload["supplier_id"]))
+            supplier = (
+                await session.execute(
+                    select(Supplier).where(
+                        Supplier.tenant_id == tenant_id,
+                        Supplier.supplier_id == supplier_id,
+                        Supplier.is_active.is_(True),
+                    )
                 )
-                session.add(po)
-                await session.flush()
+            ).scalar_one_or_none()
+            if supplier is None:
+                raise ValueError("Approved purchase order supplier is not active in this tenant.")
+            raw_items = payload.get("items")
+            if not isinstance(raw_items, list) or not raw_items:
+                raise ValueError("Purchase order must contain at least one item.")
 
-                for it in payload.get("items", []):
-                    qty = Decimal(str(it["quantity"]))
-                    rate = Decimal(str(it["rate"]))
-                    po_item = PurchaseOrderItem(
+            line_values = []
+            for item in raw_items:
+                item_id = uuid.UUID(str(item["item_id"]))
+                owned_item = (
+                    await session.execute(
+                        select(Item.item_id).where(
+                            Item.tenant_id == tenant_id,
+                            Item.item_id == item_id,
+                            Item.is_active.is_(True),
+                            Item.is_purchase_item.is_(True),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if owned_item is None:
+                    raise ValueError("Purchase order contains an item outside this tenant.")
+                try:
+                    quantity = Decimal(str(item["quantity"]))
+                    rate = Decimal(str(item["rate"]))
+                except (ArithmeticError, TypeError, ValueError) as exc:
+                    raise ValueError("Purchase order quantities and rates must be valid numbers.") from exc
+                if not quantity.is_finite() or not rate.is_finite() or quantity <= 0 or rate < 0:
+                    raise ValueError("Purchase order quantities and rates must be valid non-negative amounts.")
+                line_values.append((item_id, quantity, rate, quantity * rate))
+
+            line_total = sum((line[3] for line in line_values), Decimal("0"))
+            try:
+                stated_total = Decimal(str(payload["grand_total"]))
+            except (ArithmeticError, TypeError, ValueError) as exc:
+                raise ValueError("Purchase order total must be a valid number.") from exc
+            if not stated_total.is_finite() or stated_total != line_total:
+                raise ValueError("Purchase order total must equal the sum of its validated lines.")
+
+            po = PurchaseOrder(
+                tenant_id=tenant_id,
+                po_number=f"PO-APR-{approval.approval_id.hex.upper()}",
+                supplier_id=supplier.supplier_id,
+                order_date=date.today(),
+                currency=supplier.currency,
+                subtotal=line_total,
+                tax_amount=Decimal("0.0000"),
+                total_amount=line_total,
+                status="SUBMITTED",
+            )
+            session.add(po)
+            await session.flush()
+            for item_id, quantity, rate, amount in line_values:
+                session.add(
+                    PurchaseOrderItem(
                         tenant_id=tenant_id,
                         po_id=po.po_id,
-                        item_id=uuid.UUID(it["item_id"]),
-                        quantity=qty,
+                        item_id=item_id,
+                        quantity=quantity,
                         unit_price=rate,
-                        line_total=qty * rate,
+                        line_total=amount,
                     )
-                    session.add(po_item)
-                await session.commit()
-                return {"status": "SUCCESS", "document_type": "PurchaseOrder", "document_id": str(po.po_id)}
-
-            elif action == "POST_GL_JOURNAL":
-                from erp.workflows.reports.financial_reports_service import FinancialReportsService
-                return {"status": "SUCCESS", "message": "Journal transaction posted to ledger."}
-
-            elif action == "DISBURSE_PAYROLL":
-                from erp.workflows.payroll.batch_payroll_service import BatchPayrollService
-                srv = BatchPayrollService(session)
-                entry = await srv.process_batch_payroll(
-                    tenant_id=tenant_id,
-                    fiscal_period_id=uuid.UUID(payload["fiscal_period_id"]),
-                    payment_account_code=payload.get("payment_account_code", "1110-OPERATING-CASH"),
-                    cost_center=payload.get("cost_center", "CC-MAIN"),
                 )
-                await session.commit()
-                return {"status": "SUCCESS", "document_type": "PayrollEntry", "document_id": str(entry.payroll_entry_id)}
+            await session.flush()
+            return {"status": "SUCCESS", "document_type": "PurchaseOrder", "document_id": str(po.po_id)}
 
-            elif action == "SCRAP_FIXED_ASSET":
-                from erp.workflows.assets.asset_service import AssetService
-                srv = AssetService(session)
-                asset = await srv.scrap_asset(
-                    tenant_id=tenant_id,
-                    asset_id=uuid.UUID(payload["asset_id"]),
-                    scrap_date=payload.get("scrap_date"),
-                    disposal_reason=payload.get("disposal_reason", "Agent recommended scrap"),
+        if action == "POST_GL_JOURNAL":
+            from datetime import date
+            from erp.ledger.engine import TransactionProposal, ledger_engine
+            from erp.ledger.invariants import LedgerLineProposal
+
+            entries = [LedgerLineProposal.model_validate(line) for line in payload["entries"]]
+            proposal = TransactionProposal(
+                tenant_id=tenant_id,
+                posting_date=date.fromisoformat(payload["posting_date"]),
+                currency=payload.get("currency", "USD"),
+                source_document_type="AGENT_APPROVAL",
+                source_document_id=approval.approval_id,
+                entries=entries,
+                human_in_the_loop_approved=True,
+                approved_by_user_id=approval.reviewed_by,
+                trace_id=str(approval.approval_id),
+            )
+            result = await ledger_engine.commit_transaction(session, proposal)
+            return {
+                "status": "SUCCESS",
+                "document_type": "GeneralLedgerTransaction",
+                "document_id": str(result.transaction_id),
+            }
+
+        if action == "MODIFY_CREDIT_LIMIT":
+            from decimal import Decimal
+
+            from erp.db.models.sales import Customer
+
+            customer_id = uuid.UUID(str(payload["customer_id"]))
+            customer = (
+                await session.execute(
+                    select(Customer)
+                    .where(
+                        Customer.tenant_id == tenant_id,
+                        Customer.customer_id == customer_id,
+                        Customer.is_active.is_(True),
+                    )
+                    .with_for_update()
                 )
-                await session.commit()
-                return {"status": "SUCCESS", "document_type": "Asset", "document_id": str(asset.asset_id)}
+            ).scalar_one_or_none()
+            if customer is None:
+                raise ValueError("Customer is not active in this tenant.")
+            try:
+                new_limit = Decimal(str(payload["new_credit_limit"]))
+            except (ArithmeticError, TypeError, ValueError) as exc:
+                raise ValueError("New credit limit must be a valid decimal amount.") from exc
+            max_limit = Decimal("99999999999999.9999")
+            if not new_limit.is_finite() or new_limit < 0 or new_limit > max_limit:
+                raise ValueError("New credit limit is outside the supported range.")
 
-            elif action == "ISSUE_DUNNING_LEGAL_NOTICE":
-                from erp.workflows.billing.dunning_service import DunningService
-                srv = DunningService(session)
-                notice = await srv.issue_dunning_notice(
-                    tenant_id=tenant_id,
-                    customer_id=uuid.UUID(payload["customer_id"]),
-                    invoice_id=uuid.UUID(payload["invoice_id"]),
-                    dunning_type_id=uuid.UUID(payload["dunning_type_id"]),
-                )
-                await session.commit()
-                return {"status": "SUCCESS", "document_type": "DunningNotice", "document_id": str(notice.notice_id)}
+            prior_limit = customer.credit_limit
+            customer.credit_limit = new_limit
+            await session.flush()
+            return {
+                "status": "SUCCESS",
+                "document_type": "CustomerCreditLimitChange",
+                "document_id": str(customer.customer_id),
+                "previous_credit_limit": str(prior_limit),
+                "new_credit_limit": str(new_limit),
+            }
 
-            else:
-                logger.warning(f"Generic action executed: {action}")
-                return {"status": "SUCCESS", "action": action, "payload": payload}
+        raise ValueError(f"Unsupported approval action: {action}")
 
 
 approval_engine = ApprovalEngine()

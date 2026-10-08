@@ -5,12 +5,12 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.agents.core.orchestrator import orchestrator
-from erp.api.deps import DbSessionDep, TenantIdDep
+from erp.api.deps import DbSessionDep, TenantIdDep, require_roles
 from erp.db.models.agents import (
     AgentCommunication,
     AgentDefinition,
@@ -18,17 +18,50 @@ from erp.db.models.agents import (
     AgentStepLog,
     AutonomyLevel,
 )
+from erp.db.models.orchestration import DAGExecutionRecord
+from erp.db.models.user import User
+from erp.orchestration.persistence import DAGRecoveryConflict, claim_dag_recovery
+from erp.orchestration.orchestrator import chief_orchestrator
+from erp.orchestration.worker import dag_executor
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["Autonomous Agents"])
 
 
+def _workflow_node_summary(node: dict[str, Any]) -> dict[str, Any]:
+    output = node.get("output_result") or {}
+    visible_output_keys = {
+        "invoice_number",
+        "delivery_note_number",
+        "invoice_amount",
+        "general_ledger_status",
+        "fulfillment_status",
+        "gl_posted",
+        "status",
+        "compliance_verification",
+    }
+    return {
+        "task_id": node.get("task_id"),
+        "name": node.get("name"),
+        "agent_id": node.get("agent_id"),
+        "status": node.get("status"),
+        "started_at": node.get("started_at"),
+        "completed_at": node.get("completed_at"),
+        "error_message": node.get("error_message"),
+        "result": {key: value for key, value in output.items() if key in visible_output_keys},
+    }
+
+
 class AgentConfigUpdate(BaseModel):
     autonomy_level: Optional[AutonomyLevel] = None
-    interval_seconds: Optional[int] = None
+    interval_seconds: Optional[int] = Field(default=None, ge=30, le=86400)
     is_active: Optional[bool] = None
     system_prompt: Optional[str] = None
+
+
+class DAGRecoveryRequest(BaseModel):
+    notes: str = Field(..., min_length=10, max_length=500)
 
 
 @router.get("", response_model=List[Dict[str, Any]])
@@ -121,9 +154,15 @@ async def trigger_agent(
             "run_status": run.status,
             "summary": run.summary,
         }
+    except ValueError as e:
+        if "unknown agent" in str(e).lower():
+            raise HTTPException(status_code=404, detail="Agent not found.") from e
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail="This agent already has a run in progress.") from e
     except Exception as e:
         logger.error(f"Agent trigger error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Agent run could not be started.") from e
 
 
 @router.post("/run-all")
@@ -171,12 +210,124 @@ async def list_agent_runs(
     ]
 
 
+@router.get("/dags", response_model=List[Dict[str, Any]])
+async def list_dag_executions(
+    session: DbSessionDep,
+    tenant_id: TenantIdDep,
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Lists durable workflow status for the authenticated tenant."""
+    rows = (
+        await session.execute(
+            select(DAGExecutionRecord)
+            .where(DAGExecutionRecord.tenant_id == tenant_id)
+            .order_by(desc(DAGExecutionRecord.updated_at))
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "dag_id": record.dag_id,
+            "status": record.status,
+            "workflow_version": record.workflow_version,
+            "created_at": record.created_at.isoformat(),
+            "updated_at": record.updated_at.isoformat(),
+            "recovery_reason": record.recovery_reason,
+            "recovery_requested_by": str(record.recovery_requested_by) if record.recovery_requested_by else None,
+            "recovery_notes": record.recovery_notes,
+            "nodes": [_workflow_node_summary(node) for node in record.workflow_state.get("nodes", [])],
+        }
+        for record in rows
+    ]
+
+
+@router.get("/dags/{dag_id}", response_model=Dict[str, Any])
+async def get_dag_execution(
+    dag_id: str,
+    session: DbSessionDep,
+    tenant_id: TenantIdDep,
+):
+    """Gets one persisted workflow only when it belongs to the authenticated tenant."""
+    record = (
+        await session.execute(
+            select(DAGExecutionRecord).where(
+                DAGExecutionRecord.dag_id == dag_id,
+                DAGExecutionRecord.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    return {
+        "dag_id": record.dag_id,
+        "status": record.status,
+        "workflow_version": record.workflow_version,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "recovery_reason": record.recovery_reason,
+        "recovery_requested_by": str(record.recovery_requested_by) if record.recovery_requested_by else None,
+        "recovery_notes": record.recovery_notes,
+        "nodes": [
+            _workflow_node_summary(node) for node in record.workflow_state.get("nodes", [])
+        ],
+    }
+
+
+@router.post("/dags/{dag_id}/recover", response_model=Dict[str, Any])
+async def recover_dag_execution(
+    dag_id: str,
+    request: DAGRecoveryRequest,
+    tenant_id: TenantIdDep,
+    reviewer: User = require_roles("FINANCE"),
+):
+    """Retries only allowlisted safe nodes from a quarantined tenant workflow."""
+    if reviewer.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Reviewer is not a member of this tenant.")
+    try:
+        dag = await claim_dag_recovery(
+            dag_id=dag_id,
+            tenant_id=tenant_id,
+            reviewer_id=reviewer.user_id,
+            notes=request.notes,
+        )
+    except DAGRecoveryConflict as exc:
+        message = str(exc)
+        raise HTTPException(
+            status_code=404 if message == "Workflow not found." else 409,
+            detail=message,
+        ) from exc
+
+    chief_orchestrator.active_dags[dag.dag_id] = dag
+    await dag_executor.execute_dag(dag)
+    held_nodes = [
+        {"task_id": node.task_id, "name": node.name}
+        for node in dag.nodes.values()
+        if node.status.value == "PREEMPTED"
+    ]
+    return {
+        "dag_id": dag.dag_id,
+        "status": dag.to_dict()["status"],
+        "held_nodes": held_nodes,
+        "recovery_requested_by": str(reviewer.user_id),
+        "recovery_notes": request.notes,
+    }
+
+
 @router.get("/runs/{run_id}/steps", response_model=List[Dict[str, Any]])
 async def list_run_step_logs(
     run_id: uuid.UUID,
     session: DbSessionDep,
+    tenant_id: TenantIdDep,
 ):
     """Returns the step-by-step reasoning trace and tool calls for a specific run."""
+    run_res = await session.execute(
+        select(AgentExecutionRun.run_id).where(
+            AgentExecutionRun.run_id == run_id,
+            AgentExecutionRun.tenant_id == tenant_id,
+        )
+    )
+    if run_res.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Agent run not found.")
     res = await session.execute(
         select(AgentStepLog)
         .where(AgentStepLog.run_id == run_id)

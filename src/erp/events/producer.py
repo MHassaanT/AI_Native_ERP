@@ -33,6 +33,10 @@ class EventProducer:
         self._is_started = False
         self.event_log: list[dict[str, Any]] = []
 
+    @property
+    def is_connected(self) -> bool:
+        return self._is_started and self._producer is not None
+
     async def start(self) -> None:
         """Initializes and connects the Kafka producer if configured, otherwise falls back to in-memory bus."""
         servers = settings.KAFKA_BOOTSTRAP_SERVERS
@@ -74,18 +78,19 @@ class EventProducer:
         headers: dict[str, str] | None = None,
     ) -> bool:
         """Sends an event with partition key to Redpanda / local event store."""
+        event_payload = {**value, "event_id": str(value.get("event_id") or uuid.uuid4())}
         event_record = {
-            "event_id": value.get("event_id", f"evt_{uuid.uuid4().hex[:12]}"),
+            "event_id": event_payload["event_id"],
             "topic": topic,
             "partition_key": key,
             "timestamp": value.get("timestamp", datetime.now(UTC).isoformat()),
-            "payload": value,
+            "payload": event_payload,
             "headers": headers or {},
             "status": "PUBLISHED",
         }
         self.event_log.insert(0, event_record)
         from erp.events.bus import async_event_bus
-        await async_event_bus.publish(topic, key, value)
+        await async_event_bus.publish(topic, key, event_payload)
 
         if not self._is_started or not self._producer:
             logger.info("[LOCAL STREAM] Topic: %s | Key: %s | ID: %s", topic, key, event_record["event_id"])
@@ -96,7 +101,7 @@ class EventProducer:
             await self._producer.send_and_wait(
                 topic=topic,
                 key=key,
-                value=value,
+                value=event_payload,
                 headers=formatted_headers if formatted_headers else None,
             )
             return True
@@ -112,4 +117,3 @@ class EventProducer:
 
 
 event_producer = EventProducer()
-

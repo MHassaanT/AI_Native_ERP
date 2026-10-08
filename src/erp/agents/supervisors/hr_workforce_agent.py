@@ -49,7 +49,11 @@ class HRWorkforceAgent:
                 )
             )
             agent_def = res.scalar_one_or_none()
-            agent_id = agent_def.agent_id if agent_def else uuid.uuid4()
+            if not agent_def:
+                raise ValueError(f"Agent definition '{self.SLUG}' is not provisioned for tenant {tenant_id}.")
+            if not agent_def.is_active or agent_def.autonomy_level.value == "DISABLED":
+                raise ValueError(f"Agent '{agent_def.name}' is disabled.")
+            agent_id = agent_def.agent_id
 
             run = AgentExecutionRun(
                 run_id=run_id,
@@ -80,7 +84,7 @@ class HRWorkforceAgent:
                 run_id=run_id,
                 step_number=step_num,
                 node_name="scan_attendance_anomalies",
-                reasoning_thought=f"Audited workforce attendance logs: observed {len(absences)} absence records requiring manager notification.",
+                reasoning_thought=f"Audited workforce attendance logs: observed {len(absences)} absence record(s) for review; no notification was sent.",
                 tool_name="query_attendance",
                 tool_arguments={"status": "ABSENT"},
                 tool_output={"absence_count": len(absences)},
@@ -92,7 +96,7 @@ class HRWorkforceAgent:
 
             if absences:
                 absent_names = [f"{row[1].first_name} {row[1].last_name}" for row in absences]
-                summary_points.append(f"Recorded attendance notices for: {', '.join(absent_names)}.")
+                summary_points.append(f"Absence records flagged for review: {', '.join(absent_names)}. No notices were sent.")
 
             # STEP 2: Project Pacing & Timesheet Velocity Audit
             proj_query = await session.execute(
@@ -149,17 +153,17 @@ class HRWorkforceAgent:
                 run_id=run_id,
                 step_number=step_num,
                 node_name="preflight_payroll_audit",
-                reasoning_thought=f"Pre-flight audit verified {payroll_assigned_count} active salary structure assignments ready for batch disbursement.",
+                reasoning_thought=f"Pre-flight audit counted {payroll_assigned_count} active salary structure assignment(s); no disbursement was initiated.",
                 tool_name="audit_salary_structures",
                 tool_arguments={"tenant_id": str(tenant_id)},
-                tool_output={"active_assignments": payroll_assigned_count, "ready_for_payroll": True},
+                tool_output={"active_assignments": payroll_assigned_count, "disbursement_initiated": False},
                 status="COMPLETED",
                 duration_ms=45,
             )
             session.add(step3_log)
 
             run.status = "COMPLETED"
-            run.summary = "Workforce audit completed. " + (" ".join(summary_points) if summary_points else "Attendance and project velocities normal. Payroll pre-flight verified.")
+            run.summary = "Workforce audit completed. " + (" ".join(summary_points) if summary_points else "No absence records or active project exceptions were found.") + f" Payroll assignment count: {payroll_assigned_count}; no disbursement was initiated."
             run.completed_at = datetime.now(timezone.utc)
             await session.commit()
             await session.refresh(run)

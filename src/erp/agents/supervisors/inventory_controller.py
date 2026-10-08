@@ -49,7 +49,11 @@ class InventoryController:
                 )
             )
             agent_def = res.scalar_one_or_none()
-            agent_id = agent_def.agent_id if agent_def else uuid.uuid4()
+            if not agent_def:
+                raise ValueError(f"Agent definition '{self.SLUG}' is not provisioned for tenant {tenant_id}.")
+            if not agent_def.is_active or agent_def.autonomy_level.value == "DISABLED":
+                raise ValueError(f"Agent '{agent_def.name}' is disabled.")
+            agent_id = agent_def.agent_id
 
             run = AgentExecutionRun(
                 run_id=run_id,
@@ -97,7 +101,7 @@ class InventoryController:
                 await dispatcher.send_internal_notice(
                     tenant_id=tenant_id,
                     agent_name="Inventory Controller",
-                    recipient_role_or_email="warehouse_manager@zirrah.com",
+                    recipient_role_or_email="WAREHOUSE_MANAGER",
                     subject="Batch Expiration FEFO Alert",
                     body=alert_text,
                     run_id=run_id,

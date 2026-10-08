@@ -22,7 +22,7 @@ class CommunicationDispatcher:
 
     def __init__(self):
         self.backend_url = os.getenv("BACKEND_URL", "http://localhost:4000")
-        self.internal_token = os.getenv("INTERNAL_SERVICE_TOKEN", "hehehehohoho081016")
+        self.internal_token = os.getenv("INTERNAL_SERVICE_TOKEN")
 
     async def send_whatsapp(
         self,
@@ -34,11 +34,13 @@ class CommunicationDispatcher:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> AgentCommunication:
         """Sends WhatsApp message via Baileys MCP service and logs to PostgreSQL."""
-        ext_msg_id = f"wa_{uuid.uuid4().hex[:12]}"
-        status = "SENT"
+        status = "FAILED"
+        ext_msg_id = None
 
         # Attempt live dispatch to internal WhatsApp service if active
         try:
+            if not self.internal_token:
+                raise RuntimeError("WhatsApp gateway credentials are not configured")
             async with httpx.AsyncClient(timeout=8.0) as client:
                 res = await client.post(
                     f"{self.backend_url}/internal/whatsapp/send",
@@ -47,12 +49,13 @@ class CommunicationDispatcher:
                 )
                 if res.is_success:
                     data = res.json()
-                    ext_msg_id = data.get("messageId", ext_msg_id)
+                    ext_msg_id = data.get("messageId")
+                    status = "SENT"
                     logger.info(f"WhatsApp message dispatched to {to_phone} (id: {ext_msg_id})")
                 else:
-                    logger.warning(f"WhatsApp service returned {res.status_code}: {res.text}. Logged to ERP ledger.")
+                    logger.warning(f"WhatsApp service returned HTTP {res.status_code}.")
         except Exception as e:
-            logger.info(f"WhatsApp network dispatch routed via ERP ledger fallback: {e}")
+            logger.warning("WhatsApp delivery failed: %s", e)
 
         # Always persist in PostgreSQL agent_communications ledger
         async with async_session_factory() as session:
@@ -87,8 +90,8 @@ class CommunicationDispatcher:
         credentials: Optional[Dict[str, Any]] = None,
     ) -> AgentCommunication:
         """Sends Gmail message via Gmail API or logs to PostgreSQL."""
-        ext_msg_id = f"gm_{uuid.uuid4().hex[:12]}"
-        status = "SENT"
+        status = "FAILED"
+        ext_msg_id = None
 
         # If OAuth access token provided, send via Google API
         token = credentials.get("access_token") if credentials else None
@@ -107,12 +110,13 @@ class CommunicationDispatcher:
                         json={"raw": raw_b64},
                     )
                     if res.is_success:
-                        ext_msg_id = res.json().get("id", ext_msg_id)
+                        ext_msg_id = res.json().get("id")
+                        status = "SENT"
                         logger.info(f"Gmail sent successfully to {to_email} (id: {ext_msg_id})")
                     else:
-                        logger.warning(f"Gmail API returned {res.status_code}: {res.text}")
+                        logger.warning(f"Gmail API returned HTTP {res.status_code}.")
             except Exception as e:
-                logger.error(f"Failed to dispatch via Gmail API: {e}")
+                logger.error("Failed to dispatch via Gmail API: %s", e)
 
         # Always record in PostgreSQL agent_communications ledger
         async with async_session_factory() as session:
@@ -157,8 +161,8 @@ class CommunicationDispatcher:
                 subject=subject,
                 body=body,
                 metadata_json=metadata or {},
-                status="SENT",
-                external_message_id=f"int_{uuid.uuid4().hex[:12]}",
+                status="RECORDED",
+                external_message_id=None,
                 created_at=datetime.now(timezone.utc),
             )
             session.add(comm)

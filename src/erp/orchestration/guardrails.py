@@ -20,16 +20,21 @@ PERMITTED_AGENT_ACTIONS: dict[str, set[str]] = {
         "execute_three_way_match",
         "submit_purchase_order",
         "quarantine_material",
+        "calculate_landed_costs",
+        "query_stock_atp",
     },
     "PRODUCTION": {
         "dispatch_work_order",
         "route_machine_operation",
         "create_maintenance_ticket",
+        "verify_production_capacity",
     },
     "REVENUE": {
         "parse_rfq",
         "generate_quotation",
         "query_stock_atp",
+        "create_sales_order",
+        "send_order_confirmation",
     },
     "WORKFORCE": {
         "process_shift_swap",

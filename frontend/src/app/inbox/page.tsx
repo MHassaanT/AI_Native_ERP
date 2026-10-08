@@ -66,10 +66,20 @@ export default function InboxPage() {
 
   const [inboxEmails, setInboxEmails] = useState<any[]>([]);
   const [sentEmails, setSentEmails] = useState<any[]>([]);
+  const [salesCustomers, setSalesCustomers] = useState<any[]>([]);
+  const [salesItems, setSalesItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [activeTab, setActiveTab] = useState<"inbox" | "sent">("inbox");
   const [selectedEmail, setSelectedEmail] = useState<any | null>(null);
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [reviewingEmail, setReviewingEmail] = useState(false);
+  const [creatingOrder, setCreatingOrder] = useState(false);
+  const [confirmingOrder, setConfirmingOrder] = useState(false);
+  const [draftCustomerId, setDraftCustomerId] = useState("");
+  const [draftOrderNumber, setDraftOrderNumber] = useState("");
+  const [draftDeliveryDate, setDraftDeliveryDate] = useState("");
+  const [draftLines, setDraftLines] = useState([{ item_id: "", quantity: "1", unit_price: "" }]);
 
   // Official Google OAuth Connection Modal State
   const [showConnectModal, setShowConnectModal] = useState(false);
@@ -94,10 +104,12 @@ export default function InboxPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [statusRes, inboxRes, sentRes] = await Promise.allSettled([
+      const [statusRes, inboxRes, sentRes, customersRes, itemsRes] = await Promise.allSettled([
         api.getGmailStatus(),
         api.getEmailInbox(),
         api.getEmailSent(),
+        api.getCustomers(),
+        api.getItems(),
       ]);
 
       if (statusRes.status === "fulfilled" && statusRes.value) {
@@ -112,10 +124,79 @@ export default function InboxPage() {
       if (sentRes.status === "fulfilled" && Array.isArray(sentRes.value)) {
         setSentEmails(sentRes.value);
       }
+      if (customersRes.status === "fulfilled" && Array.isArray(customersRes.value)) {
+        setSalesCustomers(customersRes.value.filter((customer: any) => customer.is_active));
+      }
+      if (itemsRes.status === "fulfilled" && Array.isArray(itemsRes.value)) {
+        setSalesItems(itemsRes.value.filter((item: any) => item.is_active && item.is_sales_item));
+      }
     } catch {
       // Handled
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleReviewInboundEmail = async (decision: "ACCEPT_FOR_MANUAL_PROCESSING" | "REJECT") => {
+    if (!selectedEmail) return;
+    const notes = reviewNotes.trim();
+    if (notes.length < 3) {
+      setOauthError("Add a review note with at least three characters.");
+      return;
+    }
+    setReviewingEmail(true);
+    setOauthError(null);
+    try {
+      const result = await api.reviewInboundEmail(selectedEmail.message_id, { decision, notes });
+      const updatedEmail = { ...selectedEmail, ...result };
+      setSelectedEmail(updatedEmail);
+      setInboxEmails((items) => items.map((item) => item.message_id === result.message_id ? { ...item, ...result } : item));
+      setReviewNotes("");
+    } catch (err: any) {
+      setOauthError(err?.message || "Could not record the inbound message review.");
+    } finally {
+      setReviewingEmail(false);
+    }
+  };
+
+  const handleCreateOrderDraft = async () => {
+    if (!selectedEmail) return;
+    if (!draftCustomerId || !draftOrderNumber.trim() || !draftDeliveryDate || draftLines.some((line) => !line.item_id || Number(line.quantity) <= 0 || Number(line.unit_price) <= 0)) {
+      setOauthError("Choose a customer, order number, delivery date, and valid item quantities and prices.");
+      return;
+    }
+    setCreatingOrder(true);
+    setOauthError(null);
+    try {
+      const result = await api.createSalesOrderFromEmail(selectedEmail.message_id, {
+        customer_id: draftCustomerId,
+        order_number: draftOrderNumber.trim(),
+        delivery_date: draftDeliveryDate,
+        items: draftLines.map((line) => ({ item_id: line.item_id, quantity: line.quantity, unit_price: line.unit_price })),
+      });
+      const updatedEmail = { ...selectedEmail, status: "SALES_ORDER_DRAFT_CREATED", sales_order_id: result.sales_order_id };
+      setSelectedEmail(updatedEmail);
+      setInboxEmails((messages) => messages.map((message) => message.message_id === result.message_id ? { ...message, ...updatedEmail } : message));
+    } catch (err: any) {
+      setOauthError(err?.message || "Could not create the pending sales-order draft.");
+    } finally {
+      setCreatingOrder(false);
+    }
+  };
+
+  const handleConfirmOrderDraft = async () => {
+    if (!selectedEmail?.sales_order_id) return;
+    setConfirmingOrder(true);
+    setOauthError(null);
+    try {
+      const result = await api.confirmSalesOrder(selectedEmail.sales_order_id);
+      const updatedEmail = { ...selectedEmail, sales_order_status: result.status, fulfillment_warehouse_id: result.warehouse_id };
+      setSelectedEmail(updatedEmail);
+      setInboxEmails((messages) => messages.map((message) => message.message_id === selectedEmail.message_id ? { ...message, ...updatedEmail } : message));
+    } catch (err: any) {
+      setOauthError(err?.message || "Could not confirm the order or reserve stock.");
+    } finally {
+      setConfirmingOrder(false);
     }
   };
 
@@ -385,12 +466,12 @@ export default function InboxPage() {
               <span className="font-semibold text-cream-900">{gmailStatus.connected_email}</span>
             </div>
             <div className="rounded border border-cream-300 bg-cream-50 p-2.5">
-              <span className="text-[10px] text-cream-600 block">AUTONOMOUS DISPATCH SLA:</span>
-              <span className="font-semibold text-sage-700">&le; 300 Seconds (5 min)</span>
+              <span className="text-[10px] text-cream-600 block">INBOUND ORDER HANDLING:</span>
+              <span className="font-semibold text-amberGold-700">Reviewer decision required</span>
             </div>
             <div className="rounded border border-cream-300 bg-cream-50 p-2.5">
-              <span className="text-[10px] text-cream-600 block">INBOUND SMTP DAEMON:</span>
-              <span className="font-semibold text-cream-900">0.0.0.0:2525 (Online)</span>
+              <span className="text-[10px] text-cream-600 block">SMTP INTAKE:</span>
+              <span className="font-semibold text-cream-900">Disabled pending tenant routing</span>
             </div>
           </div>
         )}
@@ -420,7 +501,7 @@ export default function InboxPage() {
               }`}
             >
               <Send className="h-3.5 w-3.5" />
-              <span>Outbound Dispatched Quotations ({sentEmails.length})</span>
+              <span>Outbound Email Records ({sentEmails.length})</span>
             </button>
           </div>
         </div>
@@ -432,7 +513,7 @@ export default function InboxPage() {
                 <Mail className="h-10 w-10 mx-auto text-cream-400 mb-2" />
                 <p className="text-sm font-medium text-cream-900">No inbound emails in enterprise queue</p>
                 <p className="text-xs text-cream-600 mt-1 max-w-sm mx-auto">
-                  Connect your Google Workspace Gmail account or send an RFC 822 email to local SMTP on port 2525 to ingest customer commercial inquiries.
+                  Connect Gmail to sync messages into this tenant&apos;s review queue. SMTP intake is disabled until authenticated tenant routing is configured.
                 </p>
               </div>
             ) : (
@@ -483,7 +564,14 @@ export default function InboxPage() {
                         </td>
                         <td className="py-3 px-4 text-right">
                           <button
-                            onClick={() => setSelectedEmail(msg)}
+                            onClick={() => {
+                              setSelectedEmail(msg);
+                              setReviewNotes("");
+                              setDraftOrderNumber(`SO-EMAIL-${String(msg.message_id).slice(-10).toUpperCase()}`);
+                              setDraftCustomerId("");
+                              setDraftDeliveryDate("");
+                              setDraftLines([{ item_id: "", quantity: "1", unit_price: "" }]);
+                            }}
                             className="rounded border border-cream-300 bg-cream-50 px-2.5 py-1 text-[11px] text-cream-900 hover:bg-cream-200"
                           >
                             Inspect
@@ -808,6 +896,102 @@ export default function InboxPage() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {selectedEmail.status === "HUMAN_REVIEW_REQUIRED" ? (
+                <div className="rounded-lg border border-amberGold-300 bg-amberGold-50 p-4 space-y-3">
+                  <div>
+                    <h4 className="text-xs font-semibold text-cream-900">Reviewer decision</h4>
+                    <p className="mt-1 text-[11px] text-cream-700">
+                      Accepting records manual follow-up only. It does not create a sales order or run fulfillment.
+                    </p>
+                  </div>
+                  <textarea
+                    value={reviewNotes}
+                    onChange={(event) => setReviewNotes(event.target.value)}
+                    maxLength={1000}
+                    rows={3}
+                    placeholder="Add a short audit note (required)"
+                    className="w-full rounded border border-cream-300 bg-white p-2 text-xs text-cream-900"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => handleReviewInboundEmail("ACCEPT_FOR_MANUAL_PROCESSING")}
+                      disabled={reviewingEmail}
+                      className="rounded bg-sage-700 px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-50"
+                    >
+                      {reviewingEmail ? "Saving…" : "Accept for manual processing"}
+                    </button>
+                    <button
+                      onClick={() => handleReviewInboundEmail("REJECT")}
+                      disabled={reviewingEmail}
+                      className="rounded border border-terracotta-300 bg-white px-3 py-2 text-[11px] font-semibold text-terracotta-800 disabled:opacity-50"
+                    >
+                      Reject message
+                    </button>
+                  </div>
+                </div>
+              ) : selectedEmail.review_notes ? (
+                <div className="rounded border border-cream-300 bg-cream-100 p-3 text-[11px]">
+                  <div className="font-semibold text-cream-900">Reviewer note</div>
+                  <div className="mt-1 whitespace-pre-wrap text-cream-700">{selectedEmail.review_notes}</div>
+                  <div className="mt-2 text-cream-600">This decision did not execute a workflow.</div>
+                </div>
+              ) : null}
+
+              {selectedEmail.status === "ACCEPTED_FOR_MANUAL_PROCESSING" && selectedEmail.event_type === "erp.crm.inbound_customer_order" && (
+                <div className="rounded-lg border border-cream-300 bg-cream-100 p-4 space-y-3">
+                  <div>
+                    <h4 className="text-xs font-semibold text-cream-900">Create a pending order draft</h4>
+                    <p className="mt-1 text-[11px] text-cream-700">
+                      This records the reviewed order with tenant-owned customer and catalog items. It does not reserve stock or start fulfillment.
+                    </p>
+                  </div>
+                  <label className="block text-[11px] text-cream-700">
+                    Customer
+                    <select value={draftCustomerId} onChange={(event) => setDraftCustomerId(event.target.value)} className="mt-1 w-full rounded border border-cream-300 bg-white p-2 text-xs text-cream-900">
+                      <option value="">Select active customer</option>
+                      {salesCustomers.map((customer: any) => <option key={customer.customer_id} value={customer.customer_id}>{customer.customer_name} ({customer.customer_code})</option>)}
+                    </select>
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <label className="text-[11px] text-cream-700">Order number<input value={draftOrderNumber} onChange={(event) => setDraftOrderNumber(event.target.value)} maxLength={64} className="mt-1 w-full rounded border border-cream-300 bg-white p-2 text-xs text-cream-900" /></label>
+                    <label className="text-[11px] text-cream-700">Requested delivery date<input type="date" value={draftDeliveryDate} onChange={(event) => setDraftDeliveryDate(event.target.value)} className="mt-1 w-full rounded border border-cream-300 bg-white p-2 text-xs text-cream-900" /></label>
+                  </div>
+                  {draftLines.map((line, index) => (
+                    <div key={index} className="grid grid-cols-1 sm:grid-cols-3 gap-2 rounded border border-cream-300 bg-white p-2">
+                      <select value={line.item_id} onChange={(event) => {
+                        const item = salesItems.find((candidate: any) => candidate.item_id === event.target.value);
+                        setDraftLines((lines) => lines.map((entry, lineIndex) => lineIndex === index ? { ...entry, item_id: event.target.value, unit_price: item ? String(item.standard_rate) : "" } : entry));
+                      }} className="rounded border border-cream-300 p-2 text-xs text-cream-900">
+                        <option value="">Select sales item</option>
+                        {salesItems.map((item: any) => <option key={item.item_id} value={item.item_id}>{item.item_code} — {item.item_name}</option>)}
+                      </select>
+                      <input type="number" min="0.0001" step="0.0001" value={line.quantity} onChange={(event) => setDraftLines((lines) => lines.map((entry, lineIndex) => lineIndex === index ? { ...entry, quantity: event.target.value } : entry))} aria-label="Quantity" placeholder="Quantity" className="rounded border border-cream-300 p-2 text-xs text-cream-900" />
+                      <input type="number" min="0.0001" step="0.0001" value={line.unit_price} onChange={(event) => setDraftLines((lines) => lines.map((entry, lineIndex) => lineIndex === index ? { ...entry, unit_price: event.target.value } : entry))} aria-label="Unit price" placeholder="Unit price" className="rounded border border-cream-300 p-2 text-xs text-cream-900" />
+                    </div>
+                  ))}
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => setDraftLines((lines) => [...lines, { item_id: "", quantity: "1", unit_price: "" }])} disabled={draftLines.length >= 100} className="rounded border border-cream-300 bg-white px-3 py-2 text-[11px] text-cream-800 disabled:opacity-50">Add line</button>
+                    <button onClick={handleCreateOrderDraft} disabled={creatingOrder} className="rounded bg-primary px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-50">{creatingOrder ? "Creating draft…" : "Create pending-confirmation draft"}</button>
+                  </div>
+                </div>
+              )}
+
+              {selectedEmail.sales_order_id && (
+                <div className="rounded border border-cream-300 bg-cream-100 p-3 text-[11px] text-cream-800">
+                  Sales order <span className="font-mono">{selectedEmail.sales_order_id}</span> — {selectedEmail.sales_order_status || "PENDING_CONFIRMATION"}.
+                  {selectedEmail.sales_order_status === "PENDING_CONFIRMATION" || !selectedEmail.sales_order_status ? (
+                    <div className="mt-2 space-y-2">
+                      <p>Confirming reserves available stock in one warehouse. It does not ship or invoice the order.</p>
+                      <button onClick={handleConfirmOrderDraft} disabled={confirmingOrder} className="rounded bg-sage-700 px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-50">
+                        {confirmingOrder ? "Checking stock…" : "Confirm order and reserve stock"}
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="mt-1">Reserved warehouse: {selectedEmail.fulfillment_warehouse_id || "not recorded"}. Fulfillment has not started.</p>
+                  )}
                 </div>
               )}
             </div>

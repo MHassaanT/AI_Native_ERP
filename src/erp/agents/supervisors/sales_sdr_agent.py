@@ -1,6 +1,7 @@
 """Autonomous Sales SDR & CRM Pipeline Agent."""
 
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -49,7 +50,11 @@ class SalesSDRAgent:
                 )
             )
             agent_def = res.scalar_one_or_none()
-            agent_id = agent_def.agent_id if agent_def else uuid.uuid4()
+            if not agent_def:
+                raise ValueError(f"Agent definition '{self.SLUG}' is not provisioned for tenant {tenant_id}.")
+            if not agent_def.is_active or agent_def.autonomy_level.value == "DISABLED":
+                raise ValueError(f"Agent '{agent_def.name}' is disabled.")
+            agent_id = agent_def.agent_id
 
             run = AgentExecutionRun(
                 run_id=run_id,
@@ -109,13 +114,25 @@ class SalesSDRAgent:
                 prompt=f"Qualify this lead against enterprise ICP and generate a personalized WhatsApp/Email pitch. Lead: {lead_summary}. Return JSON with 'icp_score' (1-100), 'is_qualified' (boolean), 'pitch_text', and 'recommended_deal_size'.",
                 system_prompt="You are a high-performing enterprise Sales SDR."
             )
+            try:
+                icp_score = float(llm_res.get("icp_score"))
+                if not math.isfinite(icp_score) or not 1 <= icp_score <= 100:
+                    icp_score = None
+            except (TypeError, ValueError):
+                icp_score = None
+            pitch_text = llm_res.get("pitch_text")
+            if not isinstance(pitch_text, str) or not pitch_text.strip() or len(pitch_text) > 4000:
+                pitch_text = (
+                    f"Hello {target_lead.lead_name}, we'd be glad to discuss workflow improvements "
+                    f"for {target_lead.company_name or 'your organization'}."
+                )
 
             step2_log = AgentStepLog(
                 step_id=uuid.uuid4(),
                 run_id=run_id,
                 step_number=step_num,
                 node_name="icp_qualification_and_pitch",
-                reasoning_thought=f"Lead scored {llm_res.get('icp_score')}/100 ICP fit. Qualified: {llm_res.get('is_qualified')}.",
+                reasoning_thought=f"Lead scored {icp_score if icp_score is not None else 'unavailable'}/100 ICP fit. Qualified: {llm_res.get('is_qualified') is True}.",
                 tool_name="llm_qualify_and_pitch",
                 tool_arguments=lead_summary,
                 tool_output=llm_res,
@@ -126,40 +143,62 @@ class SalesSDRAgent:
             step_num += 1
 
             # STEP 3: Dispatch Personalized Outreach
-            pitch_text = llm_res.get("pitch_text", f"Hello {target_lead.lead_name}, we noticed your enterprise operations at {target_lead.company_name} and would love to show you how AI-Native ERP automates workflows.")
-            recipient = target_lead.phone or target_lead.mobile_no or target_lead.email_id or "+923009876543"
-
-            await dispatcher.send_whatsapp(
-                tenant_id=tenant_id,
-                agent_name="Sales SDR Agent",
-                to_phone=recipient,
-                message=pitch_text,
-                run_id=run_id,
-                metadata={"lead_id": str(target_lead.lead_id), "icp_score": llm_res.get("icp_score")},
-            )
+            phone = target_lead.phone or target_lead.mobile_no
+            email = target_lead.email_id
+            communication = None
+            if phone:
+                communication = await dispatcher.send_whatsapp(
+                    tenant_id=tenant_id,
+                    agent_name="Sales SDR Agent",
+                    to_phone=phone,
+                    message=pitch_text,
+                    run_id=run_id,
+                    metadata={"lead_id": str(target_lead.lead_id), "icp_score": llm_res.get("icp_score")},
+                )
+            elif email:
+                communication = await dispatcher.send_gmail(
+                    tenant_id=tenant_id,
+                    agent_name="Sales SDR Agent",
+                    to_email=email,
+                    subject=f"Follow-up for {target_lead.company_name or target_lead.lead_name}",
+                    body=pitch_text,
+                    run_id=run_id,
+                    metadata={"lead_id": str(target_lead.lead_id), "icp_score": llm_res.get("icp_score")},
+                )
+            delivery_status = communication.status if communication else "SKIPPED"
+            recipient = phone or email
 
             step3_log = AgentStepLog(
                 step_id=uuid.uuid4(),
                 run_id=run_id,
                 step_number=step_num,
                 node_name="dispatch_outreach",
-                reasoning_thought=f"Dispatched conversational sales pitch to {target_lead.lead_name} ({recipient}).",
-                tool_name="dispatch_whatsapp",
-                tool_arguments={"recipient": recipient},
-                tool_output={"message_sent": True},
-                status="COMPLETED",
-                duration_ms=90,
+                reasoning_thought=(
+                    f"Outreach delivery status for {target_lead.lead_name}: {delivery_status}."
+                    if communication
+                    else f"Outreach was not attempted for {target_lead.lead_name}; no contact details are configured."
+                ),
+                tool_name=("dispatch_whatsapp" if phone else "dispatch_gmail") if communication else "outreach_not_configured",
+                tool_arguments={"recipient": recipient} if recipient else {},
+                tool_output={"message_sent": delivery_status == "SENT", "status": delivery_status},
+                status="COMPLETED" if delivery_status == "SENT" else ("FAILED" if communication else "SKIPPED"),
+                duration_ms=0,
             )
             session.add(step3_log)
             step_num += 1
 
             # STEP 4: Advance Lead Stage in CRM
-            if llm_res.get("is_qualified", True):
+            qualified = llm_res.get("is_qualified") is True and icp_score is not None
+            if qualified:
                 target_lead.status = "INTERESTED"
                 session.add(target_lead)
 
             run.status = "COMPLETED"
-            run.summary = f"Evaluated lead '{target_lead.lead_name}' (ICP Score: {llm_res.get('icp_score')}/100). Dispatched tailored outreach pitch. Lead progressed to INTERESTED."
+            run.summary = (
+                f"Evaluated lead '{target_lead.lead_name}' (ICP Score: {icp_score if icp_score is not None else 'unavailable'}/100). "
+                f"Outreach status: {delivery_status}. "
+                + ("Lead progressed to INTERESTED." if qualified else "Lead was not progressed.")
+            )
             run.completed_at = datetime.now(timezone.utc)
             await session.commit()
             await session.refresh(run)

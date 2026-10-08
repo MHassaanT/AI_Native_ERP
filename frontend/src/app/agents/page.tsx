@@ -15,7 +15,6 @@ import {
   RefreshCw,
   Send,
   ShieldAlert,
-  ShieldCheck,
   Sparkles,
   X,
   Package,
@@ -89,6 +88,7 @@ function AgentsContent() {
   const [agents, setAgents] = useState<AutonomousAgentDef[]>([]);
   const [runs, setRuns] = useState<AutonomousRun[]>([]);
   const [communications, setCommunications] = useState<AutonomousComm[]>([]);
+  const [readiness, setReadiness] = useState<any | null>(null);
   const [loadingAgents, setLoadingAgents] = useState(false);
   const [runningAgentSlug, setRunningAgentSlug] = useState<string | null>(null);
   const [runningAll, setRunningAll] = useState(false);
@@ -107,6 +107,8 @@ function AgentsContent() {
   const [activeDag, setActiveDag] = useState<any | null>(null);
   const [dagsList, setDagsList] = useState<any[]>([]);
   const [loadingDag, setLoadingDag] = useState(false);
+  const [recoveringDag, setRecoveringDag] = useState(false);
+  const [recoveryNotes, setRecoveryNotes] = useState("");
   const [showDispatchModal, setShowDispatchModal] = useState(false);
 
   // RFQ Dispatch Form
@@ -116,9 +118,6 @@ function AgentsContent() {
   const [dispatchError, setDispatchError] = useState<string | null>(null);
 
   // Collision Arbitration Result
-  const [arbitrating, setArbitrating] = useState(false);
-  const [arbitrationResult, setArbitrationResult] = useState<any | null>(null);
-  const [arbitrationError, setArbitrationError] = useState<string | null>(null);
 
   const loadAutonomousData = useCallback(async () => {
     try {
@@ -154,6 +153,14 @@ function AgentsContent() {
     }
   };
 
+  const loadReadiness = async () => {
+    try {
+      setReadiness(await api.getReadiness());
+    } catch {
+      setReadiness(null);
+    }
+  };
+
   const loadDagsList = async () => {
     try {
       const list = await api.listDags();
@@ -184,9 +191,30 @@ function AgentsContent() {
     }
   }, []);
 
+  const handleRecoverDag = async () => {
+    if (!activeDag?.dag_id || recoveryNotes.trim().length < 10) return;
+    try {
+      setRecoveringDag(true);
+      const result = await api.recoverDag(activeDag.dag_id, recoveryNotes.trim());
+      setFeedback({
+        type: result.status === "COMPLETED" ? "success" : "error",
+        text: result.held_nodes?.length
+          ? `Recovery finished with ${result.held_nodes.length} node(s) held for manual reconciliation.`
+          : `Workflow recovery finished with status ${result.status}.`,
+      });
+      setRecoveryNotes("");
+      await Promise.all([fetchDag(activeDag.dag_id), loadDagsList()]);
+    } catch (err: any) {
+      setFeedback({ type: "error", text: err.message || "Workflow recovery could not be started." });
+    } finally {
+      setRecoveringDag(false);
+    }
+  };
+
   useEffect(() => {
     loadAutonomousData();
     loadAgentStates();
+    loadReadiness();
     loadDagsList();
     fetchDag(dagIdParam || undefined);
   }, [dagIdParam, fetchDag, loadAutonomousData]);
@@ -274,44 +302,6 @@ function AgentsContent() {
     }
   };
 
-  const handleSimulateConflict = async () => {
-    setArbitrating(true);
-    setArbitrationError(null);
-    try {
-      const proposals = [
-        {
-          task_id: "task_prod_safety_01",
-          agent_id: "PRODUCTION",
-          tenant_id: "00000000-0000-0000-0000-000000000001",
-          policy_class: "STATUTORY_LEGAL",
-          resource_keys: ["workstation:WS-CNC-01"],
-          state_mutation: { action: "EMERGENCY_HALT", reason: "Spindle vibration threshold exceeded" },
-          monetary_value: 0.0,
-          risk_score: 0.95,
-          audit_rationale: "OSHA statutory machine safety override.",
-        },
-        {
-          task_id: "task_rev_rush_01",
-          agent_id: "REVENUE",
-          tenant_id: "00000000-0000-0000-0000-000000000001",
-          policy_class: "CONTRACTUAL_SLA",
-          resource_keys: ["workstation:WS-CNC-01"],
-          state_mutation: { action: "EXPEDITE_JOB", job_id: "JOB-AERO-09" },
-          monetary_value: 48000.0,
-          risk_score: 0.15,
-          audit_rationale: "Tier-1 Customer Contractual SLA delivery penalty defense.",
-        },
-      ];
-
-      const res = await api.arbitrateAgentCollision(proposals);
-      setArbitrationResult(res);
-    } catch (err: any) {
-      setArbitrationError(err.message || "Failed to execute mathematical arbitration");
-    } finally {
-      setArbitrating(false);
-    }
-  };
-
   return (
     <div className="space-y-6 pb-16">
       {/* Header */}
@@ -326,13 +316,13 @@ function AgentsContent() {
                 <h1 className="text-2xl font-bold tracking-tight text-cream-900 font-serif">
                   Autonomous Workforce Command Center
                 </h1>
-                <span className="text-xs px-2.5 py-0.5 rounded-full bg-sage-100 text-sage-800 border border-sage-300 font-medium inline-flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-sage-500 animate-ping" />
-                  Live Gemini 3.8 Flash
+                <span className={`text-xs px-2.5 py-0.5 rounded-full border font-medium inline-flex items-center gap-1.5 ${readiness?.status === "ready" ? "bg-sage-100 text-sage-800 border-sage-300" : "bg-amberGold-100 text-amberGold-800 border-amberGold-300"}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${readiness?.status === "ready" ? "bg-sage-500" : "bg-amberGold-500"}`} />
+                  {readiness ? `Service ${readiness.status}` : "Service status unavailable"}
                 </span>
               </div>
               <p className="text-xs text-cream-700 mt-1">
-                Multi-agent autonomous workforce across Procurement, Sales, Inventory, HR, MES, and Finance with WhatsApp & Gmail integration.
+                Review supervisor runs, workflow progress, approval outcomes, and connected automation status.
               </p>
             </div>
           </div>
@@ -340,7 +330,7 @@ function AgentsContent() {
 
         <div className="flex items-center gap-2.5">
           <button
-            onClick={() => loadAutonomousData()}
+            onClick={() => { loadAutonomousData(); loadReadiness(); }}
             disabled={loadingAgents}
             className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-cream-100 hover:bg-cream-200 text-cream-800 rounded-lg border border-cream-300 transition shadow-2xs"
           >
@@ -359,6 +349,43 @@ function AgentsContent() {
             )}
             Run All Agent Cycles
           </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 rounded-xl border border-cream-300 bg-cream-100 p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-cream-600">Interval scheduler</div>
+          <div className={`mt-1 text-xs font-semibold ${readiness?.agent_scheduler_enabled ? "text-sage-700" : "text-amberGold-700"}`}>
+            {readiness ? readiness.agent_scheduler_enabled ? "Enabled" : "Disabled" : "Unknown"}
+          </div>
+          <p className="mt-1 text-[11px] text-cream-600">
+            {readiness?.agent_scheduler_enabled ? "Active interval agents may run automatically." : "Automatic interval runs are off; manual runs may still be started."}
+          </p>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-cream-600">Event automation</div>
+          <div className={`mt-1 text-xs font-semibold ${readiness?.event_consumer_enabled ? "text-sage-700" : "text-amberGold-700"}`}>
+            {readiness ? readiness.event_consumer_enabled ? "Enabled" : "Unavailable" : "Unknown"}
+          </div>
+          <p className="mt-1 text-[11px] text-cream-600">
+            {readiness?.event_consumer_enabled ? "Registered event handlers are running." : "No event handlers are registered; events will not trigger agent work."}
+          </p>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-cream-600">Event publishing</div>
+          <div className="mt-1 text-xs font-semibold text-cream-800">
+            {readiness?.event_publishing_mode || "Unknown"}
+          </div>
+          <p className="mt-1 text-[11px] text-cream-600">Shows whether the service has Kafka or its local in-memory publisher.</p>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-cream-600">Outbox backlog</div>
+          <div className="mt-1 text-xs font-semibold text-cream-800">
+            {typeof readiness?.pending_outbox_events === "number" ? readiness.pending_outbox_events : "Unknown"}
+          </div>
+          <p className="mt-1 text-[11px] text-cream-600">
+            Dispatcher: {readiness?.outbox_dispatcher_status?.replaceAll("_", " ") || "unknown"}
+          </p>
         </div>
       </div>
 
@@ -413,7 +440,7 @@ function AgentsContent() {
           <div>
             <div className="flex items-center justify-between mb-3.5">
               <h2 className="text-xs font-semibold text-cream-900 tracking-wide uppercase">
-                Active Domain Supervisors ({agents.length})
+                Active Domain Supervisors ({agents.filter((agent) => agent.is_active).length} active / {agents.length} total)
               </h2>
               <span className="text-xs text-cream-600">
                 Governed by Human-in-the-Loop Thresholds & Multi-Channel Gateways
@@ -445,9 +472,9 @@ function AgentsContent() {
                           {domainStyle.label}
                         </span>
 
-                        <span className="inline-flex items-center gap-1.5 text-[11px] text-sage-700 bg-sage-50 border border-sage-200 px-2 py-0.5 rounded-full font-mono font-medium">
-                          <span className="w-1.5 h-1.5 rounded-full bg-sage-500" />
-                          {agent.autonomy_level}
+                        <span className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full font-mono font-medium border ${agent.is_active ? "text-sage-700 bg-sage-50 border-sage-200" : "text-cream-700 bg-cream-200 border-cream-300"}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${agent.is_active ? "bg-sage-500" : "bg-cream-500"}`} />
+                          {agent.is_active ? agent.autonomy_level : "INACTIVE"}
                         </span>
                       </div>
 
@@ -465,7 +492,7 @@ function AgentsContent() {
                       </span>
                       <button
                         onClick={() => handleRunAgent(agent.slug)}
-                        disabled={isRunning}
+                        disabled={isRunning || !agent.is_active}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-cream-900 hover:bg-cream-800 text-cream-50 rounded-lg transition shadow-2xs disabled:opacity-50"
                       >
                         {isRunning ? (
@@ -473,7 +500,7 @@ function AgentsContent() {
                         ) : (
                           <Play className="w-3 h-3 fill-current" />
                         )}
-                        <span>{isRunning ? "Running..." : "Run Cycle Now"}</span>
+                        <span>{isRunning ? "Running..." : agent.is_active ? "Run Cycle Now" : "Inactive"}</span>
                       </button>
                     </div>
                   </div>
@@ -490,7 +517,7 @@ function AgentsContent() {
                 <div className="flex items-center gap-2">
                   <Terminal className="w-4 h-4 text-cream-800" />
                   <h3 className="text-xs font-semibold text-cream-900 uppercase tracking-wide">
-                    Live Execution Runs & Traceability
+                    Agent Execution History & Traceability
                   </h3>
                 </div>
                 <span className="text-xs text-cream-600">{runs.length} logged runs</span>
@@ -694,7 +721,7 @@ function AgentsContent() {
               <h2 className="text-xs font-semibold text-cream-900 uppercase tracking-wide">
                 Autonomous Agent Topology (6 Nodes)
               </h2>
-              <span className="font-mono text-[10px] text-cream-700">Sandboxed Subagent Contexts</span>
+              <span className="font-mono text-[10px] text-cream-700">Domain agent status</span>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -732,7 +759,7 @@ function AgentsContent() {
                   )}
                 </div>
                 <p className="text-xs text-cream-700 mt-0.5">
-                  Strict topological sorting guarantees causal sequence and invariant compliance before mutation.
+                  Displays persisted workflow progress and recovery state. Business checks run at each supported action.
                 </p>
               </div>
 
@@ -854,11 +881,42 @@ function AgentsContent() {
                   </div>
                   <div className="text-right">
                     <span className="text-[10px] text-cream-600 uppercase font-bold block">Status:</span>
-                    <span className={`font-semibold ${activeDag.status === "COMPLETED" ? "text-sage-700" : "text-amberGold-600 animate-pulse"}`}>
+                    <span className={`font-semibold ${activeDag.status === "COMPLETED" ? "text-sage-700" : activeDag.status === "FAILED" ? "text-terracotta-700" : "text-amberGold-600"}`}>
                       {activeDag.status}
                     </span>
                   </div>
                 </div>
+
+                {activeDag.status === "RECOVERY_REQUIRED" && (
+                  <div className="rounded-lg border border-amberGold-300 bg-amberGold-50 p-4 space-y-3">
+                    <div>
+                      <h3 className="text-xs font-semibold text-cream-900">Interrupted workflow needs review</h3>
+                      <p className="mt-1 text-[11px] text-cream-700">
+                        Recovery retries only approved safe nodes. External communication and other held side effects need manual reconciliation.
+                      </p>
+                    </div>
+                    <label className="block text-[11px] font-medium text-cream-800">
+                      Recovery audit note
+                      <textarea
+                        value={recoveryNotes}
+                        onChange={(event) => setRecoveryNotes(event.target.value)}
+                        minLength={10}
+                        maxLength={500}
+                        rows={2}
+                        placeholder="Describe the reconciliation completed before retrying safe nodes."
+                        className="mt-1 w-full rounded-md border border-cream-300 bg-cream-50 px-3 py-2 text-xs text-cream-900"
+                      />
+                    </label>
+                    <button
+                      onClick={handleRecoverDag}
+                      disabled={recoveringDag || recoveryNotes.trim().length < 10}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-cream-900 px-3 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
+                    >
+                      {recoveringDag && <RefreshCw className="h-3 w-3 animate-spin" />}
+                      {recoveringDag ? "Recovering…" : "Recover safe nodes"}
+                    </button>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                   {activeDag.nodes?.map((node: any, idx: number) => {
@@ -943,68 +1001,8 @@ function AgentsContent() {
             )}
           </div>
 
-          {/* Conflict Resolution Interactive Engine */}
-          <div className="rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-2xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-cream-300 pb-4">
-              <div>
-                <h2 className="text-sm font-semibold text-cream-900">
-                  Deterministic Conflict Resolution Engine
-                </h2>
-                <p className="text-[11px] text-cream-700 mt-0.5">
-                  Executes strict partial order arbitration when competing domain subagents collide over shared resources.
-                </p>
-              </div>
-              <button
-                onClick={handleSimulateConflict}
-                disabled={arbitrating}
-                className="inline-flex items-center gap-1.5 rounded-md border border-cream-400 bg-cream-900 px-3.5 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
-              >
-                <Play className="h-3.5 w-3.5" />
-                <span>{arbitrating ? "Arbitrating..." : "Simulate Live Machine Collision"}</span>
-              </button>
-            </div>
-
-            {arbitrationError && (
-              <div className="rounded border border-terracotta-100 bg-terracotta-50 p-3 text-xs text-terracotta-700">
-                {arbitrationError}
-              </div>
-            )}
-
-            {arbitrationResult && (
-              <div className="rounded-lg border border-cream-300 bg-cream-50 p-5 space-y-4 animate-fadeIn">
-                <div className="flex items-center justify-between border-b border-cream-200 pb-3">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-cream-900">
-                    <ShieldCheck className="h-4 w-4 text-sage-600" />
-                    <span>Arbitration Completed • Collision Arbitrated</span>
-                  </div>
-                  <span className="font-mono text-[10px] text-cream-700">
-                    P_Statutory_Legal (Rank 5) &gt; P_Contractual_SLA (Rank 3)
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                  <div className="rounded border border-sage-200 bg-sage-50/60 p-3">
-                    <span className="text-sage-700 block text-[10px] font-bold">STAGED ACTION (WINNER):</span>
-                    <span className="font-semibold text-cream-900 mt-1 block">
-                      PRODUCTION Agent • STATUTORY_LEGAL (Rank 5)
-                    </span>
-                    <p className="text-[11px] text-cream-700 mt-1">
-                      Machine safety vibration limit override executed on workstation:WS-CNC-01.
-                    </p>
-                  </div>
-
-                  <div className="rounded border border-terracotta-200 bg-terracotta-50/60 p-3">
-                    <span className="text-terracotta-700 block text-[10px] font-bold">PREEMPTED ACTION (LOSER):</span>
-                    <span className="font-semibold text-cream-900 mt-1 block">
-                      REVENUE Agent • CONTRACTUAL_SLA (Rank 3)
-                    </span>
-                    <p className="text-[11px] text-cream-700 mt-1">
-                      VIP expedite order preempted. Preemption signal emitted with bounded replanning search space.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
+          <div className="rounded-xl border border-cream-300 bg-cream-100 p-5 text-xs text-cream-700">
+            Conflict arbitration is unavailable until it can use persisted tenant quality, stock, and sales order records.
           </div>
         </div>
       )}

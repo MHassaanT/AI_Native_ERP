@@ -3,6 +3,8 @@
 from erp.db.models.audit import AgentAuditLog
 from erp.db.models.base import Base, TenantMixin, TimestampMixin
 from erp.db.models.embeddings import SemanticDocumentEmbedding
+from erp.db.models.events import EventDeadLetterRecord, EventProcessingRecord, InboundEmailRecord
+from erp.db.models.orchestration import DAGExecutionRecord
 from erp.db.models.hr import (
     Attendance,
     Department,
@@ -374,6 +376,9 @@ __all__ = [
     "AgentStepLog",
     "AgentApproval",
     "AgentCommunication",
+    "DAGExecutionRecord",
+    "EventProcessingRecord",
+    "EventDeadLetterRecord",
     "AutonomyLevel",
     "AgentDomain",
     "ApprovalStatus",

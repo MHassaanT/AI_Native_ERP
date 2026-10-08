@@ -91,14 +91,18 @@ export const api = {
     fetchWithTenant(`/onboarding/modules/${encodeURIComponent(moduleSlug)}/skip`, { method: "POST" }),
 
   getHealth: () => fetchWithTenant("/health"),
+  getReadiness: () => fetchWithTenant("/ready"),
   getAgentStates: () => fetchWithTenant("/agents/states"),
   dispatchRFQ: (data: { customer_name: string; inquiry_text: string }) =>
     fetchWithTenant("/agents/dispatch-rfq", { method: "POST", body: JSON.stringify(data) }),
   getLatestDag: () => fetchWithTenant("/agents/dags/latest"),
   getDag: (dagId: string) => fetchWithTenant(`/agents/dags/${encodeURIComponent(dagId)}`),
   listDags: () => fetchWithTenant("/agents/dags"),
-  arbitrateAgentCollision: (proposals: any[]) =>
-    fetchWithTenant("/agents/arbitrate", { method: "POST", body: JSON.stringify({ proposals }) }),
+  recoverDag: (dagId: string, notes: string) =>
+    fetchWithTenant(`/agents/dags/${encodeURIComponent(dagId)}/recover`, {
+      method: "POST",
+      body: JSON.stringify({ notes }),
+    }),
 
   // --- Inbound Email & Gmail OAuth ---
   getGmailStatus: () => fetchWithTenant("/webhooks/gmail/status"),
@@ -112,6 +116,21 @@ export const api = {
   disconnectGmail: () => fetchWithTenant("/webhooks/gmail/disconnect", { method: "POST" }),
   syncGmailInbox: () => fetchWithTenant("/webhooks/gmail/sync", { method: "POST" }),
   getEmailInbox: () => fetchWithTenant("/webhooks/email/inbox"),
+  reviewInboundEmail: (messageId: string, data: { decision: "ACCEPT_FOR_MANUAL_PROCESSING" | "REJECT"; notes: string }) =>
+    fetchWithTenant(`/webhooks/email/inbox/${encodeURIComponent(messageId)}/review`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  createSalesOrderFromEmail: (messageId: string, data: { customer_id: string; order_number: string; delivery_date: string; items: Array<{ item_id: string; quantity: string; unit_price: string }> }) =>
+    fetchWithTenant(`/webhooks/email/inbox/${encodeURIComponent(messageId)}/sales-order`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  confirmSalesOrder: (orderId: string, warehouseId?: string) =>
+    fetchWithTenant(`/commercial/orders/${encodeURIComponent(orderId)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ warehouse_id: warehouseId || null }),
+    }),
   getEmailSent: () => fetchWithTenant("/webhooks/email/sent"),
   simulateInboundEmail: (data: { sender: string; recipient?: string; subject: string; body_text: string; attachments?: string[] }) =>
     fetchWithTenant("/webhooks/email/inbound", { method: "POST", body: JSON.stringify(data) }),
@@ -1047,4 +1066,3 @@ export const api = {
       body: JSON.stringify({ reviewer_notes: notes }),
     }),
 };
-

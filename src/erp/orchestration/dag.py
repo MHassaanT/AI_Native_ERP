@@ -27,6 +27,7 @@ class TaskNode(BaseModel):
     dependencies: set[str] = Field(default_factory=set)
     input_payload: dict[str, Any] = Field(default_factory=dict)
     output_result: dict[str, Any] | None = None
+    guardrail_evidence: dict[str, Any] | None = None
     status: TaskStatus = TaskStatus.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
@@ -59,8 +60,14 @@ class TaskDAG:
             n_dict["dependencies"] = list(n.dependencies)
             node_list.append(n_dict)
 
-        status = "COMPLETED" if self.is_finished() else "RUNNING"
-        if all(n.status == TaskStatus.PENDING for n in self.nodes.values()):
+        node_statuses = {n.status for n in self.nodes.values()}
+        if node_statuses and node_statuses == {TaskStatus.COMPLETED}:
+            status = "COMPLETED"
+        elif self.is_finished():
+            status = "FAILED"
+        else:
+            status = "RUNNING"
+        if node_statuses and node_statuses <= {TaskStatus.PENDING, TaskStatus.READY}:
             status = "DISPATCHED"
 
         return {
@@ -72,6 +79,23 @@ class TaskDAG:
             "status": status,
             "nodes": node_list,
         }
+
+    @classmethod
+    def from_dict(cls, snapshot: dict[str, Any]) -> "TaskDAG":
+        """Reconstruct a validated DAG from a persisted workflow snapshot."""
+        dag = cls(
+            dag_id=snapshot.get("dag_id"),
+            tenant_id=snapshot.get("tenant_id"),
+            customer_name=snapshot.get("customer_name"),
+            inquiry_text=snapshot.get("inquiry_text"),
+        )
+        if snapshot.get("created_at"):
+            dag.created_at = datetime.fromisoformat(snapshot["created_at"])
+        for node_data in snapshot.get("nodes", []):
+            node = TaskNode.model_validate(node_data)
+            dag.nodes[node.task_id] = node
+        dag.validate()
+        return dag
 
     def add_node(
         self,
@@ -129,6 +153,14 @@ class TaskDAG:
         ready = []
         for node in self.nodes.values():
             if node.status == TaskStatus.PENDING:
+                if any(
+                    self.nodes[dep_id].status in (TaskStatus.FAILED, TaskStatus.PREEMPTED)
+                    for dep_id in node.dependencies
+                ):
+                    node.status = TaskStatus.PREEMPTED
+                    node.error_message = "A dependency did not complete successfully."
+                    node.completed_at = datetime.now(UTC)
+                    continue
                 all_deps_done = all(
                     self.nodes[dep_id].status == TaskStatus.COMPLETED
                     for dep_id in node.dependencies

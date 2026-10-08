@@ -9,8 +9,12 @@ from pydantic import BaseModel
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from erp.agents.core.approval_engine import approval_engine
-from erp.api.deps import DbSessionDep, TenantIdDep
+from erp.agents.core.approval_engine import (
+    ApprovalConflictError,
+    ApprovalNotFoundError,
+    approval_engine,
+)
+from erp.api.deps import CurrentUserDep, DbSessionDep, TenantIdDep
 from erp.db.models.agents import AgentApproval, ApprovalStatus
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,9 @@ async def list_approvals(
             "required_role": a.required_role,
             "ai_rationale": a.ai_rationale,
             "status": a.status.value,
+            "action_execution_status": a.action_execution_status,
+            "action_execution_result": a.action_execution_result,
+            "reviewed_by": str(a.reviewed_by) if a.reviewed_by else None,
             "reviewer_notes": a.reviewer_notes,
             "modified_payload": a.modified_payload,
             "created_at": a.created_at.isoformat(),
@@ -64,24 +71,40 @@ async def approve_request(
     approval_id: uuid.UUID,
     payload: ApprovalDecisionPayload,
     tenant_id: TenantIdDep,
+    reviewer: CurrentUserDep,
 ):
     """Approves a pending request and executes the underlying domain workflow."""
+    if reviewer.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Reviewer is not a member of this tenant.")
     try:
         approval = await approval_engine.resolve_approval(
             approval_id=approval_id,
-            decision=ApprovalStatus.APPROVED,
+            tenant_id=tenant_id,
+            decision=ApprovalStatus.MODIFIED if payload.modified_payload is not None else ApprovalStatus.APPROVED,
+            reviewer_id=reviewer.user_id,
+            reviewer_role=reviewer.role,
             reviewer_notes=payload.notes,
             modified_payload=payload.modified_payload,
         )
         return {
-            "status": "SUCCESS",
+            "status": approval.status.value,
             "approval_id": str(approval.approval_id),
             "action_status": approval.status.value,
+            "action_execution_status": approval.action_execution_status,
+            "execution_result": approval.action_execution_result,
             "message": f"Action '{approval.action_type}' approved and successfully executed.",
         }
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ApprovalNotFoundError as e:
+        raise HTTPException(status_code=404, detail="Approval not found.") from e
+    except ApprovalConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Approval execution error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Approval execution failed")
+        raise HTTPException(status_code=500, detail="Approval action could not be completed.") from e
 
 
 @router.post("/{approval_id}/reject")
@@ -89,12 +112,18 @@ async def reject_request(
     approval_id: uuid.UUID,
     payload: ApprovalDecisionPayload,
     tenant_id: TenantIdDep,
+    reviewer: CurrentUserDep,
 ):
     """Rejects a pending request and records reason feedback."""
+    if reviewer.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Reviewer is not a member of this tenant.")
     try:
         approval = await approval_engine.resolve_approval(
             approval_id=approval_id,
+            tenant_id=tenant_id,
             decision=ApprovalStatus.REJECTED,
+            reviewer_id=reviewer.user_id,
+            reviewer_role=reviewer.role,
             reviewer_notes=payload.notes or "Rejected by reviewer.",
         )
         return {
@@ -103,6 +132,14 @@ async def reject_request(
             "action_status": approval.status.value,
             "message": f"Action '{approval.action_type}' rejected.",
         }
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ApprovalNotFoundError as e:
+        raise HTTPException(status_code=404, detail="Approval not found.") from e
+    except ApprovalConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Rejection error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Approval rejection failed")
+        raise HTTPException(status_code=500, detail="Approval could not be rejected.") from e

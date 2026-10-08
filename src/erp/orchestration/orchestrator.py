@@ -141,13 +141,12 @@ class ChiefOrchestrator:
         return dag
 
     def get_dags(self, tenant_id: uuid.UUID | str | None = None) -> list[TaskDAG]:
-        """Returns list of DAGs sorted newest first, filtered by tenant when available."""
+        """Returns only this tenant's DAGs, sorted newest first."""
+        if tenant_id is None:
+            return []
         dags = list(self.active_dags.values())
-        if tenant_id:
-            tenant_str = str(tenant_id)
-            filtered = [d for d in dags if d.tenant_id is None or d.tenant_id == tenant_str]
-            if filtered:
-                dags = filtered
+        tenant_str = str(tenant_id)
+        dags = [d for d in dags if d.tenant_id == tenant_str]
         from datetime import datetime, UTC
         dags.sort(key=lambda d: getattr(d, "created_at", datetime.min.replace(tzinfo=UTC)), reverse=True)
         return dags

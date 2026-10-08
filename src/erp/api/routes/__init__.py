@@ -10,6 +10,7 @@ from erp.api.routes.billing import router as billing_router
 from erp.api.routes.commercial import router as commercial_router
 from erp.api.routes.crm import router as crm_router
 from erp.api.routes.health import router as health_router
+from erp.api.routes.events import router as events_router
 from erp.api.routes.hr import router as hr_router
 from erp.api.routes.inventory_rop import router as inventory_rop_router
 from erp.api.routes.iot_telemetry import router as iot_telemetry_router
@@ -44,6 +45,7 @@ __all__ = [
     "commercial_router",
     "crm_router",
     "health_router",
+    "events_router",
     "hr_router",
     "inventory_rop_router",
     "iot_telemetry_router",

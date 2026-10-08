@@ -9,16 +9,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.agents.channels.communications import dispatcher
-from erp.agents.core.approval_engine import approval_engine
 from erp.agents.core.llm_gateway import llm_gateway
 from erp.db.models.agents import (
     AgentDefinition,
-    AgentDomain,
     AgentExecutionRun,
     AgentStepLog,
-    RiskLevel,
 )
-from erp.db.models.billing import Budget, DunningNotice, DunningType
+from erp.db.models.billing import Budget
 from erp.db.models.currency import CurrencyExchangeRate
 from erp.db.models.sales import SalesInvoice
 from erp.db.session import async_session_factory
@@ -52,7 +49,11 @@ class FinanceComplianceAgent:
                 )
             )
             agent_def = res.scalar_one_or_none()
-            agent_id = agent_def.agent_id if agent_def else uuid.uuid4()
+            if not agent_def:
+                raise ValueError(f"Agent definition '{self.SLUG}' is not provisioned for tenant {tenant_id}.")
+            if not agent_def.is_active or agent_def.autonomy_level.value == "DISABLED":
+                raise ValueError(f"Agent '{agent_def.name}' is disabled.")
+            agent_id = agent_def.agent_id
 
             run = AgentExecutionRun(
                 run_id=run_id,
@@ -84,7 +85,7 @@ class FinanceComplianceAgent:
                 run_id=run_id,
                 step_number=step_num,
                 node_name="scan_overdue_receivables",
-                reasoning_thought=f"Audited Accounts Receivable ledger: detected {len(overdue_invoices)} overdue unpaid invoices.",
+                reasoning_thought=f"Selected {len(overdue_invoices)} invoices with an overdue due date and an open status.",
                 tool_name="query_overdue_invoices",
                 tool_arguments={"as_of_date": str(today_date)},
                 tool_output={"overdue_count": len(overdue_invoices)},
@@ -99,35 +100,22 @@ class FinanceComplianceAgent:
                 days_overdue = (today_date - target_inv.due_date).days
                 amount = float(target_inv.total_amount)
 
-                # Fetch dunning type or default
-                dunning_type_res = await session.execute(
-                    select(DunningType).where(DunningType.tenant_id == tenant_id).limit(1)
-                )
-                dunning_type = dunning_type_res.scalar_one_or_none()
-                dunning_type_id = dunning_type.dunning_type_id if dunning_type else uuid.uuid4()
-
-                dunning_payload = {
-                    "customer_id": str(target_inv.customer_id),
-                    "invoice_id": str(target_inv.invoice_id),
-                    "dunning_type_id": str(dunning_type_id),
-                    "amount": amount,
-                    "days_overdue": days_overdue,
-                }
-
-                # Stage Dunning Notice in HITL approval if high overdue
-                approval = await approval_engine.stage_approval_request(
-                    tenant_id=tenant_id,
+                session.add(AgentStepLog(
+                    step_id=uuid.uuid4(),
                     run_id=run_id,
-                    agent_id=agent_id,
-                    agent_name="Autonomous Finance & Compliance Controller",
-                    domain=AgentDomain.FINANCE,
-                    action_type="ISSUE_DUNNING_LEGAL_NOTICE",
-                    action_payload=dunning_payload,
-                    ai_rationale=f"Invoice #{target_inv.invoice_number} is {days_overdue} days past due with outstanding \${amount:,.2f}. Generated tiered collection notice awaiting finance approval.",
-                    risk_level=RiskLevel.HIGH,
-                    required_role="Finance",
+                    step_number=step_num,
+                    node_name="dunning_action_gate",
+                    reasoning_thought="Overdue invoice identified; legal notice execution is disabled until a supported notice and delivery handler is configured.",
+                    tool_name="check_dunning_action_support",
+                    tool_arguments={"invoice_id": str(target_inv.invoice_id)},
+                    tool_output={"notice_created": False, "notice_sent": False, "reason": "dunning_action_unavailable"},
+                    status="SKIPPED",
+                    duration_ms=0,
+                ))
+                step_num += 1
+                summary_points.append(
+                    f"Invoice #{target_inv.invoice_number} is {days_overdue} days overdue (${amount:,.2f}); no dunning notice was created or sent because the action handler is unavailable."
                 )
-                summary_points.append(f"Staged Dunning notice for Invoice #{target_inv.invoice_number} ({days_overdue} days overdue, \${amount:,.2f}) in HITL approval.")
 
             # STEP 2: Cost Center Budget Overrun Monitoring
             budgets_res = await session.execute(
@@ -143,12 +131,12 @@ class FinanceComplianceAgent:
                 run_id=run_id,
                 step_number=step_num,
                 node_name="audit_cost_center_budgets",
-                reasoning_thought=f"Audited {len(active_budgets)} cost center budgets against monthly actual expense ledger.",
-                tool_name="query_budget_compliance",
+                reasoning_thought=f"Loaded {len(active_budgets)} active budget records. Actual-versus-budget calculations are not implemented in this cycle.",
+                tool_name="load_active_budgets",
                 tool_arguments={"tenant_id": str(tenant_id)},
-                tool_output={"active_budgets": len(active_budgets)},
-                status="COMPLETED",
-                duration_ms=40,
+                tool_output={"active_budgets": len(active_budgets), "variance_calculated": False},
+                status="SKIPPED",
+                duration_ms=0,
             )
             session.add(step2_log)
             step_num += 1
@@ -163,17 +151,21 @@ class FinanceComplianceAgent:
                 run_id=run_id,
                 step_number=step_num,
                 node_name="audit_fx_revaluation",
-                reasoning_thought=f"Audited currency exchange rate catalog ({rates_count} active pairs). Balance sheet monetary accounts ready for IAS 21 revaluation.",
-                tool_name="audit_currency_rates",
+                reasoning_thought=f"Counted {rates_count} configured currency rates. FX exposure and IAS 21 revaluation calculations are not implemented in this cycle.",
+                tool_name="count_currency_rates",
                 tool_arguments={"tenant_id": str(tenant_id)},
-                tool_output={"currency_rates_count": rates_count, "revaluation_ready": True},
-                status="COMPLETED",
-                duration_ms=35,
+                tool_output={"currency_rates_count": rates_count, "revaluation_performed": False},
+                status="SKIPPED",
+                duration_ms=0,
             )
             session.add(step3_log)
 
             run.status = "COMPLETED"
-            run.summary = "Finance & Compliance audit completed. " + (" ".join(summary_points) if summary_points else "Accounts receivable, cost center budgets, and FX revaluation rates within authorized thresholds.")
+            run.summary = (
+                "Finance checks completed. "
+                + (" ".join(summary_points) if summary_points else "No overdue invoices were found.")
+                + f" Loaded {len(active_budgets)} active budget record(s) and counted {rates_count} currency rate(s); budget variances and FX revaluation were not calculated."
+            )
             run.completed_at = datetime.now(timezone.utc)
             await session.commit()
             await session.refresh(run)

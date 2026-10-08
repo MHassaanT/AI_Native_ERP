@@ -144,6 +144,8 @@ class AgentApproval(Base):
     reviewed_by = Column(UUID(as_uuid=True), nullable=True)
     reviewer_notes = Column(Text, nullable=True)
     modified_payload = Column(JSONB, nullable=True)
+    action_execution_status = Column(String(24), nullable=False, default="NOT_STARTED")
+    action_execution_result = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -162,6 +164,6 @@ class AgentCommunication(Base):
     subject = Column(String(256), nullable=True)
     body = Column(Text, nullable=False)
     metadata_json = Column(JSONB, nullable=False, default=dict)
-    status = Column(String(32), nullable=False, default="SENT")  # SENT, DELIVERED, FAILED, QUEUED
+    status = Column(String(32), nullable=False, default="QUEUED")  # QUEUED, SENT, DELIVERED, FAILED, RECORDED
     external_message_id = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

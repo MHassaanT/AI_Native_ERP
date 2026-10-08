@@ -38,7 +38,15 @@ interface AgentApproval {
   risk_level: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   required_role: string;
   ai_rationale: string;
-  status: "PENDING" | "APPROVED" | "REJECTED" | "AUTO_APPROVED";
+  status: "PENDING" | "APPROVED" | "MODIFIED" | "REJECTED" | "AUTO_APPROVED";
+  action_execution_status: "NOT_STARTED" | "NOT_REQUIRED" | "SUCCEEDED" | "FAILED" | "UNKNOWN";
+  action_execution_result?: {
+    status?: string;
+    document_type?: string;
+    document_id?: string;
+    previous_credit_limit?: string;
+    new_credit_limit?: string;
+  } | null;
   reviewed_by?: string | null;
   reviewer_notes?: string | null;
   modified_payload?: any | null;
@@ -61,6 +69,12 @@ const RISK_BADGES: Record<string, { label: string; badge: string }> = {
   MEDIUM: { label: "MEDIUM", badge: "bg-amberGold-100 text-amberGold-800 border-amberGold-300" },
   LOW: { label: "LOW RISK", badge: "bg-cream-200 text-cream-700 border-cream-300" },
 };
+
+const EXECUTABLE_APPROVAL_ACTIONS = new Set([
+  "CREATE_PURCHASE_ORDER",
+  "POST_GL_JOURNAL",
+  "MODIFY_CREDIT_LIMIT",
+]);
 
 export default function ApprovalsPage() {
   const [approvals, setApprovals] = useState<AgentApproval[]>([]);
@@ -105,10 +119,12 @@ export default function ApprovalsPage() {
 
     try {
       if (decision === "APPROVED") {
-        await api.approveRequest(approval.approval_id, reviewerNotes);
+        const result = await api.approveRequest(approval.approval_id, reviewerNotes);
         setFeedbackMsg({
           type: "success",
-          text: `Action ${approval.action_type} successfully approved and executed!`,
+          text: result.execution_result?.document_id
+            ? `${approval.action_type} executed. ${result.execution_result.document_type} ${result.execution_result.document_id} was recorded.`
+            : `${approval.action_type} execution status: ${result.action_execution_status || "UNKNOWN"}.`,
         });
       } else {
         await api.rejectRequest(approval.approval_id, reviewerNotes);
@@ -133,14 +149,18 @@ export default function ApprovalsPage() {
 
   // Filtered dataset
   const filteredApprovals = approvals.filter((item) => {
-    if (filterStatus !== "ALL" && item.status !== filterStatus) return false;
+    if (
+      filterStatus !== "ALL" &&
+      !(filterStatus === "APPROVED" && item.status === "MODIFIED") &&
+      item.status !== filterStatus
+    ) return false;
     if (filterDomain !== "ALL" && item.domain !== filterDomain) return false;
     if (filterRisk !== "ALL" && item.risk_level !== filterRisk) return false;
     return true;
   });
 
   const pendingCount = approvals.filter((a) => a.status === "PENDING").length;
-  const approvedCount = approvals.filter((a) => a.status === "APPROVED").length;
+  const approvedCount = approvals.filter((a) => a.action_execution_status === "SUCCEEDED").length;
   const rejectedCount = approvals.filter((a) => a.status === "REJECTED").length;
   const criticalCount = approvals.filter(
     (a) => a.status === "PENDING" && (a.risk_level === "CRITICAL" || a.risk_level === "HIGH")
@@ -329,6 +349,7 @@ export default function ApprovalsPage() {
             };
             const riskCfg = RISK_BADGES[item.risk_level] || RISK_BADGES.LOW;
             const isPending = item.status === "PENDING";
+            const isSupportedAction = EXECUTABLE_APPROVAL_ACTIONS.has(item.action_type);
             const DomainIcon = domainCfg.icon;
             const isExpanded = !!expandedPayloads[item.approval_id];
 
@@ -428,10 +449,10 @@ export default function ApprovalsPage() {
                         <Clock className="w-3.5 h-3.5" />
                         Awaiting Manager Review
                       </span>
-                    ) : item.status === "APPROVED" ? (
+                    ) : item.status === "APPROVED" || item.status === "MODIFIED" ? (
                       <span className="inline-flex items-center gap-1.5 text-sage-800 font-medium">
                         <CheckCircle2 className="w-3.5 h-3.5 text-sage-600" />
-                        Approved {item.reviewed_at && `on ${new Date(item.reviewed_at).toLocaleDateString()}`}
+                        {item.status === "MODIFIED" ? "Approved with changes" : "Approved"} · Execution {item.action_execution_status || "UNKNOWN"} {item.reviewed_at && `· ${new Date(item.reviewed_at).toLocaleDateString()}`}
                         {item.reviewer_notes && ` ("${item.reviewer_notes}")`}
                       </span>
                     ) : (
@@ -441,6 +462,14 @@ export default function ApprovalsPage() {
                       </span>
                     )}
                   </div>
+
+                  {item.action_execution_result?.document_id && (
+                    <div className="mt-2 text-[11px] font-mono text-cream-700">
+                      Result: {item.action_execution_result.document_type} · {item.action_execution_result.document_id}
+                      {item.action_execution_result.previous_credit_limit !== undefined &&
+                        ` · credit limit ${item.action_execution_result.previous_credit_limit} → ${item.action_execution_result.new_credit_limit}`}
+                    </div>
+                  )}
 
                   {isPending && (
                     <div className="flex items-center gap-2">
@@ -460,13 +489,18 @@ export default function ApprovalsPage() {
                           setActionModal({ approval: item, decision: "APPROVED" });
                           setReviewerNotes("Approved via Workforce Operations Console.");
                         }}
-                        disabled={actionInProgress === item.approval_id}
+                        disabled={actionInProgress === item.approval_id || !isSupportedAction}
                         className="px-4 py-1.5 text-xs font-medium bg-cream-900 hover:bg-cream-800 text-cream-50 rounded-lg shadow-xs transition flex items-center gap-1.5"
                       >
                         <Check className="w-3.5 h-3.5" />
-                        Approve & Execute
+                        {isSupportedAction ? "Approve & Execute" : "Execution unavailable"}
                       </button>
                     </div>
+                  )}
+                  {isPending && !isSupportedAction && (
+                    <p className="mt-2 text-[11px] text-terracotta-700">
+                      This action type is not enabled for execution. You can reject it; approval is unavailable until a safe handler is implemented.
+                    </p>
                   )}
                 </div>
               </div>
