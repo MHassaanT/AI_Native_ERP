@@ -201,6 +201,7 @@ export default function OverviewPage() {
           <p className="mt-4 text-sm text-cream-700">
             Durable workflow records remain available here without scheduled autonomous supervisors.
           </p>
+        </div>
 
         {/* Priority Conflict Engine Card */}
         <div className="rounded-lg border border-cream-300 bg-cream-100 p-5 shadow-xs">
