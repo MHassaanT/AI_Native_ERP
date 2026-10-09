@@ -18,6 +18,81 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    inspector = sa.inspect(op.get_bind())
+    existing_tables = set(inspector.get_table_names())
+    recruitment_tables = {"recruitment_roles", "candidate_applications"}
+    existing_recruitment_tables = recruitment_tables & existing_tables
+
+    if existing_recruitment_tables:
+        if existing_recruitment_tables != recruitment_tables:
+            raise RuntimeError(
+                "Cannot apply 015_hr_recruitment: only some recruitment tables already "
+                "exist. Reconcile the existing schema before retrying."
+            )
+
+        required_columns = {
+            "recruitment_roles": {
+                "role_id",
+                "tenant_id",
+                "title",
+                "description",
+                "requirements",
+                "status",
+                "created_at",
+                "updated_at",
+            },
+            "candidate_applications": {
+                "application_id",
+                "tenant_id",
+                "role_id",
+                "applicant_name",
+                "applicant_email",
+                "resume_filename",
+                "resume_content_type",
+                "resume_text",
+                "status",
+                "screening_score",
+                "screening_summary",
+                "matched_requirements",
+                "evidence",
+                "interview_email_subject",
+                "interview_email_body",
+                "evaluation_completed_at",
+                "created_at",
+                "updated_at",
+            },
+        }
+        for table_name, expected in required_columns.items():
+            actual = {column["name"] for column in inspector.get_columns(table_name)}
+            if not expected <= actual:
+                missing = ", ".join(sorted(expected - actual))
+                raise RuntimeError(
+                    f"Cannot apply 015_hr_recruitment: existing {table_name} is missing "
+                    f"required columns: {missing}."
+                )
+
+        role_unique_constraints = inspector.get_unique_constraints("recruitment_roles")
+        if not any(
+            set(constraint["column_names"]) == {"role_id", "tenant_id"}
+            for constraint in role_unique_constraints
+        ):
+            raise RuntimeError(
+                "Cannot apply 015_hr_recruitment: existing recruitment_roles lacks the "
+                "unique (role_id, tenant_id) key required by later migrations."
+            )
+        application_foreign_keys = inspector.get_foreign_keys("candidate_applications")
+        if not any(
+            foreign_key.get("referred_table") == "recruitment_roles"
+            and set(foreign_key.get("constrained_columns", [])) == {"role_id", "tenant_id"}
+            and set(foreign_key.get("referred_columns", [])) == {"role_id", "tenant_id"}
+            for foreign_key in application_foreign_keys
+        ):
+            raise RuntimeError(
+                "Cannot apply 015_hr_recruitment: existing candidate_applications lacks "
+                "the tenant-scoped foreign key to recruitment_roles."
+            )
+        return
+
     op.create_table(
         "recruitment_roles",
         sa.Column("role_id", postgresql.UUID(as_uuid=True), nullable=False),

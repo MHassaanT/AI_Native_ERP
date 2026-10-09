@@ -18,11 +18,17 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_unique_constraint(
-        "uq_inbound_email_message_tenant",
-        "inbound_email_records",
-        ["message_id", "tenant_id"],
-    )
+    inspector = sa.inspect(op.get_bind())
+    inbound_unique_keys = inspector.get_unique_constraints("inbound_email_records")
+    if not any(
+        set(constraint["column_names"]) == {"message_id", "tenant_id"}
+        for constraint in inbound_unique_keys
+    ):
+        op.create_unique_constraint(
+            "uq_inbound_email_message_tenant",
+            "inbound_email_records",
+            ["message_id", "tenant_id"],
+        )
     op.create_table(
         "recruitment_email_reviews",
         sa.Column("review_id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -97,23 +103,45 @@ def upgrade() -> None:
         ["tenant_id"],
     )
 
-    op.add_column(
-        "candidate_applications",
-        sa.Column("source_review_id", postgresql.UUID(as_uuid=True), nullable=True),
+    candidate_application_columns = {
+        column["name"] for column in sa.inspect(op.get_bind()).get_columns("candidate_applications")
+    }
+    if "source_review_id" not in candidate_application_columns:
+        op.add_column(
+            "candidate_applications",
+            sa.Column("source_review_id", postgresql.UUID(as_uuid=True), nullable=True),
+        )
+    candidate_application_foreign_keys = sa.inspect(op.get_bind()).get_foreign_keys(
+        "candidate_applications"
     )
-    op.create_foreign_key(
-        "fk_candidate_application_review_tenant",
-        "candidate_applications",
-        "recruitment_email_reviews",
-        ["source_review_id", "tenant_id"],
-        ["review_id", "tenant_id"],
-        ondelete="SET NULL (source_review_id)",
+    if not any(
+        foreign_key.get("referred_table") == "recruitment_email_reviews"
+        and set(foreign_key.get("constrained_columns", []))
+        == {"source_review_id", "tenant_id"}
+        and set(foreign_key.get("referred_columns", [])) == {"review_id", "tenant_id"}
+        for foreign_key in candidate_application_foreign_keys
+    ):
+        op.create_foreign_key(
+            "fk_candidate_application_review_tenant",
+            "candidate_applications",
+            "recruitment_email_reviews",
+            ["source_review_id", "tenant_id"],
+            ["review_id", "tenant_id"],
+            ondelete="SET NULL (source_review_id)",
+        )
+    candidate_application_unique_keys = sa.inspect(op.get_bind()).get_unique_constraints(
+        "candidate_applications"
     )
-    op.create_unique_constraint(
-        "uq_candidate_application_source_review",
-        "candidate_applications",
-        ["source_review_id"],
-    )
+    if not any(
+        constraint.get("name") == "uq_candidate_application_source_review"
+        or set(constraint["column_names"]) == {"source_review_id"}
+        for constraint in candidate_application_unique_keys
+    ):
+        op.create_unique_constraint(
+            "uq_candidate_application_source_review",
+            "candidate_applications",
+            ["source_review_id"],
+        )
 
     op.create_table(
         "candidate_talent_pool_prospects",

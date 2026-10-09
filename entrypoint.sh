@@ -7,7 +7,7 @@ echo "============================================================"
 
 # 1. Run database migrations and ensure all tables exist
 echo "[1/3] Running database schema migrations (Alembic)..."
-alembic upgrade head || echo "Alembic upgrade warning (will verify tables via ORM)."
+alembic upgrade head
 
 echo "[2/3] Verifying and synchronizing all ORM tables..."
 python -c "
@@ -22,7 +22,7 @@ async def init():
 
 asyncio.run(init())
 print('PostgreSQL ORM tables verified and synchronized.')
-" || echo "Warning: Table sync encountered an issue, proceeding..."
+"
 
 
 # 2. Start Uvicorn server & dual-port bridge
