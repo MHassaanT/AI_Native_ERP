@@ -1,8 +1,10 @@
 """Human Resources & Employee Lifecycle API Routes."""
 
+import asyncio
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from email.utils import parseaddr
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
@@ -12,10 +14,13 @@ from erp.ai.hr_screening import (
     ScreeningConfigurationError,
     ScreeningProviderError,
     ScreeningResponseError,
+    analyze_application_email,
     create_interview_draft,
     evaluate_candidate,
+    match_talent_pool_candidate,
 )
 from erp.api.deps import DbSessionDep, TenantIdDep
+from erp.db.models.recruitment import CandidateTalentPoolProspect, RecruitmentEmailReview
 from erp.workflows.hr import (
     attendance_service,
     employee_service,
@@ -511,10 +516,15 @@ class InterviewDraftRequest(BaseModel):
     interview_details: str = Field(..., min_length=3, max_length=4000)
 
 
+class RecruitmentRoleChoiceRequest(BaseModel):
+    role_id: uuid.UUID
+
+
 def _application_response(application) -> dict[str, Any]:
     return {
         "application_id": application.application_id,
         "role_id": application.role_id,
+        "source": "GMAIL" if application.source_review_id else "UPLOAD",
         "applicant_name": application.applicant_name,
         "applicant_email": application.applicant_email,
         "resume_filename": application.resume_filename,
@@ -527,6 +537,40 @@ def _application_response(application) -> dict[str, Any]:
         "interview_email_body": application.interview_email_body,
         "evaluation_completed_at": application.evaluation_completed_at,
         "created_at": application.created_at,
+    }
+
+
+def _email_review_response(review: RecruitmentEmailReview) -> dict[str, Any]:
+    return {
+        "review_id": review.review_id,
+        "inbound_message_id": review.inbound_message_id,
+        "applicant_name": review.applicant_name,
+        "applicant_email": review.applicant_email,
+        "desired_role": review.desired_role,
+        "suggested_role_id": review.suggested_role_id,
+        "confidence": review.confidence,
+        "summary": review.summary,
+        "evidence": review.evidence,
+        "resume_text": review.resume_text,
+        "status": review.status,
+        "created_at": review.created_at,
+    }
+
+
+def _talent_pool_response(prospect: CandidateTalentPoolProspect) -> dict[str, Any]:
+    return {
+        "prospect_id": prospect.prospect_id,
+        "applicant_name": prospect.applicant_name,
+        "applicant_email": prospect.applicant_email,
+        "desired_role": prospect.desired_role,
+        "profile_text": prospect.profile_text,
+        "status": prospect.status,
+        "matched_role_id": prospect.matched_role_id,
+        "match_score": prospect.match_score,
+        "match_summary": prospect.match_summary,
+        "match_evidence": prospect.match_evidence,
+        "matched_at": prospect.matched_at,
+        "created_at": prospect.created_at,
     }
 
 
@@ -706,3 +750,256 @@ async def draft_candidate_interview_email(
     application.interview_email_body = draft.body
     await db.flush()
     return _application_response(application)
+
+
+@router.get(
+    "/recruitment/email-inbox",
+    summary="List synced inbound emails that have not been reviewed by recruitment",
+)
+async def list_recruitment_email_inbox(tenant_id: TenantIdDep, db: DbSessionDep):
+    messages = await recruitment_service.list_email_inbox(db, tenant_id)
+    return [
+        {
+            "message_id": message.message_id,
+            "sender": message.sender,
+            "subject": message.subject,
+            "body_text": message.body_text,
+            "attachment_names": message.attachment_names,
+            "received_at": message.received_at,
+        }
+        for message in messages
+    ]
+
+
+@router.post(
+    "/recruitment/email-inbox/{message_id}/analyze",
+    summary="Classify an inbound email for recruiter review",
+)
+async def analyze_recruitment_email(
+    message_id: str,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    message = await recruitment_service.get_inbound_email(db, tenant_id, message_id, lock=True)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Inbound email not found.")
+    existing = await recruitment_service.get_email_review_by_message(db, tenant_id, message_id)
+    if existing is not None:
+        return _email_review_response(existing)
+
+    roles = await recruitment_service.list_roles(db, tenant_id, "OPEN")
+    sender_email = parseaddr(message.sender)[1].strip().lower() or None
+    candidate_text = f"Subject: {message.subject}\n\n{message.body_text}"
+    try:
+        analysis = await analyze_application_email(
+            subject=message.subject,
+            sender=message.sender,
+            body_text=message.body_text,
+            roles=[
+                {
+                    "role_id": str(role["role_id"]),
+                    "title": role["title"],
+                    "description": role["description"],
+                    "requirements": role["requirements"],
+                }
+                for role in roles
+            ],
+        )
+    except ScreeningConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ScreeningProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ScreeningResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    role_id = uuid.UUID(analysis.suggested_role_id) if analysis.suggested_role_id else None
+    review = await recruitment_service.create_email_review(
+        db,
+        tenant_id,
+        message_id,
+        applicant_name=analysis.applicant_name,
+        applicant_email=sender_email,
+        desired_role=analysis.desired_role,
+        suggested_role_id=role_id,
+        confidence=analysis.confidence,
+        summary=analysis.summary,
+        evidence=[item.model_dump(mode="json") for item in analysis.evidence],
+        resume_text=candidate_text,
+        is_application=analysis.is_application,
+    )
+    return _email_review_response(review)
+
+
+@router.get(
+    "/recruitment/email-reviews",
+    summary="List candidate emails awaiting recruiter decisions",
+)
+async def list_recruitment_email_reviews(tenant_id: TenantIdDep, db: DbSessionDep):
+    reviews = await recruitment_service.list_email_reviews(db, tenant_id)
+    return [_email_review_response(review) for review in reviews]
+
+
+@router.post(
+    "/recruitment/email-reviews/{review_id}/application",
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a role application from a recruiter-approved email review",
+)
+async def create_application_from_email_review(
+    review_id: uuid.UUID,
+    req: RecruitmentRoleChoiceRequest,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    review = await recruitment_service.get_email_review(db, tenant_id, review_id, lock=True)
+    if review is None:
+        raise HTTPException(status_code=404, detail="Email review not found.")
+    if review.status != "REVIEW_REQUIRED":
+        raise HTTPException(
+            status_code=409, detail="Email review is no longer awaiting a recruiter decision."
+        )
+    try:
+        application = await recruitment_service.create_application(
+            db,
+            tenant_id,
+            req.role_id,
+            review.applicant_name,
+            review.applicant_email,
+            "email-application.txt",
+            "message/rfc822",
+            review.resume_text,
+            source_review_id=review.review_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    review.status = "APPLICATION_CREATED"
+    await db.flush()
+    return _application_response(application)
+
+
+@router.post(
+    "/recruitment/email-reviews/{review_id}/talent-pool",
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a recruiter-approved email candidate to the talent pool",
+)
+async def add_email_review_to_talent_pool(
+    review_id: uuid.UUID,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    try:
+        prospect = await recruitment_service.add_review_to_talent_pool(db, tenant_id, review_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _talent_pool_response(prospect)
+
+
+@router.post(
+    "/recruitment/email-reviews/{review_id}/dismiss",
+    summary="Dismiss an email from the recruitment review queue",
+)
+async def dismiss_recruitment_email_review(
+    review_id: uuid.UUID,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    review = await recruitment_service.dismiss_email_review(db, tenant_id, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="Open email review not found.")
+    return _email_review_response(review)
+
+
+@router.get(
+    "/recruitment/talent-pool",
+    summary="List active tenant talent-pool prospects",
+)
+async def list_recruitment_talent_pool(tenant_id: TenantIdDep, db: DbSessionDep):
+    prospects = await recruitment_service.list_talent_pool(db, tenant_id)
+    return [_talent_pool_response(prospect) for prospect in prospects]
+
+
+@router.post(
+    "/recruitment/roles/{role_id}/match-talent-pool",
+    summary="Generate evidence-backed talent-pool match suggestions for an open role",
+)
+async def match_recruitment_talent_pool(
+    role_id: uuid.UUID,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    role = await recruitment_service.get_role(db, tenant_id, role_id)
+    if role is None:
+        raise HTTPException(status_code=404, detail="Job opening not found.")
+    if role.status != "OPEN":
+        raise HTTPException(
+            status_code=409, detail="Talent-pool matching requires an open job opening."
+        )
+    prospects = (await recruitment_service.list_talent_pool(db, tenant_id))[:20]
+    semaphore = asyncio.Semaphore(3)
+
+    async def evaluate(prospect: CandidateTalentPoolProspect):
+        async with semaphore:
+            return prospect, await match_talent_pool_candidate(
+                role_title=role.title,
+                role_description=role.description,
+                role_requirements=role.requirements,
+                profile_text=prospect.profile_text,
+            )
+
+    try:
+        results = await asyncio.gather(*(evaluate(prospect) for prospect in prospects))
+    except ScreeningConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ScreeningProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ScreeningResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    matched = []
+    for prospect, result in results:
+        updated = await recruitment_service.save_talent_pool_match(
+            db,
+            tenant_id,
+            prospect.prospect_id,
+            role_id,
+            score=result.score,
+            summary=result.summary,
+            evidence=[item.model_dump(mode="json") for item in result.evidence],
+        )
+        if updated is not None:
+            matched.append(_talent_pool_response(updated))
+    return {"role_id": role_id, "suggestions_only": True, "prospects": matched}
+
+
+@router.post(
+    "/recruitment/talent-pool/{prospect_id}/transfer",
+    status_code=status.HTTP_201_CREATED,
+    summary="Recruiter-approved transfer of a talent-pool prospect to a job opening",
+)
+async def transfer_talent_pool_prospect(
+    prospect_id: uuid.UUID,
+    req: RecruitmentRoleChoiceRequest,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    try:
+        application = await recruitment_service.transfer_talent_pool_prospect(
+            db, tenant_id, prospect_id, req.role_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _application_response(application)
+
+
+@router.post(
+    "/recruitment/talent-pool/{prospect_id}/dismiss",
+    summary="Remove a prospect from the active talent pool",
+)
+async def dismiss_talent_pool_prospect(
+    prospect_id: uuid.UUID,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    prospect = await recruitment_service.dismiss_talent_pool_prospect(db, tenant_id, prospect_id)
+    if prospect is None:
+        raise HTTPException(status_code=404, detail="Active talent-pool prospect not found.")
+    return _talent_pool_response(prospect)

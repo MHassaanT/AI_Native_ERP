@@ -15,7 +15,9 @@ class EventProcessingRecord(Base):
 
     __tablename__ = "event_processing_records"
 
-    record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    record_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     consumer_group: Mapped[str] = mapped_column(String(128), nullable=False)
     event_id: Mapped[str] = mapped_column(String(128), nullable=False)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -25,13 +27,18 @@ class EventProcessingRecord(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="RETRYABLE")
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_failure_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     processing_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp(), onupdate=func.clock_timestamp()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -70,7 +77,10 @@ class InboundEmailRecord(Base):
         DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
 
-    __table_args__ = (Index("idx_inbound_email_tenant_status", "tenant_id", "status", "received_at"),)
+    __table_args__ = (
+        UniqueConstraint("message_id", "tenant_id", name="uq_inbound_email_message_tenant"),
+        Index("idx_inbound_email_tenant_status", "tenant_id", "status", "received_at"),
+    )
 
 
 class EventDeadLetterRecord(Base):

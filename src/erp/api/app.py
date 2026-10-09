@@ -40,6 +40,8 @@ from erp.api.routes import (
     companies_router,
     currency_router,
     workflows_router,
+    whatsapp_router,
+    internal_whatsapp_router,
 )
 from erp.config import settings
 from erp.events.email_gateway import email_gateway
@@ -146,6 +148,8 @@ def create_app() -> FastAPI:
     app.include_router(subcontracting_router, prefix=settings.API_V1_STR)
     app.include_router(companies_router, prefix=settings.API_V1_STR)
     app.include_router(currency_router, prefix=settings.API_V1_STR)
+    app.include_router(whatsapp_router, prefix=settings.API_V1_STR)
+    app.include_router(internal_whatsapp_router, prefix=settings.API_V1_STR)
 
 
     @app.get("/", include_in_schema=False)

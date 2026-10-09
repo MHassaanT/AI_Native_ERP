@@ -32,6 +32,8 @@ from erp.api.routes.subcontracting import router as subcontracting_router
 from erp.api.routes.companies import router as companies_router
 from erp.api.routes.currency import router as currency_router
 from erp.api.routes.workflows import router as workflows_router
+from erp.api.routes.whatsapp import internal_router as internal_whatsapp_router
+from erp.api.routes.whatsapp import router as whatsapp_router
 
 __all__ = [
     "ap_router",
@@ -66,4 +68,6 @@ __all__ = [
     "subcontracting_router",
     "companies_router",
     "currency_router",
+    "whatsapp_router",
+    "internal_whatsapp_router",
 ]

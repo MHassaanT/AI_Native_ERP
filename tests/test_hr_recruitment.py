@@ -1,5 +1,6 @@
 """Focused tests for recruiter-reviewed HR screening."""
 
+import base64
 import importlib.util
 import io
 import uuid
@@ -13,6 +14,7 @@ from docx import Document
 
 from erp.ai import hr_screening
 from erp.ai.hr_screening import (
+    ApplicationEmailAnalysis,
     EvidenceQuote,
     InterviewDraft,
     ScreeningResponseError,
@@ -20,7 +22,12 @@ from erp.ai.hr_screening import (
     create_interview_draft,
     evaluate_candidate,
 )
-from erp.db.models.recruitment import CandidateApplication, RecruitmentRole
+from erp.db.models.recruitment import (
+    CandidateApplication,
+    CandidateTalentPoolProspect,
+    RecruitmentEmailReview,
+    RecruitmentRole,
+)
 from erp.workflows.hr.recruitment_service import RecruitmentService
 from erp.workflows.hr.resume_parser import extract_resume_text
 
@@ -34,6 +41,10 @@ def test_recruitment_endpoints_are_in_openapi():
     assert "/api/v1/hr/recruitment/applications/{application_id}/evaluate" in paths
     assert "/api/v1/hr/recruitment/applications/{application_id}/interview-draft" in paths
     assert "/api/v1/hr/recruitment/applications/{application_id}" in paths
+    assert "/api/v1/hr/recruitment/email-inbox" in paths
+    assert "/api/v1/hr/recruitment/email-inbox/{message_id}/analyze" in paths
+    assert "/api/v1/hr/recruitment/talent-pool" in paths
+    assert "/api/v1/hr/recruitment/roles/{role_id}/match-talent-pool" in paths
 
 
 def test_configured_gemini_key_is_used_when_openrouter_key_is_missing(monkeypatch):
@@ -86,6 +97,20 @@ def test_agent_removal_revision_fits_alembic_version_column():
     spec.loader.exec_module(migration)
 
     assert len(migration.revision) <= 32
+
+
+def test_hr_email_pool_migration_follows_recruitment_revision():
+    migration_path = (
+        Path(__file__).parents[1] / "alembic" / "versions" / "016_hr_email_talent_pool.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_016", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    assert migration.revision == "016_hr_email_pool"
+    assert len(migration.revision) <= 32
+    assert migration.down_revision == "015_hr_recruitment"
 
 
 def test_resume_parser_extracts_docx_text_and_discards_no_text():
@@ -141,6 +166,126 @@ def test_recruitment_models_enforce_tenant_role_relationship_and_score_range():
     assert "fk_candidate_application_role_tenant" in application_constraints
     assert "ck_candidate_application_score" in application_constraints
     assert "tenant_id" in RecruitmentRole.__table__.columns
+    assert "uq_recruitment_email_review_message" in {
+        constraint.name for constraint in RecruitmentEmailReview.__table__.constraints
+    }
+    assert "fk_recruitment_email_review_inbound_tenant" in {
+        constraint.name for constraint in RecruitmentEmailReview.__table__.constraints
+    }
+    assert "uq_talent_pool_source_review" in {
+        constraint.name for constraint in CandidateTalentPoolProspect.__table__.constraints
+    }
+
+
+@pytest.mark.asyncio
+async def test_application_email_analysis_checks_exact_evidence_and_role_id(monkeypatch):
+    role_id = str(uuid.uuid4())
+
+    async def fake_request_json(_prompt: str):
+        return {
+            "is_application": True,
+            "applicant_name": "Ada Candidate",
+            "desired_role": "Backend Engineer",
+            "suggested_role_id": role_id,
+            "confidence": 0.91,
+            "summary": "The message asks to be considered for backend engineering.",
+            "evidence": [
+                {
+                    "requirement": "Application intent",
+                    "quote": "I am applying for the backend engineer role.",
+                    "assessment": "The sender explicitly states application intent.",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(hr_screening, "_request_json", fake_request_json)
+    result = await hr_screening.analyze_application_email(
+        subject="Backend Engineer application",
+        sender="Ada <ada@example.com>",
+        body_text="I am applying for the backend engineer role.",
+        roles=[
+            {
+                "role_id": role_id,
+                "title": "Backend Engineer",
+                "description": "Build backend services.",
+                "requirements": "Python and APIs.",
+            }
+        ],
+    )
+
+    assert isinstance(result, ApplicationEmailAnalysis)
+    assert result.suggested_role_id == role_id
+
+
+@pytest.mark.asyncio
+async def test_application_email_analysis_rejects_unverified_evidence(monkeypatch):
+    async def fake_request_json(_prompt: str):
+        return {
+            "is_application": True,
+            "applicant_name": None,
+            "desired_role": None,
+            "suggested_role_id": None,
+            "confidence": 0.5,
+            "summary": "Potential application.",
+            "evidence": [
+                {
+                    "requirement": "Application intent",
+                    "quote": "I invented this quote.",
+                    "assessment": "Suggests interest.",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(hr_screening, "_request_json", fake_request_json)
+    with pytest.raises(ScreeningResponseError, match="could not be verified"):
+        await hr_screening.analyze_application_email(
+            subject="Question",
+            sender="candidate@example.com",
+            body_text="I have a question.",
+            roles=[],
+        )
+
+
+def test_gmail_parser_uses_full_plain_text_body_and_nested_attachment():
+    from erp.events.gmail_integration import gmail_service
+
+    body = "I am applying for the engineer position and have five years of Python experience."
+    encoded_body = base64.urlsafe_b64encode(body.encode()).decode().rstrip("=")
+    parsed = gmail_service._parse_gmail_message_payload(
+        {
+            "id": "gmail-message-id",
+            "snippet": "Short snippet",
+            "payload": {
+                "headers": [
+                    {"name": "from", "value": "Candidate <candidate@example.com>"},
+                    {"name": "to", "value": "hr@example.com"},
+                    {"name": "subject", "value": "Engineer application"},
+                ],
+                "mimeType": "multipart/mixed",
+                "parts": [
+                    {
+                        "mimeType": "multipart/alternative",
+                        "parts": [
+                            {
+                                "mimeType": "text/plain",
+                                "body": {"data": encoded_body},
+                            }
+                        ],
+                    },
+                    {
+                        "filename": "resume.pdf",
+                        "mimeType": "application/pdf",
+                        "body": {"size": 42},
+                    },
+                ],
+            },
+        },
+        str(uuid.uuid4()),
+    )
+
+    assert parsed is not None
+    assert parsed.body_text == body
+    assert [attachment.filename for attachment in parsed.attachments] == ["resume.pdf"]
 
 
 @pytest.mark.asyncio

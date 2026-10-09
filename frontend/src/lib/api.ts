@@ -726,6 +726,39 @@ export const api = {
       `/hr/recruitment/applications/${encodeURIComponent(applicationId)}/interview-draft`,
       { method: "POST", body: JSON.stringify({ interview_details: interviewDetails }) },
     ),
+  getRecruitmentEmailInbox: () => fetchWithTenant("/hr/recruitment/email-inbox"),
+  analyzeRecruitmentEmail: (messageId: string) =>
+    fetchWithTenant(`/hr/recruitment/email-inbox/${encodeURIComponent(messageId)}/analyze`, {
+      method: "POST",
+    }),
+  getRecruitmentEmailReviews: () => fetchWithTenant("/hr/recruitment/email-reviews"),
+  createApplicationFromRecruitmentEmail: (reviewId: string, roleId: string) =>
+    fetchWithTenant(`/hr/recruitment/email-reviews/${encodeURIComponent(reviewId)}/application`, {
+      method: "POST",
+      body: JSON.stringify({ role_id: roleId }),
+    }),
+  addRecruitmentEmailToTalentPool: (reviewId: string) =>
+    fetchWithTenant(`/hr/recruitment/email-reviews/${encodeURIComponent(reviewId)}/talent-pool`, {
+      method: "POST",
+    }),
+  dismissRecruitmentEmailReview: (reviewId: string) =>
+    fetchWithTenant(`/hr/recruitment/email-reviews/${encodeURIComponent(reviewId)}/dismiss`, {
+      method: "POST",
+    }),
+  getRecruitmentTalentPool: () => fetchWithTenant("/hr/recruitment/talent-pool"),
+  matchRecruitmentTalentPool: (roleId: string) =>
+    fetchWithTenant(`/hr/recruitment/roles/${encodeURIComponent(roleId)}/match-talent-pool`, {
+      method: "POST",
+    }),
+  transferRecruitmentTalentPoolProspect: (prospectId: string, roleId: string) =>
+    fetchWithTenant(`/hr/recruitment/talent-pool/${encodeURIComponent(prospectId)}/transfer`, {
+      method: "POST",
+      body: JSON.stringify({ role_id: roleId }),
+    }),
+  dismissRecruitmentTalentPoolProspect: (prospectId: string) =>
+    fetchWithTenant(`/hr/recruitment/talent-pool/${encodeURIComponent(prospectId)}/dismiss`, {
+      method: "POST",
+    }),
 
   // Onboarding & Separation
   getOnboardings: (employeeId?: string) =>
@@ -882,6 +915,35 @@ export const api = {
     fetchWithTenant(`/support/issues/${issueId}/communications`, { method: "POST", body: JSON.stringify(data) }),
   resolveIssue: (issueId: string, data: { resolution_details: string; status?: string }) =>
     fetchWithTenant(`/support/issues/${issueId}/resolve`, { method: "POST", body: JSON.stringify(data) }),
+
+  // --- WhatsApp Customer Support ---
+  getWhatsAppStatus: () => fetchWithTenant("/whatsapp/status"),
+  connectWhatsApp: () => fetchWithTenant("/whatsapp/connect", { method: "POST" }),
+  disconnectWhatsApp: () => fetchWithTenant("/whatsapp/connect", { method: "DELETE" }),
+  getWhatsAppConversations: () => fetchWithTenant("/whatsapp/conversations"),
+  getWhatsAppConversation: (conversationId: string) =>
+    fetchWithTenant(`/whatsapp/conversations/${encodeURIComponent(conversationId)}`),
+  replyToWhatsAppConversation: (conversationId: string, text: string) =>
+    fetchWithTenant(`/whatsapp/conversations/${encodeURIComponent(conversationId)}/reply`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  getWhatsAppTools: () => fetchWithTenant("/whatsapp/tools"),
+  updateWhatsAppTools: (enabledTools: string[]) =>
+    fetchWithTenant("/whatsapp/tools", {
+      method: "PUT",
+      body: JSON.stringify({ enabled_tools: enabledTools }),
+    }),
+  getWhatsAppKnowledge: () => fetchWithTenant("/whatsapp/knowledge"),
+  createWhatsAppKnowledge: (title: string, content: string) =>
+    fetchWithTenant("/whatsapp/knowledge", {
+      method: "POST",
+      body: JSON.stringify({ title, content }),
+    }),
+  deleteWhatsAppKnowledge: (knowledgeId: string) =>
+    fetchWithTenant(`/whatsapp/knowledge/${encodeURIComponent(knowledgeId)}`, {
+      method: "DELETE",
+    }),
 
   // Serial Warranty Claims & RMA
   verifyWarranty: (serialNumber: string) =>

@@ -46,9 +46,7 @@ SCOPES = [
 ]
 
 
-async def _persist_inbound_record(
-    record: InboundEmailRecord, session: AsyncSession | None
-) -> None:
+async def _persist_inbound_record(record: InboundEmailRecord, session: AsyncSession | None) -> None:
     async def persist(target: AsyncSession) -> None:
         target.add(record)
         try:
@@ -187,9 +185,7 @@ class GmailIntegrationService:
             async with async_session_factory() as s:
                 await _upsert(s)
 
-    async def disconnect_async(
-        self, tenant_id: str, session: AsyncSession | None = None
-    ) -> None:
+    async def disconnect_async(self, tenant_id: str, session: AsyncSession | None = None) -> None:
         """Revokes connection state and clears stored tokens in DB and memory."""
         self.disconnect(tenant_id)
         try:
@@ -249,10 +245,14 @@ class GmailIntegrationService:
                     conn.access_token = data.get("access_token", conn.access_token)
                     expires_in = data.get("expires_in", 3600)
                     conn.expires_at = time.time() + float(expires_in)
-                    logger.info("Successfully refreshed Gmail access token for tenant %s", tenant_id)
+                    logger.info(
+                        "Successfully refreshed Gmail access token for tenant %s", tenant_id
+                    )
                     await self.save_connection_to_db(tenant_id, conn, session)
                 else:
-                    logger.warning("Failed to refresh Gmail token (%s): %s", resp.status_code, resp.text)
+                    logger.warning(
+                        "Failed to refresh Gmail token (%s): %s", resp.status_code, resp.text
+                    )
         except Exception as e:
             logger.warning("Exception during Gmail token refresh: %s", e)
 
@@ -296,7 +296,9 @@ class GmailIntegrationService:
         settings.GOOGLE_CLIENT_SECRET = c_secret
 
         # Update .env file on disk
-        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env")
+        env_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), ".env"
+        )
         if os.path.exists(env_path):
             try:
                 with open(env_path, encoding="utf-8") as f:
@@ -308,7 +310,9 @@ class GmailIntegrationService:
                     content += f"\nGOOGLE_CLIENT_ID={c_id}"
 
                 if "GOOGLE_CLIENT_SECRET=" in content:
-                    content = re.sub(r"GOOGLE_CLIENT_SECRET=.*", f"GOOGLE_CLIENT_SECRET={c_secret}", content)
+                    content = re.sub(
+                        r"GOOGLE_CLIENT_SECRET=.*", f"GOOGLE_CLIENT_SECRET={c_secret}", content
+                    )
                 else:
                     content += f"\nGOOGLE_CLIENT_SECRET={c_secret}"
 
@@ -347,7 +351,9 @@ class GmailIntegrationService:
 
         return self.get_connection(str_id)
 
-    def get_authorization_url(self, tenant_id: str, redirect_uri: str | None = None) -> dict[str, Any]:
+    def get_authorization_url(
+        self, tenant_id: str, redirect_uri: str | None = None
+    ) -> dict[str, Any]:
         """Generates official Google OAuth 2.0 authorization URL."""
         client_id, client_secret = self.get_credentials()
         r_uri = redirect_uri or "http://localhost:3000/inbox"
@@ -409,7 +415,11 @@ class GmailIntegrationService:
             )
 
             if not resp.is_success:
-                err_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                err_data = (
+                    resp.json()
+                    if resp.headers.get("content-type", "").startswith("application/json")
+                    else {}
+                )
                 err_msg = err_data.get("error_description") or err_data.get("error") or resp.text
 
                 # If tenant is ALREADY connected, do not destroy existing connection on code replay
@@ -421,7 +431,9 @@ class GmailIntegrationService:
                     return conn
 
                 conn.is_connected = False
-                raise ValueError(f"Google OAuth token exchange failed ({resp.status_code}): {err_msg}")
+                raise ValueError(
+                    f"Google OAuth token exchange failed ({resp.status_code}): {err_msg}"
+                )
 
             tokens = resp.json()
             conn.access_token = tokens.get("access_token")
@@ -445,7 +457,11 @@ class GmailIntegrationService:
             # Persist to database
             await self.save_connection_to_db(str_id, conn, session)
 
-            logger.info("Successfully connected and persisted real Gmail account for tenant %s: %s", str_id, conn.connected_email)
+            logger.info(
+                "Successfully connected and persisted real Gmail account for tenant %s: %s",
+                str_id,
+                conn.connected_email,
+            )
             return conn
 
     def disconnect(self, tenant_id: str) -> None:
@@ -455,14 +471,15 @@ class GmailIntegrationService:
             self.connections[str_id] = GmailConnectionState(tenant_id=str_id)
         mailbox.inbox.clear()
 
-
     async def sync_inbox(
         self, tenant_id: str, session: AsyncSession | None = None
     ) -> list[IngestedEmailMessage]:
         """Polls connected Gmail account for unread messages via real Gmail API."""
         conn = await self.ensure_valid_token(tenant_id, session)
         if not conn.is_connected or not conn.access_token:
-            raise ValueError("Gmail account is not connected. Please connect via Google OAuth 2.0 first.")
+            raise ValueError(
+                "Gmail account is not connected. Please connect via Google OAuth 2.0 first."
+            )
 
         str_id = str(tenant_id)
         if str_id not in self.processed_message_ids:
@@ -484,7 +501,8 @@ class GmailIntegrationService:
             raw_msg_ids = [m["id"] for m in list_resp.json().get("messages", [])[:10]]
             # Filter out already processed messages
             msg_ids = [
-                m_id for m_id in raw_msg_ids
+                m_id
+                for m_id in raw_msg_ids
                 if m_id not in self.processed_message_ids[str_id]
                 and not any(m.message_id.endswith(f"_{m_id}") for m in mailbox.inbox)
             ]
@@ -492,13 +510,17 @@ class GmailIntegrationService:
             for m_id in msg_ids:
                 durable_id = f"g_{uuid.UUID(str_id).hex}_{m_id}"
                 existing_id = (
-                    await session.execute(
-                        select(InboundEmailRecord.message_id).where(
-                            InboundEmailRecord.message_id == durable_id,
-                            InboundEmailRecord.tenant_id == uuid.UUID(str_id),
+                    (
+                        await session.execute(
+                            select(InboundEmailRecord.message_id).where(
+                                InboundEmailRecord.message_id == durable_id,
+                                InboundEmailRecord.tenant_id == uuid.UUID(str_id),
+                            )
                         )
-                    )
-                ).scalar_one_or_none() if session is not None else None
+                    ).scalar_one_or_none()
+                    if session is not None
+                    else None
+                )
                 if existing_id:
                     self.processed_message_ids[str_id].add(m_id)
                     continue
@@ -517,7 +539,9 @@ class GmailIntegrationService:
                             recipient=parsed.recipient,
                             subject=parsed.subject,
                             body_text=parsed.body_text,
-                            attachment_names=[attachment.filename for attachment in parsed.attachments],
+                            attachment_names=[
+                                attachment.filename for attachment in parsed.attachments
+                            ],
                             event_type=parsed.event_type,
                             status=parsed.status,
                             associated_dag_id=None,
@@ -535,7 +559,9 @@ class GmailIntegrationService:
                                 json={"removeLabelIds": ["UNREAD"]},
                             )
                         except Exception as e:
-                            logger.warning("Could not mark message %s as read in Gmail: %s", m_id, e)
+                            logger.warning(
+                                "Could not mark message %s as read in Gmail: %s", m_id, e
+                            )
 
         conn.last_synced_at = datetime.now(UTC)
         conn.synced_messages_count += len(synced_emails)
@@ -543,9 +569,13 @@ class GmailIntegrationService:
         # Returns strictly real emails; if none found, returns empty list
         return synced_emails
 
-    def _parse_gmail_message_payload(self, msg_data: dict[str, Any], tenant_id: str) -> IngestedEmailMessage | None:
+    def _parse_gmail_message_payload(
+        self, msg_data: dict[str, Any], tenant_id: str
+    ) -> IngestedEmailMessage | None:
         """Parses real Gmail API JSON message into IngestedEmailMessage."""
-        headers = {h["name"].lower(): h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
+        headers = {
+            h["name"].lower(): h["value"] for h in msg_data.get("payload", {}).get("headers", [])
+        }
         sender = headers.get("from", "unknown@sender.com")
         subject = headers.get("subject", "Inbound Message")
         snippet = msg_data.get("snippet", "")
@@ -553,22 +583,38 @@ class GmailIntegrationService:
         body_text = snippet
         attachments: list[EmailAttachment] = []
 
-        # Parse multipart body and attachments if present
         payload = msg_data.get("payload", {})
-        parts = payload.get("parts", [])
-        for part in parts:
+        plain_text_parts: list[str] = []
+
+        def collect_parts(part: dict[str, Any]) -> None:
             filename = part.get("filename")
             mime_type = part.get("mimeType", "application/octet-stream")
             body = part.get("body", {})
-            size = body.get("size", 0)
             if filename:
                 attachments.append(
                     EmailAttachment(
                         filename=filename,
                         content_type=mime_type,
-                        size_bytes=size,
+                        size_bytes=body.get("size", 0),
                     )
                 )
+            elif mime_type == "text/plain" and body.get("data"):
+                try:
+                    encoded = body["data"]
+                    encoded += "=" * (-len(encoded) % 4)
+                    text = base64.urlsafe_b64decode(encoded).decode("utf-8", errors="replace")
+                    if text.strip():
+                        plain_text_parts.append(text)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Could not decode plain-text body for Gmail message %s", msg_data.get("id")
+                    )
+            for child in part.get("parts", []):
+                collect_parts(child)
+
+        collect_parts(payload)
+        if plain_text_parts:
+            body_text = "\n".join(plain_text_parts)[:100_000]
 
         recipient = headers.get("to", "inbox@company.internal")
         classification = classify_inbound_email(
@@ -624,7 +670,9 @@ class GmailIntegrationService:
         """Sends an outbound email using the tenant's connected Gmail OAuth account."""
         conn = await self.ensure_valid_token(tenant_id, session)
         if not conn.is_connected or not conn.access_token:
-            raise ValueError("Gmail account is not connected. Cannot send outbound quote via Gmail.")
+            raise ValueError(
+                "Gmail account is not connected. Cannot send outbound quote via Gmail."
+            )
 
         msg = EmailMessage()
         msg["To"] = recipient
@@ -651,7 +699,9 @@ class GmailIntegrationService:
                 json={"raw": raw_msg},
             )
             if not send_resp.is_success:
-                raise ValueError(f"Gmail send API failed ({send_resp.status_code}): {send_resp.text}")
+                raise ValueError(
+                    f"Gmail send API failed ({send_resp.status_code}): {send_resp.text}"
+                )
 
         sent_msg = SentEmailMessage(
             recipient=recipient,

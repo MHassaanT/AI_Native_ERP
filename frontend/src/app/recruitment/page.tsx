@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { Briefcase, FileText, Plus, RefreshCw, Sparkles, UserRound } from "lucide-react";
+import { Briefcase, FileText, Mail, Plus, RefreshCw, Sparkles, UserRound } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface RecruitmentRole {
@@ -22,6 +22,7 @@ interface Evidence {
 interface CandidateApplication {
   application_id: string;
   role_id: string;
+  source: "GMAIL" | "UPLOAD";
   applicant_name: string | null;
   applicant_email: string | null;
   resume_filename: string;
@@ -35,11 +36,50 @@ interface CandidateApplication {
   created_at: string;
 }
 
+interface RecruitmentEmail {
+  message_id: string;
+  sender: string;
+  subject: string;
+  body_text: string;
+  attachment_names: string[];
+  received_at: string;
+}
+
+interface EmailReview {
+  review_id: string;
+  inbound_message_id: string;
+  applicant_name: string | null;
+  applicant_email: string | null;
+  desired_role: string | null;
+  suggested_role_id: string | null;
+  confidence: number;
+  summary: string;
+  evidence: Evidence[];
+  resume_text: string;
+}
+
+interface TalentPoolProspect {
+  prospect_id: string;
+  applicant_name: string | null;
+  applicant_email: string | null;
+  desired_role: string | null;
+  profile_text: string;
+  matched_role_id: string | null;
+  match_score: number | null;
+  match_summary: string | null;
+  match_evidence: Evidence[];
+}
+
 export default function RecruitmentPage() {
   const [roles, setRoles] = useState<RecruitmentRole[]>([]);
   const [applications, setApplications] = useState<CandidateApplication[]>([]);
+  const [emailInbox, setEmailInbox] = useState<RecruitmentEmail[]>([]);
+  const [emailReviews, setEmailReviews] = useState<EmailReview[]>([]);
+  const [talentPool, setTalentPool] = useState<TalentPoolProspect[]>([]);
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [selectedApplicationId, setSelectedApplicationId] = useState("");
+  const [reviewRoleChoices, setReviewRoleChoices] = useState<Record<string, string>>({});
+  const [poolRoleChoices, setPoolRoleChoices] = useState<Record<string, string>>({});
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [requirements, setRequirements] = useState("");
@@ -56,9 +96,20 @@ export default function RecruitmentPage() {
     setLoading(true);
     setError(null);
     try {
-      const roleRows = await api.getRecruitmentRoles();
+      const [roleRows, inboxRows, reviewRows, talentPoolRows] = await Promise.all([
+        api.getRecruitmentRoles(),
+        api.getRecruitmentEmailInbox(),
+        api.getRecruitmentEmailReviews(),
+        api.getRecruitmentTalentPool(),
+      ]);
       if (!Array.isArray(roleRows)) throw new Error("Recruitment roles returned an unexpected response.");
+      if (!Array.isArray(inboxRows) || !Array.isArray(reviewRows) || !Array.isArray(talentPoolRows)) {
+        throw new Error("Recruitment email-intake data returned an unexpected response.");
+      }
       setRoles(roleRows);
+      setEmailInbox(inboxRows);
+      setEmailReviews(reviewRows);
+      setTalentPool(talentPoolRows);
       const activeRoleId = preferredRoleId ?? roleRows[0]?.role_id ?? "";
       setSelectedRoleId(activeRoleId);
       const candidateRows = await api.getCandidateApplications(activeRoleId || undefined);
@@ -189,6 +240,100 @@ export default function RecruitmentPage() {
       await loadData(selectedRoleId);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Could not close the job opening.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleAnalyzeEmail = async (messageId: string) => {
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.analyzeRecruitmentEmail(messageId);
+      setNotice(result.status === "NOT_APPLICATION"
+        ? "This message was classified as not being a job application."
+        : "Email analyzed. Review the suggested candidate details before taking action.");
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Could not analyze this email.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleEmailReviewAction = async (
+    action: "application" | "pool" | "dismiss",
+    review: EmailReview,
+  ) => {
+    const suggestedRole = roles.find((role) => role.role_id === review.suggested_role_id && role.status === "OPEN");
+    const defaultOpenRole = roles.find((role) => role.role_id === selectedRoleId && role.status === "OPEN")
+      ?? roles.find((role) => role.status === "OPEN");
+    const selectedReviewRole = roles.find((role) => role.role_id === reviewRoleChoices[review.review_id] && role.status === "OPEN");
+    const roleId = selectedReviewRole?.role_id ?? suggestedRole?.role_id ?? defaultOpenRole?.role_id ?? "";
+    if (action === "application" && !roleId) {
+      setError("Select a job opening before creating an application.");
+      return;
+    }
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (action === "application") {
+        await api.createApplicationFromRecruitmentEmail(review.review_id, roleId);
+        setNotice("Email candidate added to the selected job opening.");
+      } else if (action === "pool") {
+        await api.addRecruitmentEmailToTalentPool(review.review_id);
+        setNotice("Candidate added to the talent pool.");
+      } else {
+        await api.dismissRecruitmentEmailReview(review.review_id);
+        setNotice("Email review dismissed.");
+      }
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Could not update this email review.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleMatchTalentPool = async () => {
+    if (!selectedRoleId) return;
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.matchRecruitmentTalentPool(selectedRoleId);
+      setNotice(`Generated suggestions for ${result.prospects.length} talent-pool prospect(s). No candidates were transferred.`);
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Talent-pool matching failed.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleTalentPoolAction = async (prospect: TalentPoolProspect, action: "transfer" | "dismiss") => {
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      if (action === "transfer") {
+        const matchedRole = roles.find((role) => role.role_id === prospect.matched_role_id && role.status === "OPEN");
+        const defaultOpenRole = roles.find((role) => role.role_id === selectedRoleId && role.status === "OPEN")
+          ?? roles.find((role) => role.status === "OPEN");
+        const selectedPoolRole = roles.find((role) => role.role_id === poolRoleChoices[prospect.prospect_id] && role.status === "OPEN");
+        const roleId = selectedPoolRole?.role_id ?? matchedRole?.role_id ?? defaultOpenRole?.role_id ?? "";
+        if (!roleId) throw new Error("Select an open job opening before transferring this prospect.");
+        await api.transferRecruitmentTalentPoolProspect(prospect.prospect_id, roleId);
+        setNotice("Prospect transferred to a job opening for recruiter review.");
+      } else {
+        await api.dismissRecruitmentTalentPoolProspect(prospect.prospect_id);
+        setNotice("Prospect removed from the active talent pool.");
+      }
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Could not update this talent-pool prospect.");
     } finally {
       setWorking(false);
     }
@@ -347,6 +492,7 @@ export default function RecruitmentPage() {
                         </span>
                         <span className="mt-1 block text-xs text-cream-600">
                           {application.applicant_email || "No email provided"} · {application.status}
+                          {` · ${application.source === "GMAIL" ? "Gmail intake" : "Resume upload"}`}
                           {application.screening_score !== null && ` · Score ${application.screening_score}/100`}
                         </span>
                       </button>
@@ -427,6 +573,162 @@ export default function RecruitmentPage() {
           )}
         </div>
       </div>
+
+      <section className="space-y-4 rounded-lg border border-cream-300 bg-cream-100 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-cream-900">
+              <Mail className="h-4 w-4" /> Gmail application intake
+            </h2>
+            <p className="mt-1 text-xs text-cream-700">
+              First sync Gmail from the <a href="/inbox" className="font-medium text-sage-800 underline">Email/RFQ Hub</a>. AI analyzes synced message text; it does not read attachments or send email.
+            </p>
+          </div>
+          <span className="text-xs text-cream-600">{emailInbox.length} unprocessed · {emailReviews.length} awaiting review</span>
+        </div>
+
+        {emailInbox.length === 0 ? (
+          <p className="rounded-md border border-cream-300 bg-white p-3 text-sm text-cream-700">
+            No unprocessed messages. Connect and sync the tenant Gmail account in the Email/RFQ Hub.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {emailInbox.map((message) => (
+              <li key={message.message_id} className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-cream-300 bg-white p-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-cream-900">{message.subject || "(No subject)"}</p>
+                  <p className="mt-1 text-xs text-cream-600">{message.sender} · {new Date(message.received_at).toLocaleString()}</p>
+                  <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-xs text-cream-700">{message.body_text}</p>
+                  {message.attachment_names.length > 0 && (
+                    <p className="mt-2 text-xs text-amberGold-800">
+                      Attachments need manual review/upload: {message.attachment_names.join(", ")}
+                    </p>
+                  )}
+                </div>
+                <button type="button" onClick={() => void handleAnalyzeEmail(message.message_id)} disabled={working}
+                  className="rounded-md border border-sage-700 px-3 py-2 text-xs font-medium text-sage-800 disabled:opacity-50">
+                  Analyze email
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {emailReviews.length > 0 && (
+          <div className="space-y-2 border-t border-cream-300 pt-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-cream-700">Recruiter decisions</h3>
+            {emailReviews.map((review) => (
+              <article key={review.review_id} className="rounded-md border border-cream-300 bg-white p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-cream-900">{review.applicant_name || review.applicant_email || "Potential applicant"}</p>
+                    <p className="mt-1 text-xs text-cream-600">
+                      {review.applicant_email || "No sender email"} · {review.desired_role || "Role not stated"} · AI confidence {Math.round(review.confidence * 100)}%
+                    </p>
+                    <p className="mt-2 text-sm text-cream-800">{review.summary}</p>
+                    {review.evidence.length > 0 && (
+                      <blockquote className="mt-2 border-l-2 border-sage-500 pl-2 text-xs text-cream-700">
+                        &ldquo;{review.evidence[0].quote}&rdquo;
+                      </blockquote>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <select value={roles.some((role) => role.role_id === reviewRoleChoices[review.review_id] && role.status === "OPEN")
+                      ? reviewRoleChoices[review.review_id]
+                      : roles.some((role) => role.role_id === review.suggested_role_id && role.status === "OPEN")
+                        ? review.suggested_role_id ?? ""
+                        : ""}
+                      onChange={(event) => setReviewRoleChoices((current) => ({ ...current, [review.review_id]: event.target.value }))}
+                      className="rounded-md border border-cream-300 bg-white px-2 py-2 text-xs text-cream-800">
+                      <option value="">Select open job</option>
+                      {roles.filter((role) => role.status === "OPEN").map((role) => <option key={role.role_id} value={role.role_id}>{role.title}</option>)}
+                    </select>
+                    <button type="button" onClick={() => void handleEmailReviewAction("application", review)} disabled={working || roles.filter((role) => role.status === "OPEN").length === 0}
+                      className="rounded-md bg-sage-700 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">
+                      Add to job
+                    </button>
+                    <button type="button" onClick={() => void handleEmailReviewAction("pool", review)} disabled={working}
+                      className="rounded-md border border-cream-400 px-3 py-2 text-xs text-cream-800 disabled:opacity-50">
+                      Add to talent pool
+                    </button>
+                    <button type="button" onClick={() => void handleEmailReviewAction("dismiss", review)} disabled={working}
+                      className="rounded-md border border-terracotta-300 px-3 py-2 text-xs text-terracotta-800 disabled:opacity-50">
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                <details className="mt-3 text-xs text-cream-700">
+                  <summary className="cursor-pointer font-medium">Review source message text</summary>
+                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-cream-50 p-2 font-sans">{review.resume_text}</pre>
+                </details>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-4 rounded-lg border border-cream-300 bg-cream-100 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-cream-900">
+              <UserRound className="h-4 w-4" /> Talent pool matching
+            </h2>
+            <p className="mt-1 text-xs text-cream-700">
+              {selectedRole ? `Generate evidence-based suggestions for ${selectedRole.title}.` : "Select an open job to generate match suggestions."}
+              {" "}Suggestions never transfer candidates automatically.
+            </p>
+          </div>
+          <button type="button" onClick={() => void handleMatchTalentPool()} disabled={working || !selectedRoleId || selectedRole?.status !== "OPEN" || talentPool.length === 0}
+            className="inline-flex items-center gap-2 rounded-md border border-sage-700 px-3 py-2 text-xs font-medium text-sage-800 disabled:opacity-50">
+            <Sparkles className="h-3.5 w-3.5" /> Match up to 20 prospects
+          </button>
+        </div>
+        {talentPool.length === 0 ? (
+          <p className="rounded-md border border-cream-300 bg-white p-3 text-sm text-cream-700">The talent pool is empty. Recruiters can add reviewed email candidates above.</p>
+        ) : (
+          <ul className="space-y-2">
+            {talentPool.map((prospect) => (
+              <li key={prospect.prospect_id} className="rounded-md border border-cream-300 bg-white p-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-cream-900">{prospect.applicant_name || prospect.applicant_email || "Candidate"}</p>
+                    <p className="mt-1 text-xs text-cream-600">
+                      {prospect.applicant_email || "No email"} · {prospect.desired_role || "No preferred role"}
+                      {prospect.match_score !== null && ` · Suggestion ${prospect.match_score}/100`}
+                    </p>
+                    {prospect.match_summary && <p className="mt-2 text-sm text-cream-800">{prospect.match_summary}</p>}
+                  </div>
+                  <div className="flex gap-2">
+                    <select value={roles.some((role) => role.role_id === poolRoleChoices[prospect.prospect_id] && role.status === "OPEN")
+                      ? poolRoleChoices[prospect.prospect_id]
+                      : roles.some((role) => role.role_id === prospect.matched_role_id && role.status === "OPEN")
+                        ? prospect.matched_role_id ?? ""
+                        : ""}
+                      onChange={(event) => setPoolRoleChoices((current) => ({ ...current, [prospect.prospect_id]: event.target.value }))}
+                      className="rounded-md border border-cream-300 bg-white px-2 py-2 text-xs text-cream-800">
+                      <option value="">Select open job</option>
+                      {roles.filter((role) => role.status === "OPEN").map((role) => <option key={role.role_id} value={role.role_id}>{role.title}</option>)}
+                    </select>
+                    <button type="button" onClick={() => void handleTalentPoolAction(prospect, "transfer")} disabled={working || roles.filter((role) => role.status === "OPEN").length === 0}
+                      className="rounded-md bg-sage-700 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">
+                      Transfer to job
+                    </button>
+                    <button type="button" onClick={() => void handleTalentPoolAction(prospect, "dismiss")} disabled={working}
+                      className="rounded-md border border-terracotta-300 px-3 py-2 text-xs text-terracotta-800 disabled:opacity-50">
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                {prospect.match_evidence.length > 0 && (
+                  <blockquote className="mt-2 border-l-2 border-sage-500 pl-2 text-xs text-cream-700">
+                    &ldquo;{prospect.match_evidence[0].quote}&rdquo; — {prospect.match_evidence[0].assessment}
+                  </blockquote>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
   );
 }

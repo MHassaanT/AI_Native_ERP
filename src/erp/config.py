@@ -65,6 +65,14 @@ class Settings(BaseSettings):
                     RuntimeWarning,
                     stacklevel=2,
                 )
+            if self.WHATSAPP_SERVICE_URL and (
+                not self.WHATSAPP_INTERNAL_TOKEN
+                or len(self.WHATSAPP_INTERNAL_TOKEN) < 32
+                or "replace" in self.WHATSAPP_INTERNAL_TOKEN.lower()
+            ):
+                raise ValueError(
+                    "Configure a unique WHATSAPP_INTERNAL_TOKEN of at least 32 characters."
+                )
 
 
     # PostgreSQL Database
@@ -124,6 +132,10 @@ class Settings(BaseSettings):
     LLM_MODEL: str | None = None
     OPENROUTER_API_KEY: str | None = None
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+
+    # Baileys WhatsApp support channel
+    WHATSAPP_SERVICE_URL: str | None = None
+    WHATSAPP_INTERNAL_TOKEN: str | None = None
 
     # Inbound SMTP Gateway (False by default in production web containers to prevent port conflict)
     ENABLE_SMTP_GATEWAY: bool = False

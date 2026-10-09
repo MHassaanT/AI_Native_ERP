@@ -28,6 +28,7 @@ import {
   BarChart3,
   Activity,
   Truck,
+  MessageCircle,
 } from "lucide-react";
 import { getUser, clearAuth, UserProfile } from "@/lib/auth";
 
@@ -58,6 +59,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/commercial", label: "Commercial & Sales", icon: DollarSign },
       { href: "/crm", label: "CRM & Support Desk", icon: Headset },
+      { href: "/whatsapp", label: "WhatsApp Support", icon: MessageCircle },
       { href: "/procurement", label: "Procurement & Buying", icon: ShoppingBag },
       { href: "/pos", label: "Point of Sale (POS)", icon: Store },
       { href: "/production", label: "Production & BOM", icon: Factory },

@@ -1,123 +1,15 @@
 """Re-export all SQLAlchemy ORM models."""
 
+from erp.db.models.assets import (
+    Asset,
+    AssetCategory,
+    AssetDepreciationSchedule,
+    AssetLocation,
+    AssetMovement,
+    AssetRepair,
+)
 from erp.db.models.audit import AgentAuditLog
 from erp.db.models.base import Base, TenantMixin, TimestampMixin
-from erp.db.models.embeddings import SemanticDocumentEmbedding
-from erp.db.models.events import EventDeadLetterRecord, EventProcessingRecord, InboundEmailRecord
-from erp.db.models.orchestration import DAGExecutionRecord
-from erp.db.models.hr import (
-    Attendance,
-    Department,
-    Designation,
-    Employee,
-    EmployeeOnboarding,
-    EmployeeSeparation,
-    ExpenseClaim,
-    LeaveAllocation,
-    LeaveApplication,
-    LeaveType,
-    OnboardingTask,
-    SeparationTask,
-    ShiftAssignment,
-    ShiftSchedule,
-    ShiftType,
-)
-from erp.db.models.payroll import (
-    EmployeeAdvance,
-    PayrollEntry,
-    SalaryComponent,
-    SalarySlip,
-    SalarySlipItem,
-    SalaryStructure,
-    SalaryStructureAssignment,
-    SalaryStructureItem,
-)
-from erp.db.models.inventory import (
-    Batch,
-    Item,
-    ItemAttribute,
-    ItemAttributeValue,
-    SerialNo,
-    StockEntry,
-    StockEntryItem,
-    StockLedgerEntry,
-    StockLevel,
-    StockReconciliation,
-    StockReconciliationItem,
-    StockReservationEntry,
-    Warehouse,
-)
-from erp.db.models.logistics import (
-    DeliveryStop,
-    DeliveryTrip,
-    PackingSlip,
-    PackingSlipItem,
-    PickList,
-    PickListItem,
-)
-from erp.db.models.ledger import Account, CostCenter, FiscalPeriod, GeneralLedgerEntry
-from erp.db.models.manufacturing import (
-    BOM,
-    BOMItem,
-    BOMOperation,
-    BOMScrapItem,
-    DowntimeEntry,
-    JobCard,
-    JobCardTimeLog,
-    MaintenanceTicket,
-    Operation,
-    ProductionPlan,
-    ProductionPlanItem,
-    Routing,
-    RoutingOperation,
-    WorkOrder,
-    Workstation,
-)
-from erp.db.models.operator_cert import OperatorCertificationRecord
-from erp.db.models.outbox import TransactionalOutbox
-from erp.db.models.purchasing import (
-    BlanketOrder,
-    BlanketOrderItem,
-    GoodsReceiptNote,
-    GoodsReceiptNoteItem,
-    MaterialRequest,
-    MaterialRequestItem,
-    PurchaseOrder,
-    PurchaseOrderItem,
-    RequestForQuotation,
-    RFQItem,
-    RFQSupplier,
-    Supplier,
-    SupplierInvoice,
-    SupplierInvoiceItem,
-    SupplierQuotation,
-    SupplierQuotationItem,
-    SupplierScorecard,
-    SupplierScorecardCriteria,
-)
-from erp.db.models.landed_cost import (
-    LandedCostItem,
-    LandedCostTaxesAndCharges,
-    LandedCostVoucher,
-)
-from erp.db.models.subcontracting import (
-    SubcontractingOrder,
-    SubcontractingOrderItem,
-    SubcontractingReceipt,
-    SubcontractingReceiptItem,
-    SubcontractingSuppliedItem,
-)
-from erp.db.models.sales import (
-    Customer,
-    SalesOrder,
-    SalesOrderItem,
-    SalesQuotation,
-)
-from erp.db.models.onboarding import (
-    OnboardingProgress,
-    OnboardingStep,
-    TenantSettings,
-)
 from erp.db.models.billing import (
     AdvancePaymentAllocation,
     Budget,
@@ -145,8 +37,10 @@ from erp.db.models.billing import (
     SubscriptionPlan,
     TaxWithholdingCategory,
 )
-from erp.db.models.tenant import Tenant, TenantOAuthConnection
-from erp.db.models.user import User
+from erp.db.models.companies import (
+    Company,
+    InterCompanyTransaction,
+)
 from erp.db.models.crm import (
     Appointment,
     Campaign,
@@ -156,21 +50,121 @@ from erp.db.models.crm import (
     Opportunity,
     OpportunityItem,
 )
-from erp.db.models.support import (
-    Issue,
-    IssueCommunication,
-    ServiceLevelAgreement,
-    ServiceLevelPriority,
-    WarrantyClaim,
+from erp.db.models.currency import (
+    CurrencyExchangeRate,
+    ExchangeRateRevaluation,
 )
-
-from erp.db.models.assets import (
-    Asset,
-    AssetCategory,
-    AssetDepreciationSchedule,
-    AssetLocation,
-    AssetMovement,
-    AssetRepair,
+from erp.db.models.embeddings import SemanticDocumentEmbedding
+from erp.db.models.events import EventDeadLetterRecord, EventProcessingRecord, InboundEmailRecord
+from erp.db.models.hr import (
+    Attendance,
+    Department,
+    Designation,
+    Employee,
+    EmployeeOnboarding,
+    EmployeeSeparation,
+    ExpenseClaim,
+    LeaveAllocation,
+    LeaveApplication,
+    LeaveType,
+    OnboardingTask,
+    SeparationTask,
+    ShiftAssignment,
+    ShiftSchedule,
+    ShiftType,
+)
+from erp.db.models.inventory import (
+    Batch,
+    Item,
+    ItemAttribute,
+    ItemAttributeValue,
+    SerialNo,
+    StockEntry,
+    StockEntryItem,
+    StockLedgerEntry,
+    StockLevel,
+    StockReconciliation,
+    StockReconciliationItem,
+    StockReservationEntry,
+    Warehouse,
+)
+from erp.db.models.landed_cost import (
+    LandedCostItem,
+    LandedCostTaxesAndCharges,
+    LandedCostVoucher,
+)
+from erp.db.models.ledger import Account, CostCenter, FiscalPeriod, GeneralLedgerEntry
+from erp.db.models.logistics import (
+    DeliveryStop,
+    DeliveryTrip,
+    PackingSlip,
+    PackingSlipItem,
+    PickList,
+    PickListItem,
+)
+from erp.db.models.maintenance import (
+    MaintenanceSchedule,
+    MaintenanceVisit,
+)
+from erp.db.models.manufacturing import (
+    BOM,
+    BOMItem,
+    BOMOperation,
+    BOMScrapItem,
+    DowntimeEntry,
+    JobCard,
+    JobCardTimeLog,
+    MaintenanceTicket,
+    Operation,
+    ProductionPlan,
+    ProductionPlanItem,
+    Routing,
+    RoutingOperation,
+    WorkOrder,
+    Workstation,
+)
+from erp.db.models.onboarding import (
+    OnboardingProgress,
+    OnboardingStep,
+    TenantSettings,
+)
+from erp.db.models.operator_cert import OperatorCertificationRecord
+from erp.db.models.orchestration import DAGExecutionRecord
+from erp.db.models.outbox import TransactionalOutbox
+from erp.db.models.payroll import (
+    EmployeeAdvance,
+    PayrollEntry,
+    SalaryComponent,
+    SalarySlip,
+    SalarySlipItem,
+    SalaryStructure,
+    SalaryStructureAssignment,
+    SalaryStructureItem,
+)
+from erp.db.models.projects import (
+    Project,
+    ProjectTask,
+    Timesheet,
+)
+from erp.db.models.purchasing import (
+    BlanketOrder,
+    BlanketOrderItem,
+    GoodsReceiptNote,
+    GoodsReceiptNoteItem,
+    MaterialRequest,
+    MaterialRequestItem,
+    PurchaseOrder,
+    PurchaseOrderItem,
+    RequestForQuotation,
+    RFQItem,
+    RFQSupplier,
+    Supplier,
+    SupplierInvoice,
+    SupplierInvoiceItem,
+    SupplierQuotation,
+    SupplierQuotationItem,
+    SupplierScorecard,
+    SupplierScorecardCriteria,
 )
 from erp.db.models.quality import (
     NonConformance,
@@ -179,23 +173,42 @@ from erp.db.models.quality import (
     QualityInspectionParameter,
     QualityInspectionTemplate,
 )
-from erp.db.models.maintenance import (
-    MaintenanceSchedule,
-    MaintenanceVisit,
+from erp.db.models.recruitment import (
+    CandidateApplication,
+    CandidateTalentPoolProspect,
+    RecruitmentEmailReview,
+    RecruitmentRole,
 )
-from erp.db.models.projects import (
-    Project,
-    ProjectTask,
-    Timesheet,
+from erp.db.models.sales import (
+    Customer,
+    SalesOrder,
+    SalesOrderItem,
+    SalesQuotation,
 )
-from erp.db.models.recruitment import CandidateApplication, RecruitmentRole
-from erp.db.models.companies import (
-    Company,
-    InterCompanyTransaction,
+from erp.db.models.subcontracting import (
+    SubcontractingOrder,
+    SubcontractingOrderItem,
+    SubcontractingReceipt,
+    SubcontractingReceiptItem,
+    SubcontractingSuppliedItem,
 )
-from erp.db.models.currency import (
-    CurrencyExchangeRate,
-    ExchangeRateRevaluation,
+from erp.db.models.support import (
+    Issue,
+    IssueCommunication,
+    ServiceLevelAgreement,
+    ServiceLevelPriority,
+    WarrantyClaim,
+)
+from erp.db.models.tenant import Tenant, TenantOAuthConnection
+from erp.db.models.user import User
+from erp.db.models.whatsapp import (
+    WhatsAppAuthRecord,
+    WhatsAppConnection,
+    WhatsAppConversation,
+    WhatsAppMessage,
+    WhatsAppSupportKnowledge,
+    WhatsAppOTPChallenge,
+    WhatsAppSupportToolBinding,
 )
 
 __all__ = [
@@ -358,6 +371,8 @@ __all__ = [
     "Timesheet",
     "RecruitmentRole",
     "CandidateApplication",
+    "RecruitmentEmailReview",
+    "CandidateTalentPoolProspect",
     "Company",
     "InterCompanyTransaction",
     "CurrencyExchangeRate",
@@ -365,4 +380,12 @@ __all__ = [
     "DAGExecutionRecord",
     "EventProcessingRecord",
     "EventDeadLetterRecord",
+    "InboundEmailRecord",
+    "WhatsAppConnection",
+    "WhatsAppAuthRecord",
+    "WhatsAppConversation",
+    "WhatsAppMessage",
+    "WhatsAppSupportToolBinding",
+    "WhatsAppSupportKnowledge",
+    "WhatsAppOTPChallenge",
 ]

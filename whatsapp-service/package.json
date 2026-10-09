@@ -1,0 +1,20 @@
+{
+  "name": "ai-native-erp-whatsapp-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tenant-scoped Baileys channel service for AI-Native ERP support",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.19",
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "qrcode": "^1.5.4"
+  }
+}
