@@ -5,6 +5,19 @@ const { encrypt, decrypt } = require('./crypto');
 const makeWASocket = baileys.default || baileys;
 const { Browsers, DisconnectReason, initAuthCreds, proto } = baileys;
 
+function getDirectMessageTarget(message) {
+  const remoteJid = message?.key?.remoteJid || '';
+  const remoteJidAlt = message?.key?.remoteJidAlt || '';
+  const phoneJid = remoteJid.endsWith('@s.whatsapp.net')
+    ? remoteJid
+    : remoteJid.endsWith('@lid') && remoteJidAlt.endsWith('@s.whatsapp.net')
+      ? remoteJidAlt
+      : '';
+  const phone = phoneJid.slice(0, -'@s.whatsapp.net'.length);
+  if (!/^\d{7,15}$/.test(phone)) return null;
+  return { phone, jid: remoteJid };
+}
+
 class ConnectionManager {
   constructor({ pool, erpUrl, internalToken, logger = console }) {
     this.pool = pool;
@@ -205,9 +218,13 @@ class ConnectionManager {
     if (event.type !== 'notify') return;
     for (const message of event.messages || []) {
       if (message.key.fromMe) continue;
-      const jid = message.key.remoteJid || '';
-      if (!jid.endsWith('@s.whatsapp.net')) continue;
-      const phone = jid.split('@')[0];
+      const target = getDirectMessageTarget(message);
+      if (!target) {
+        const addressType = (message.key.remoteJid || '').split('@').pop() || 'unknown';
+        this.logger.warn(`Ignoring WhatsApp message with unsupported address type: ${addressType}.`);
+        continue;
+      }
+      const { phone, jid } = target;
       const body = message.message || {};
       const text = body.conversation
         || body.extendedTextMessage?.text
@@ -217,6 +234,7 @@ class ConnectionManager {
       if (!text || !message.key.id) continue;
       let result;
       try {
+        this.logger.info(`Processing inbound WhatsApp message for tenant ${tenantId}.`);
         result = await this.erpRequest('/inbound', {
           tenant_id: tenantId,
           provider_message_id: message.key.id,
@@ -314,4 +332,4 @@ class ConnectionManager {
   }
 }
 
-module.exports = { ConnectionManager };
+module.exports = { ConnectionManager, getDirectMessageTarget };
