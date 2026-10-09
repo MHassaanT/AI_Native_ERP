@@ -208,6 +208,8 @@ async def _send_whatsapp_text(tenant_id: str, phone: str, message: str) -> None:
 async def _find_registered_lead(
     db: AsyncSession, tenant_id: Any, phone: str
 ) -> Lead | None:
+    if phone.startswith("lid:"):
+        return None
     digits = _normalize_phone(phone)
     if not digits:
         return None

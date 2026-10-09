@@ -8,14 +8,28 @@ const { Browsers, DisconnectReason, initAuthCreds, proto } = baileys;
 function getDirectMessageTarget(message) {
   const remoteJid = message?.key?.remoteJid || '';
   const remoteJidAlt = message?.key?.remoteJidAlt || '';
-  const phoneJid = remoteJid.endsWith('@s.whatsapp.net')
-    ? remoteJid
-    : remoteJid.endsWith('@lid') && remoteJidAlt.endsWith('@s.whatsapp.net')
-      ? remoteJidAlt
-      : '';
-  const phone = phoneJid.slice(0, -'@s.whatsapp.net'.length);
-  if (!/^\d{7,15}$/.test(phone)) return null;
-  return { phone, jid: remoteJid };
+  if (remoteJid.endsWith('@s.whatsapp.net')) {
+    const phone = remoteJid.slice(0, -'@s.whatsapp.net'.length);
+    return /^\d{7,15}$/.test(phone) ? { phone, jid: remoteJid } : null;
+  }
+  if (remoteJid.endsWith('@lid')) {
+    const lid = remoteJid.slice(0, -'@lid'.length);
+    if (!/^\d{1,20}$/.test(lid)) return null;
+    if (remoteJidAlt.endsWith('@s.whatsapp.net')) {
+      const phone = remoteJidAlt.slice(0, -'@s.whatsapp.net'.length);
+      if (/^\d{7,15}$/.test(phone)) return { phone, jid: remoteJid };
+    }
+    return { phone: `lid:${lid}`, jid: remoteJid };
+  }
+  return null;
+}
+
+function getRecipientJid(recipient) {
+  const value = String(recipient || '');
+  const lid = /^lid:(\d{1,20})$/.exec(value);
+  if (lid) return `${lid[1]}@lid`;
+  if (/^\d{7,15}$/.test(value)) return `${value}@s.whatsapp.net`;
+  throw new Error('Valid recipient phone number or WhatsApp LID is required.');
 }
 
 class ConnectionManager {
@@ -288,11 +302,9 @@ class ConnectionManager {
     if (!session?.socket || session.status !== 'CONNECTED') {
       throw new Error('WhatsApp tenant is not connected.');
     }
-    const digits = String(to).replace(/\D/g, '');
-    if (digits.length < 7 || digits.length > 15 || !message) {
-      throw new Error('Valid recipient phone number and message are required.');
-    }
-    const result = await session.socket.sendMessage(`${digits}@s.whatsapp.net`, { text: message });
+    if (!message) throw new Error('A message is required.');
+    const jid = getRecipientJid(to);
+    const result = await session.socket.sendMessage(jid, { text: message });
     return { message_id: result?.key?.id || null };
   }
 
@@ -332,4 +344,4 @@ class ConnectionManager {
   }
 }
 
-module.exports = { ConnectionManager, getDirectMessageTarget };
+module.exports = { ConnectionManager, getDirectMessageTarget, getRecipientJid };

@@ -49,7 +49,7 @@ class WhatsAppToolBindingsRequest(BaseModel):
 class WhatsAppInboundRequest(BaseModel):
     tenant_id: uuid.UUID
     provider_message_id: str = Field(min_length=1, max_length=255)
-    phone_number: str = Field(min_length=7, max_length=32)
+    phone_number: str = Field(min_length=1, max_length=32)
     text: str = Field(min_length=1, max_length=8000)
     contact_name: str | None = Field(default=None, max_length=255)
 
@@ -411,9 +411,14 @@ async def delete_whatsapp_knowledge(
 
 @internal_router.post("/inbound", dependencies=[Depends(_require_internal_token)])
 async def process_whatsapp_inbound(payload: WhatsAppInboundRequest, db: DbSessionDep):
-    phone = re.sub(r"\D", "", payload.phone_number)
-    if not 7 <= len(phone) <= 15:
-        raise HTTPException(status_code=400, detail="Invalid WhatsApp phone number.")
+    if payload.phone_number.startswith("lid:"):
+        phone = payload.phone_number
+        if not re.fullmatch(r"lid:\d{1,20}", phone):
+            raise HTTPException(status_code=400, detail="Invalid WhatsApp LID.")
+    else:
+        phone = re.sub(r"\D", "", payload.phone_number)
+        if not 7 <= len(phone) <= 15:
+            raise HTTPException(status_code=400, detail="Invalid WhatsApp phone number.")
     await db.execute(
         pg_insert(WhatsAppConversation)
         .values(
