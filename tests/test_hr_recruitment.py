@@ -34,6 +34,22 @@ def test_recruitment_endpoints_are_in_openapi():
     assert "/api/v1/hr/recruitment/applications/{application_id}" in paths
 
 
+def test_configured_gemini_key_is_used_when_openrouter_key_is_missing(monkeypatch):
+    monkeypatch.setattr(hr_screening.settings, "LLM_PROVIDER", "openrouter")
+    monkeypatch.setattr(hr_screening.settings, "OPENROUTER_API_KEY", None)
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    assert hr_screening._selected_provider() == "gemini"
+
+
+def test_explicit_provider_is_respected_when_both_keys_exist(monkeypatch):
+    monkeypatch.setattr(hr_screening.settings, "LLM_PROVIDER", "openrouter")
+    monkeypatch.setattr(hr_screening.settings, "OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    assert hr_screening._selected_provider() == "openrouter"
+
+
 def test_resume_parser_extracts_docx_text_and_discards_no_text():
     document = Document()
     document.add_paragraph("Experienced backend engineer with Python and SQL experience.")

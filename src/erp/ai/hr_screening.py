@@ -56,8 +56,15 @@ def _remove_contact_details(text: str) -> str:
     return _PHONE_PATTERN.sub("[phone redacted]", text)
 
 
-async def _request_json(prompt: str) -> dict[str, Any]:
+def _selected_provider() -> str:
     provider = settings.LLM_PROVIDER.lower()
+    if provider == "openrouter" and not settings.OPENROUTER_API_KEY and settings.GEMINI_API_KEY:
+        return "gemini"
+    return provider
+
+
+async def _request_json(prompt: str) -> dict[str, Any]:
+    provider = _selected_provider()
     timeout = httpx.Timeout(45.0, connect=10.0)
 
     try:
