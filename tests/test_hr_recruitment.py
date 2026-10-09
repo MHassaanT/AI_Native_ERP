@@ -1,8 +1,10 @@
 """Focused tests for recruiter-reviewed HR screening."""
 
+import importlib.util
 import io
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -48,6 +50,42 @@ def test_explicit_provider_is_respected_when_both_keys_exist(monkeypatch):
     monkeypatch.setattr(hr_screening.settings, "GEMINI_API_KEY", "test-gemini-key")
 
     assert hr_screening._selected_provider() == "openrouter"
+
+
+@pytest.mark.parametrize(
+    "configured_model",
+    [
+        "gemini-2.5-flash",
+        "models/gemini-2.5-flash",
+        "google/gemini-2.5-flash",
+    ],
+)
+def test_gemini_model_name_accepts_common_provider_prefixes(monkeypatch, configured_model):
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_MODEL", configured_model)
+
+    assert hr_screening._gemini_model_name() == "gemini-2.5-flash"
+
+
+def test_gemini_model_name_rejects_openrouter_model_namespace(monkeypatch):
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_MODEL", "google/gemini/model-name")
+
+    with pytest.raises(hr_screening.ScreeningConfigurationError, match="GEMINI_MODEL"):
+        hr_screening._gemini_model_name()
+
+
+def test_agent_removal_revision_fits_alembic_version_column():
+    revision_path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "014_remove_autonomous_workforce_and_hitl.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_014", revision_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    assert len(migration.revision) <= 32
 
 
 def test_resume_parser_extracts_docx_text_and_discards_no_text():
@@ -166,6 +204,92 @@ async def test_evaluate_candidate_rejects_unverifiable_evidence(monkeypatch):
             role_requirements="Python",
             resume_text="This candidate has a short resume.",
         )
+
+
+@pytest.mark.asyncio
+async def test_gemini_api_failure_reports_model_and_provider_reason(monkeypatch):
+    from erp.ai.hr_screening import ScreeningProviderError
+
+    captured: list[str] = []
+
+    class ErrorResponse:
+        is_error = True
+        status_code = 404
+
+        @staticmethod
+        def json():
+            return {"error": {"message": "Model not found."}}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, **_kwargs):
+            captured.append(url)
+            return ErrorResponse()
+
+    monkeypatch.setattr(hr_screening.settings, "LLM_PROVIDER", "gemini")
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_MODEL", "google/gemini-2.5-flash")
+    monkeypatch.setattr(hr_screening.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(
+        ScreeningProviderError,
+        match="Gemini returned HTTP 404 for model 'gemini-2.5-flash': Model not found.",
+    ):
+        await hr_screening._request_json("test prompt")
+
+    assert len(captured) == 1
+    assert "/models/gemini-2.5-flash:generateContent" in captured[-1]
+    assert "test-secret" not in str(captured)
+
+
+@pytest.mark.asyncio
+async def test_gemini_model_404_retries_supported_fallback(monkeypatch):
+    class ModelResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.is_error = status_code >= 400
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+        def raise_for_status(self):
+            if self.is_error:
+                raise AssertionError("unexpected error response")
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.requests = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, _url, **_kwargs):
+            self.requests += 1
+            if self.requests == 1:
+                return ModelResponse(404, {"error": {"message": "Model not found."}})
+            return ModelResponse(
+                200,
+                {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]},
+            )
+
+    monkeypatch.setattr(hr_screening.settings, "LLM_PROVIDER", "gemini")
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_API_KEY", "test-secret")
+    monkeypatch.setattr(hr_screening.settings, "GEMINI_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr(hr_screening.httpx, "AsyncClient", FakeClient)
+
+    assert await hr_screening._request_json("test prompt") == {"ok": True}
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 """Remove autonomous supervisor and agent approval-queue storage.
 
-Revision ID: 014_remove_autonomous_workforce_and_hitl
+Revision ID: 014_remove_agent_tables
 Revises: 013_durable_inbound_email_review
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "014_remove_autonomous_workforce_and_hitl"
+revision: str = "014_remove_agent_tables"
 down_revision: str | None = "013_durable_inbound_email_review"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

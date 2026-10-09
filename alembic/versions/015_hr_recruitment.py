@@ -1,7 +1,7 @@
 """Add tenant-scoped recruitment roles and candidate screening records.
 
 Revision ID: 015_hr_recruitment
-Revises: 014_remove_autonomous_workforce_and_hitl
+Revises: 014_remove_agent_tables
 """
 
 from collections.abc import Sequence
@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "015_hr_recruitment"
-down_revision: str | None = "014_remove_autonomous_workforce_and_hitl"
+down_revision: str | None = "014_remove_agent_tables"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

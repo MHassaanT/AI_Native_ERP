@@ -63,9 +63,45 @@ def _selected_provider() -> str:
     return provider
 
 
+def _gemini_model_name() -> str:
+    model = settings.GEMINI_MODEL.strip()
+    for prefix in ("models/", "google/", "gemini/"):
+        if model.startswith(prefix):
+            model = model.removeprefix(prefix)
+    if not model.startswith("gemini-") or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]*", model
+    ):
+        raise ScreeningConfigurationError(
+            "GEMINI_MODEL must be a Gemini API model name, such as gemini-2.5-flash."
+        )
+    return model
+
+
+def _gemini_model_candidates() -> list[str]:
+    configured = _gemini_model_name()
+    return list(dict.fromkeys([configured, "gemini-2.5-flash"]))
+
+
+def _provider_error(response: httpx.Response, provider: str, model: str) -> str:
+    detail = ""
+    try:
+        payload = response.json()
+        if provider == "gemini":
+            detail = payload.get("error", {}).get("message", "")
+        else:
+            error = payload.get("error", {})
+            detail = error.get("message", "") if isinstance(error, dict) else str(error)
+    except (ValueError, AttributeError):
+        detail = ""
+    detail = " ".join(str(detail).split())[:400]
+    suffix = f": {detail}" if detail else ""
+    return f"{provider.title()} returned HTTP {response.status_code} for model '{model}'{suffix}"
+
+
 async def _request_json(prompt: str) -> dict[str, Any]:
     provider = _selected_provider()
     timeout = httpx.Timeout(45.0, connect=10.0)
+    model = ""
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -74,19 +110,33 @@ async def _request_json(prompt: str) -> dict[str, Any]:
                     raise ScreeningConfigurationError(
                         "GEMINI_API_KEY is required for HR screening."
                     )
-                model = settings.GEMINI_MODEL.removeprefix("models/")
-                response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/"
-                    f"{model}:generateContent",
-                    params={"key": settings.GEMINI_API_KEY},
-                    json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {
-                            "response_mime_type": "application/json",
-                            "temperature": 0.1,
+                response = None
+                candidates = _gemini_model_candidates()
+                for candidate in candidates:
+                    model = candidate
+                    response = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{model}:generateContent",
+                        params={"key": settings.GEMINI_API_KEY},
+                        json={
+                            "contents": [{"parts": [{"text": prompt}]}],
+                            "generationConfig": {
+                                "response_mime_type": "application/json",
+                                "temperature": 0.1,
+                            },
                         },
-                    },
-                )
+                    )
+                    if response.status_code != 404 or candidate == candidates[-1]:
+                        break
+                    logger.info(
+                        "Configured Gemini model %s is unavailable; trying supported fallback %s.",
+                        candidate,
+                        candidates[-1],
+                    )
+                if response is None:
+                    raise ScreeningProviderError("Gemini screening did not make a model request.")
+                if response.is_error:
+                    raise ScreeningProviderError(_provider_error(response, provider, model))
                 response.raise_for_status()
                 content = response.json()["candidates"][0]["content"]["parts"][0]["text"]
             elif provider == "openrouter":
@@ -94,11 +144,12 @@ async def _request_json(prompt: str) -> dict[str, Any]:
                     raise ScreeningConfigurationError(
                         "OPENROUTER_API_KEY is required for HR screening."
                     )
+                model = settings.LLM_MODEL or "openai/gpt-4o-mini"
                 response = await client.post(
                     f"{settings.OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
                     headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}"},
                     json={
-                        "model": settings.LLM_MODEL or "openai/gpt-4o-mini",
+                        "model": model,
                         "messages": [
                             {
                                 "role": "system",
@@ -113,6 +164,8 @@ async def _request_json(prompt: str) -> dict[str, Any]:
                         "temperature": 0.1,
                     },
                 )
+                if response.is_error:
+                    raise ScreeningProviderError(_provider_error(response, provider, model))
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
             else:
@@ -121,9 +174,19 @@ async def _request_json(prompt: str) -> dict[str, Any]:
                 )
     except ScreeningConfigurationError:
         raise
+    except ScreeningProviderError:
+        raise
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        logger.warning("HR screening model request failed (%s).", type(exc).__name__)
-        raise ScreeningProviderError("HR screening model request failed.") from exc
+        logger.warning(
+            "HR screening model request failed for provider=%s model=%s (%s).",
+            provider,
+            model or "unresolved",
+            type(exc).__name__,
+        )
+        raise ScreeningProviderError(
+            f"{provider.title()} screening request failed for model "
+            f"'{model or 'unresolved'}' ({type(exc).__name__})."
+        ) from exc
 
     try:
         parsed = json.loads(content)
