@@ -78,7 +78,7 @@ app.use((error, _req, res, _next) => {
   res.status(502).json({ error: 'WhatsApp operation failed.' });
 });
 
-const port = Number(process.env.WHATSAPP_PORT || 8100);
+const port = Number(process.env.PORT || process.env.WHATSAPP_PORT || 8100);
 const server = app.listen(port, '0.0.0.0', async () => {
   try {
     await manager.start();

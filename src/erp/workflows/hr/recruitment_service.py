@@ -276,17 +276,35 @@ class RecruitmentService:
             raise ValueError("Email review not found.")
         if review.status != "REVIEW_REQUIRED":
             raise ValueError("Email review is no longer awaiting a recruiter decision.")
-        prospect = CandidateTalentPoolProspect(
-            tenant_id=tenant_id,
-            source_review_id=review.review_id,
-            applicant_name=review.applicant_name,
-            applicant_email=review.applicant_email,
-            desired_role=review.desired_role,
-            profile_text=review.resume_text,
-        )
-        db.add(prospect)
+        prospect = await self.stage_email_review_in_talent_pool(db, tenant_id, review)
+        prospect.status = "POOLED"
         review.status = "ADDED_TO_POOL"
         await db.flush()
+        return prospect
+
+    async def stage_email_review_in_talent_pool(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        review: RecruitmentEmailReview,
+    ) -> CandidateTalentPoolProspect:
+        stmt = select(CandidateTalentPoolProspect).where(
+            CandidateTalentPoolProspect.tenant_id == tenant_id,
+            CandidateTalentPoolProspect.source_review_id == review.review_id,
+        )
+        prospect = (await db.execute(stmt)).scalar_one_or_none()
+        if prospect is None:
+            prospect = CandidateTalentPoolProspect(
+                tenant_id=tenant_id,
+                source_review_id=review.review_id,
+                applicant_name=review.applicant_name,
+                applicant_email=review.applicant_email,
+                desired_role=review.desired_role,
+                profile_text=review.resume_text,
+                status="PENDING_REVIEW",
+            )
+            db.add(prospect)
+            await db.flush()
         return prospect
 
     async def list_talent_pool(
@@ -296,9 +314,10 @@ class RecruitmentService:
             select(CandidateTalentPoolProspect)
             .where(
                 CandidateTalentPoolProspect.tenant_id == tenant_id,
-                CandidateTalentPoolProspect.status == "POOLED",
+                CandidateTalentPoolProspect.status.in_(("PENDING_REVIEW", "POOLED")),
             )
             .order_by(
+                CandidateTalentPoolProspect.status.asc(),
                 CandidateTalentPoolProspect.match_score.desc().nullslast(),
                 CandidateTalentPoolProspect.created_at.desc(),
             )
@@ -380,6 +399,19 @@ class RecruitmentService:
         if review is None or review.status != "REVIEW_REQUIRED":
             return None
         review.status = "DISMISSED"
+        prospect = (
+            await db.execute(
+                select(CandidateTalentPoolProspect)
+                .where(
+                    CandidateTalentPoolProspect.tenant_id == tenant_id,
+                    CandidateTalentPoolProspect.source_review_id == review.review_id,
+                    CandidateTalentPoolProspect.status == "PENDING_REVIEW",
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if prospect is not None:
+            prospect.status = "DISMISSED"
         await db.flush()
         return review
 
@@ -392,7 +424,7 @@ class RecruitmentService:
                 .where(
                     CandidateTalentPoolProspect.prospect_id == prospect_id,
                     CandidateTalentPoolProspect.tenant_id == tenant_id,
-                    CandidateTalentPoolProspect.status == "POOLED",
+                    CandidateTalentPoolProspect.status.in_(("PENDING_REVIEW", "POOLED")),
                 )
                 .with_for_update()
             )
@@ -400,6 +432,9 @@ class RecruitmentService:
         if prospect is None:
             return None
         prospect.status = "DISMISSED"
+        review = await self.get_email_review(db, tenant_id, prospect.source_review_id, lock=True)
+        if review is not None and review.status == "REVIEW_REQUIRED":
+            review.status = "DISMISSED"
         await db.flush()
         return prospect
 

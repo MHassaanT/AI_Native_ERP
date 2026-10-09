@@ -560,6 +560,7 @@ def _email_review_response(review: RecruitmentEmailReview) -> dict[str, Any]:
 def _talent_pool_response(prospect: CandidateTalentPoolProspect) -> dict[str, Any]:
     return {
         "prospect_id": prospect.prospect_id,
+        "source_review_id": prospect.source_review_id,
         "applicant_name": prospect.applicant_name,
         "applicant_email": prospect.applicant_email,
         "desired_role": prospect.desired_role,
@@ -785,6 +786,8 @@ async def analyze_recruitment_email(
         raise HTTPException(status_code=404, detail="Inbound email not found.")
     existing = await recruitment_service.get_email_review_by_message(db, tenant_id, message_id)
     if existing is not None:
+        if existing.status == "REVIEW_REQUIRED":
+            await recruitment_service.stage_email_review_in_talent_pool(db, tenant_id, existing)
         return _email_review_response(existing)
 
     roles = await recruitment_service.list_roles(db, tenant_id, "OPEN")
@@ -827,6 +830,8 @@ async def analyze_recruitment_email(
         resume_text=candidate_text,
         is_application=analysis.is_application,
     )
+    if analysis.is_application:
+        await recruitment_service.stage_email_review_in_talent_pool(db, tenant_id, review)
     return _email_review_response(review)
 
 
@@ -933,7 +938,11 @@ async def match_recruitment_talent_pool(
         raise HTTPException(
             status_code=409, detail="Talent-pool matching requires an open job opening."
         )
-    prospects = (await recruitment_service.list_talent_pool(db, tenant_id))[:20]
+    prospects = [
+        prospect
+        for prospect in await recruitment_service.list_talent_pool(db, tenant_id)
+        if prospect.status == "POOLED"
+    ][:20]
     semaphore = asyncio.Semaphore(3)
 
     async def evaluate(prospect: CandidateTalentPoolProspect):

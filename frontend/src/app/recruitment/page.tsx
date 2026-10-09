@@ -60,6 +60,8 @@ interface EmailReview {
 
 interface TalentPoolProspect {
   prospect_id: string;
+  source_review_id: string;
+  status: "PENDING_REVIEW" | "POOLED" | "TRANSFERRED" | "DISMISSED";
   applicant_name: string | null;
   applicant_email: string | null;
   desired_role: string | null;
@@ -253,7 +255,7 @@ export default function RecruitmentPage() {
       const result = await api.analyzeRecruitmentEmail(messageId);
       setNotice(result.status === "NOT_APPLICATION"
         ? "This message was classified as not being a job application."
-        : "Email analyzed. Review the suggested candidate details before taking action.");
+        : "Candidate analyzed and staged in the talent pool, pending recruiter review.");
       await loadData(selectedRoleId);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Could not analyze this email.");
@@ -313,12 +315,18 @@ export default function RecruitmentPage() {
     }
   };
 
-  const handleTalentPoolAction = async (prospect: TalentPoolProspect, action: "transfer" | "dismiss") => {
+  const handleTalentPoolAction = async (
+    prospect: TalentPoolProspect,
+    action: "approve" | "transfer" | "dismiss",
+  ) => {
     setWorking(true);
     setError(null);
     setNotice(null);
     try {
-      if (action === "transfer") {
+      if (action === "approve") {
+        await api.addRecruitmentEmailToTalentPool(prospect.source_review_id);
+        setNotice("Candidate approved in the talent pool.");
+      } else if (action === "transfer") {
         const matchedRole = roles.find((role) => role.role_id === prospect.matched_role_id && role.status === "OPEN");
         const defaultOpenRole = roles.find((role) => role.role_id === selectedRoleId && role.status === "OPEN")
           ?? roles.find((role) => role.status === "OPEN");
@@ -649,7 +657,7 @@ export default function RecruitmentPage() {
                     </button>
                     <button type="button" onClick={() => void handleEmailReviewAction("pool", review)} disabled={working}
                       className="rounded-md border border-cream-400 px-3 py-2 text-xs text-cream-800 disabled:opacity-50">
-                      Add to talent pool
+                            Approve in talent pool
                     </button>
                     <button type="button" onClick={() => void handleEmailReviewAction("dismiss", review)} disabled={working}
                       className="rounded-md border border-terracotta-300 px-3 py-2 text-xs text-terracotta-800 disabled:opacity-50">
@@ -675,16 +683,16 @@ export default function RecruitmentPage() {
             </h2>
             <p className="mt-1 text-xs text-cream-700">
               {selectedRole ? `Generate evidence-based suggestions for ${selectedRole.title}.` : "Select an open job to generate match suggestions."}
-              {" "}Suggestions never transfer candidates automatically.
+              {" "}Candidates identified as applicants are staged here for recruiter review. Approve a candidate before matching or transferring; suggestions never transfer candidates automatically.
             </p>
           </div>
-          <button type="button" onClick={() => void handleMatchTalentPool()} disabled={working || !selectedRoleId || selectedRole?.status !== "OPEN" || talentPool.length === 0}
+          <button type="button" onClick={() => void handleMatchTalentPool()} disabled={working || !selectedRoleId || selectedRole?.status !== "OPEN" || !talentPool.some((prospect) => prospect.status === "POOLED")}
             className="inline-flex items-center gap-2 rounded-md border border-sage-700 px-3 py-2 text-xs font-medium text-sage-800 disabled:opacity-50">
             <Sparkles className="h-3.5 w-3.5" /> Match up to 20 prospects
           </button>
         </div>
         {talentPool.length === 0 ? (
-          <p className="rounded-md border border-cream-300 bg-white p-3 text-sm text-cream-700">The talent pool is empty. Recruiters can add reviewed email candidates above.</p>
+          <p className="rounded-md border border-cream-300 bg-white p-3 text-sm text-cream-700">The talent pool is empty. Analyze an application email to stage a candidate here.</p>
         ) : (
           <ul className="space-y-2">
             {talentPool.map((prospect) => (
@@ -694,11 +702,19 @@ export default function RecruitmentPage() {
                     <p className="text-sm font-medium text-cream-900">{prospect.applicant_name || prospect.applicant_email || "Candidate"}</p>
                     <p className="mt-1 text-xs text-cream-600">
                       {prospect.applicant_email || "No email"} · {prospect.desired_role || "No preferred role"}
+                      {prospect.status === "PENDING_REVIEW" && " · Pending recruiter review"}
                       {prospect.match_score !== null && ` · Suggestion ${prospect.match_score}/100`}
                     </p>
                     {prospect.match_summary && <p className="mt-2 text-sm text-cream-800">{prospect.match_summary}</p>}
                   </div>
                   <div className="flex gap-2">
+                    {prospect.status === "PENDING_REVIEW" ? (
+                      <button type="button" onClick={() => void handleTalentPoolAction(prospect, "approve")} disabled={working}
+                        className="rounded-md bg-sage-700 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">
+                        Approve to pool
+                      </button>
+                    ) : (
+                    <>
                     <select value={roles.some((role) => role.role_id === poolRoleChoices[prospect.prospect_id] && role.status === "OPEN")
                       ? poolRoleChoices[prospect.prospect_id]
                       : roles.some((role) => role.role_id === prospect.matched_role_id && role.status === "OPEN")
@@ -713,6 +729,8 @@ export default function RecruitmentPage() {
                       className="rounded-md bg-sage-700 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">
                       Transfer to job
                     </button>
+                    </>
+                    )}
                     <button type="button" onClick={() => void handleTalentPoolAction(prospect, "dismiss")} disabled={working}
                       className="rounded-md border border-terracotta-300 px-3 py-2 text-xs text-terracotta-800 disabled:opacity-50">
                       Dismiss

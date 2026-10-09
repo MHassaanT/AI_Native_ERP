@@ -203,7 +203,7 @@ class CandidateTalentPoolProspect(Base, TenantMixin, TimestampMixin):
             name="fk_talent_pool_role_tenant",
         ),
         CheckConstraint(
-            "status IN ('POOLED', 'TRANSFERRED', 'DISMISSED')",
+            "status IN ('PENDING_REVIEW', 'POOLED', 'TRANSFERRED', 'DISMISSED')",
             name="ck_talent_pool_prospect_status",
         ),
         CheckConstraint(

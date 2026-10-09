@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from docx import Document
@@ -113,6 +113,20 @@ def test_hr_email_pool_migration_follows_recruitment_revision():
     assert migration.down_revision == "015_hr_recruitment"
 
 
+def test_pending_talent_pool_migration_follows_whatsapp_revision():
+    migration_path = (
+        Path(__file__).parents[1] / "alembic" / "versions/018_hr_talent_pool_review.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_018", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    assert migration.revision == "018_hr_talent_pool_review"
+    assert len(migration.revision) <= 32
+    assert migration.down_revision == "017_whatsapp_support_channel"
+
+
 def test_resume_parser_extracts_docx_text_and_discards_no_text():
     document = Document()
     document.add_paragraph("Experienced backend engineer with Python and SQL experience.")
@@ -175,6 +189,92 @@ def test_recruitment_models_enforce_tenant_role_relationship_and_score_range():
     assert "uq_talent_pool_source_review" in {
         constraint.name for constraint in CandidateTalentPoolProspect.__table__.constraints
     }
+    pool_status = next(
+        constraint.sqltext
+        for constraint in CandidateTalentPoolProspect.__table__.constraints
+        if constraint.name == "ck_talent_pool_prospect_status"
+    )
+    assert "PENDING_REVIEW" in str(pool_status)
+
+
+@pytest.mark.asyncio
+async def test_analyzed_application_is_staged_for_pool_without_an_open_role(monkeypatch):
+    from erp.api.routes import hr
+
+    tenant_id = uuid.uuid4()
+    message = SimpleNamespace(
+        message_id="gmail-message-1",
+        subject="Sales Manager application",
+        sender="Jordan Lee <jordan@example.com>",
+        body_text="I am applying for the Sales Manager role.",
+    )
+    review = SimpleNamespace(status="REVIEW_REQUIRED")
+    service = hr.recruitment_service
+    monkeypatch.setattr(service, "get_inbound_email", AsyncMock(return_value=message))
+    monkeypatch.setattr(service, "get_email_review_by_message", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "list_roles", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        service,
+        "create_email_review",
+        AsyncMock(return_value=review),
+    )
+    stage_review = AsyncMock()
+    monkeypatch.setattr(service, "stage_email_review_in_talent_pool", stage_review)
+    monkeypatch.setattr(
+        hr,
+        "analyze_application_email",
+        AsyncMock(
+            return_value=ApplicationEmailAnalysis(
+                is_application=True,
+                applicant_name="Jordan Lee",
+                desired_role="Sales Manager",
+                suggested_role_id=None,
+                confidence=0.95,
+                summary="The sender says they are applying for Sales Manager.",
+                evidence=[
+                    EvidenceQuote(
+                        requirement="Application intent",
+                        quote="I am applying for the Sales Manager role.",
+                        assessment="The sender explicitly states application intent.",
+                    )
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(hr, "_email_review_response", lambda _review: {"status": "REVIEW_REQUIRED"})
+    db = AsyncMock()
+
+    response = await hr.analyze_recruitment_email("gmail-message-1", tenant_id, db)
+
+    assert response["status"] == "REVIEW_REQUIRED"
+    service.list_roles.assert_awaited_once_with(db, tenant_id, "OPEN")
+    stage_review.assert_awaited_once_with(db, tenant_id, review)
+
+
+@pytest.mark.asyncio
+async def test_stage_email_review_creates_pending_candidate_without_duplicate(monkeypatch):
+    service = RecruitmentService()
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None)),
+        add=Mock(),
+        flush=AsyncMock(),
+    )
+    tenant_id = uuid.uuid4()
+    review = RecruitmentEmailReview(
+        tenant_id=tenant_id,
+        applicant_name="Jordan Lee",
+        applicant_email="jordan@example.com",
+        desired_role="Sales Manager",
+        resume_text="I am applying for Sales Manager.",
+    )
+    review.review_id = uuid.uuid4()
+
+    prospect = await service.stage_email_review_in_talent_pool(db, tenant_id, review)
+
+    assert prospect.status == "PENDING_REVIEW"
+    assert prospect.source_review_id == review.review_id
+    db.add.assert_called_once_with(prospect)
+    db.flush.assert_awaited_once()
 
 
 @pytest.mark.asyncio
