@@ -10,15 +10,15 @@ const config: Config = {
     extend: {
       colors: {
         cream: {
-          50: "#FCFAF6",   // Canvas background
-          100: "#F7F4EE",  // Card / surface background
-          200: "#EFEBE2",  // Hover / active highlights
-          300: "#E7E2DA",  // Hairline subtle borders
-          400: "#D6CEC2",  // Inactive borders / dividers
-          500: "#B4A897",
-          700: "#57534E",  // Secondary text
-          800: "#44403C",  // Muted body text
-          900: "#1C1917",  // Primary headings & numbers
+          50: "#F7F8F6",   // Canvas background
+          100: "#F1F3F0",  // Muted surface background
+          200: "#E8ECE7",  // Hover / active highlights
+          300: "#E1E5E0",  // Hairline subtle borders
+          400: "#CDD4CD",  // Inactive borders / dividers
+          500: "#AEB8AE",
+          700: "#5C665E",  // Secondary text
+          800: "#414A43",  // Muted body text
+          900: "#202923",  // Primary headings & numbers
         },
         sage: {
           50: "#F2F6F3",

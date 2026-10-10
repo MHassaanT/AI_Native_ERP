@@ -3,8 +3,15 @@
 @tailwind utilities;
 
 :root {
-  --background: #FCFAF6;
-  --foreground: #1C1917;
+  --background: #f7f8f6;
+  --foreground: #202923;
+  --surface: #ffffff;
+  --line: #e6e9e5;
+  --accent: #3f6249;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
@@ -12,22 +19,87 @@ body {
   color: var(--foreground);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   letter-spacing: -0.011em;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: #dce9df;
+  color: #203526;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a {
+  touch-action: manipulation;
+}
+
+input,
+select,
+textarea {
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid #6b8a72;
+  outline-offset: 2px;
+}
+
+table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+th {
+  color: #575f59;
+  font-weight: 600;
+}
+
+tbody tr {
+  transition: background-color 120ms ease;
+}
+
+tbody tr:hover {
+  background-color: #f7f9f6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Minimalist fine scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #F7F4EE;
+  background: #f3f5f2;
 }
 ::-webkit-scrollbar-thumb {
-  background: #D6CEC2;
-  border-radius: 3px;
+  background: #cbd2cb;
+  border: 2px solid #f3f5f2;
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #B4A897;
+  background: #aeb9af;
 }
 
 /* POS Thermal & Tax Invoice Print Styling */

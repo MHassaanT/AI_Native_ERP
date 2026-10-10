@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -34,6 +35,11 @@ class Item(Base, TenantMixin, TimestampMixin):
     item_code: Mapped[str] = mapped_column(String(64), nullable=False)
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    package_quantity: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     stock_uom: Mapped[str] = mapped_column(String(32), nullable=False, default="Nos")
     is_stock_item: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_sales_item: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -63,6 +69,31 @@ class Item(Base, TenantMixin, TimestampMixin):
     parent_item = relationship("Item", remote_side=[item_id])
 
     __table_args__ = (Index("idx_item_tenant_code", "tenant_id", "item_code", unique=True),)
+
+
+class ItemTodo(Base, TenantMixin, TimestampMixin):
+    """Follow-up task associated with an inventory item."""
+
+    __tablename__ = "item_todos"
+
+    todo_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("items.item_id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="TODO")
+    assigned_to: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    __table_args__ = (
+        Index("ix_item_todos_tenant_item", "tenant_id", "item_id"),
+        CheckConstraint(
+            "status IN ('TODO', 'IN_PROGRESS', 'DONE')",
+            name="ck_item_todos_status",
+        ),
+    )
 
 
 class Warehouse(Base, TenantMixin, TimestampMixin):

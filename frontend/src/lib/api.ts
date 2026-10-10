@@ -162,6 +162,34 @@ export const api = {
   getItems: () => fetchWithTenant("/inventory/items"),
   createItem: (data: any) =>
     fetchWithTenant("/inventory/items", { method: "POST", body: JSON.stringify(data) }),
+  importItems: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return fetchWithTenant("/inventory/items/import", { method: "POST", body: form });
+  },
+  lookupItemBarcode: (barcode: string) =>
+    fetchWithTenant(`/inventory/barcode/${encodeURIComponent(barcode)}`),
+  updateItem: (itemId: string, data: any) =>
+    fetchWithTenant(`/inventory/items/${encodeURIComponent(itemId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  getItemOverview: (itemId: string, days: number) =>
+    fetchWithTenant(
+      `/inventory/items/${encodeURIComponent(itemId)}/overview?days=${encodeURIComponent(days)}`,
+    ),
+  getItemTodos: (itemId: string) =>
+    fetchWithTenant(`/inventory/items/${encodeURIComponent(itemId)}/todos`),
+  createItemTodo: (itemId: string, data: any) =>
+    fetchWithTenant(`/inventory/items/${encodeURIComponent(itemId)}/todos`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateItemTodo: (itemId: string, todoId: string, data: any) =>
+    fetchWithTenant(
+      `/inventory/items/${encodeURIComponent(itemId)}/todos/${encodeURIComponent(todoId)}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    ),
   adjustStock: (data: { item_id: string; delta_qty: number; reason?: string }) =>
     fetchWithTenant("/inventory/stock-adjustment", { method: "POST", body: JSON.stringify(data) }),
   calculateROP: (data: {
@@ -943,6 +971,37 @@ export const api = {
   deleteWhatsAppKnowledge: (knowledgeId: string) =>
     fetchWithTenant(`/whatsapp/knowledge/${encodeURIComponent(knowledgeId)}`, {
       method: "DELETE",
+    }),
+  uploadWhatsAppKnowledgeFile: (file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return fetchWithTenant("/whatsapp/knowledge/files", { method: "POST", body });
+  },
+  importWhatsAppKnowledgeLink: (url: string) =>
+    fetchWithTenant("/whatsapp/knowledge/links", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  getWhatsAppKnowledgeSources: () => fetchWithTenant("/whatsapp/knowledge/sources"),
+  deleteWhatsAppKnowledgeSource: (sourceId: string) =>
+    fetchWithTenant(`/whatsapp/knowledge/sources/${encodeURIComponent(sourceId)}`, {
+      method: "DELETE",
+    }),
+  getWhatsAppAirtableStatus: () => fetchWithTenant("/whatsapp/airtable/status"),
+  getWhatsAppAirtableConnectUrl: () => fetchWithTenant("/whatsapp/airtable/connect"),
+  disconnectWhatsAppAirtable: () =>
+    fetchWithTenant("/whatsapp/airtable/connect", { method: "DELETE" }),
+  getWhatsAppAirtableBases: () => fetchWithTenant("/whatsapp/airtable/bases"),
+  getWhatsAppAirtableTables: (baseId: string) =>
+    fetchWithTenant(`/whatsapp/airtable/bases/${encodeURIComponent(baseId)}/tables`),
+  importWhatsAppAirtableTable: (data: { base_id: string; table_id: string; fields: string[] }) =>
+    fetchWithTenant("/whatsapp/airtable/import", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  syncWhatsAppAirtableSource: (sourceId: string) =>
+    fetchWithTenant(`/whatsapp/airtable/sources/${encodeURIComponent(sourceId)}/sync`, {
+      method: "POST",
     }),
 
   // Serial Warranty Claims & RMA

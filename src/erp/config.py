@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     MULTI_TENANCY_ENABLED: bool = True
 
     def model_post_init(self, __context):
+        if self.WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY:
+            try:
+                encryption_key = bytes.fromhex(self.WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY)
+            except ValueError as exc:
+                raise ValueError(
+                    "WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY must contain 64 hexadecimal characters."
+                ) from exc
+            if len(encryption_key) != 32:
+                raise ValueError(
+                    "WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY must contain 64 hexadecimal characters."
+                )
         if self.ENVIRONMENT.lower() == "production":
             if self.DEBUG:
                 raise ValueError("DEBUG must be False in production environment.")
@@ -73,7 +84,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Configure a unique WHATSAPP_INTERNAL_TOKEN of at least 32 characters."
                 )
-
+            if self.AIRTABLE_CLIENT_ID and (
+                not self.AIRTABLE_CLIENT_SECRET
+                or not self.AIRTABLE_REDIRECT_URI
+                or not self.WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY
+                or len(self.WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY) != 64
+            ):
+                raise ValueError(
+                    "Airtable OAuth requires AIRTABLE_CLIENT_SECRET, AIRTABLE_REDIRECT_URI, "
+                    "and a 64-character WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY."
+                )
 
     # PostgreSQL Database
     POSTGRES_USER: str = "postgres"
@@ -136,6 +156,10 @@ class Settings(BaseSettings):
     # Baileys WhatsApp support channel
     WHATSAPP_SERVICE_URL: str | None = None
     WHATSAPP_INTERNAL_TOKEN: str | None = None
+    WHATSAPP_KNOWLEDGE_ENCRYPTION_KEY: str | None = None
+    AIRTABLE_CLIENT_ID: str | None = None
+    AIRTABLE_CLIENT_SECRET: str | None = None
+    AIRTABLE_REDIRECT_URI: str | None = None
 
     # Inbound SMTP Gateway (False by default in production web containers to prevent port conflict)
     ENABLE_SMTP_GATEWAY: bool = False

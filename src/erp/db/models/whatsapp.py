@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -142,10 +143,60 @@ class WhatsAppSupportKnowledge(Base, TenantMixin, TimestampMixin):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("whatsapp_support_knowledge_sources.source_id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    source_chunk: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         Index("idx_whatsapp_knowledge_tenant_title", "tenant_id", "title"),
+        Index("idx_whatsapp_knowledge_source", "tenant_id", "source_id"),
     )
+
+
+class WhatsAppSupportKnowledgeSource(Base, TenantMixin, TimestampMixin):
+    """Tenant-owned imported source used to build WhatsApp support knowledge."""
+
+    __tablename__ = "whatsapp_support_knowledge_sources"
+
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="READY")
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    airtable_base_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    airtable_table_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    airtable_table_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    airtable_fields: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_whatsapp_knowledge_sources_tenant", "tenant_id", "created_at"),
+        Index("idx_whatsapp_knowledge_sources_airtable", "tenant_id", "airtable_base_id", "airtable_table_id"),
+    )
+
+
+class WhatsAppAirtableConnection(Base, TimestampMixin):
+    """Encrypted Airtable OAuth tokens for one tenant."""
+
+    __tablename__ = "whatsapp_airtable_connections"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    encrypted_tokens: Mapped[str] = mapped_column(Text, nullable=False)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    connected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default="clock_timestamp()"
+    )
+    is_connected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class WhatsAppOTPChallenge(Base):

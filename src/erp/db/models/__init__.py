@@ -78,6 +78,7 @@ from erp.db.models.inventory import (
     Item,
     ItemAttribute,
     ItemAttributeValue,
+    ItemTodo,
     SerialNo,
     StockEntry,
     StockEntryItem,
@@ -202,10 +203,12 @@ from erp.db.models.support import (
 from erp.db.models.tenant import Tenant, TenantOAuthConnection
 from erp.db.models.user import User
 from erp.db.models.whatsapp import (
+    WhatsAppAirtableConnection,
     WhatsAppAuthRecord,
     WhatsAppConnection,
     WhatsAppConversation,
     WhatsAppMessage,
+    WhatsAppSupportKnowledgeSource,
     WhatsAppSupportKnowledge,
     WhatsAppOTPChallenge,
     WhatsAppSupportToolBinding,
@@ -230,6 +233,7 @@ __all__ = [
     "AgentAuditLog",
     "SemanticDocumentEmbedding",
     "Item",
+    "ItemTodo",
     "Warehouse",
     "StockLedgerEntry",
     "StockLevel",
@@ -387,5 +391,7 @@ __all__ = [
     "WhatsAppMessage",
     "WhatsAppSupportToolBinding",
     "WhatsAppSupportKnowledge",
+    "WhatsAppSupportKnowledgeSource",
+    "WhatsAppAirtableConnection",
     "WhatsAppOTPChallenge",
 ]

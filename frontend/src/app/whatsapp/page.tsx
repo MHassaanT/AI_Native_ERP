@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { BookOpen, MessageCircle, RefreshCw, Send, Smartphone, Trash2, Wifi, WifiOff } from "lucide-react";
+import { BookOpen, Database, FileUp, Globe, MessageCircle, RefreshCw, Send, Smartphone, Trash2, Wifi, WifiOff } from "lucide-react";
 import { api } from "@/lib/api";
 import { getUser } from "@/lib/auth";
 
@@ -30,6 +30,22 @@ type Message = {
 
 type ToolBinding = { name: string; description: string; enabled: boolean };
 type KnowledgeEntry = { knowledge_id: string; title: string; content: string };
+type KnowledgeSource = {
+  source_id: string;
+  source_type: "FILE" | "WEB" | "AIRTABLE";
+  name: string;
+  status: string;
+  source_url: string | null;
+  airtable_base_id: string | null;
+  airtable_table_id: string | null;
+  airtable_table_name: string | null;
+  airtable_fields: string[] | null;
+  chunk_count: number;
+  error_message: string | null;
+  created_at: string;
+};
+type AirtableBase = { id: string; name: string };
+type AirtableTable = { id: string; name: string; fields: string[] };
 
 export default function WhatsAppSupportPage() {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
@@ -39,6 +55,15 @@ export default function WhatsAppSupportPage() {
   const [issue, setIssue] = useState<{ issue_number: string; status: string } | null>(null);
   const [tools, setTools] = useState<ToolBinding[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
+  const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>([]);
+  const [knowledgeFile, setKnowledgeFile] = useState<File | null>(null);
+  const [knowledgeUrl, setKnowledgeUrl] = useState("");
+  const [airtableConnected, setAirtableConnected] = useState(false);
+  const [airtableBases, setAirtableBases] = useState<AirtableBase[]>([]);
+  const [airtableTables, setAirtableTables] = useState<AirtableTable[]>([]);
+  const [selectedAirtableBase, setSelectedAirtableBase] = useState("");
+  const [selectedAirtableTable, setSelectedAirtableTable] = useState("");
+  const [selectedAirtableFields, setSelectedAirtableFields] = useState<string[]>([]);
   const [knowledgeTitle, setKnowledgeTitle] = useState("");
   const [knowledgeContent, setKnowledgeContent] = useState("");
   const [reply, setReply] = useState("");
@@ -48,16 +73,20 @@ export default function WhatsAppSupportPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [connection, conversationData, toolData, knowledgeData] = await Promise.all([
+      const [connection, conversationData, toolData, knowledgeData, sourceData, airtableData] = await Promise.all([
         api.getWhatsAppStatus(),
         api.getWhatsAppConversations(),
         api.getWhatsAppTools(),
         api.getWhatsAppKnowledge(),
+        api.getWhatsAppKnowledgeSources(),
+        api.getWhatsAppAirtableStatus(),
       ]);
       setStatus(connection);
       setConversations(conversationData.conversations || []);
       setTools(toolData.tools || []);
       setKnowledge(knowledgeData.entries || []);
+      setKnowledgeSources(sourceData.sources || []);
+      setAirtableConnected(Boolean(airtableData.connected));
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load WhatsApp support.");
@@ -69,6 +98,14 @@ export default function WhatsAppSupportPage() {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 7000);
     return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    const result = new URLSearchParams(window.location.search).get("airtable");
+    if (!result) return;
+    setError(result === "connected" ? "" : "Airtable authorization did not complete. Check its OAuth configuration and try again.");
+    window.history.replaceState({}, "", window.location.pathname);
+    if (result === "connected") void refresh();
   }, [refresh]);
 
   useEffect(() => {
@@ -161,6 +198,148 @@ export default function WhatsAppSupportPage() {
       setKnowledge((entries) => entries.filter((entry) => entry.knowledge_id !== knowledgeId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not delete support knowledge.");
+    }
+  };
+
+  const uploadKnowledgeFile = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!knowledgeFile) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.uploadWhatsAppKnowledgeFile(knowledgeFile);
+      setKnowledgeFile(null);
+      const input = document.getElementById("whatsapp-knowledge-file") as HTMLInputElement | null;
+      if (input) input.value = "";
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not import the selected file.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importKnowledgeLink = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api.importWhatsAppKnowledgeLink(knowledgeUrl.trim());
+      setKnowledgeUrl("");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not crawl this link.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connectAirtable = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.getWhatsAppAirtableConnectUrl();
+      window.location.assign(result.authorization_url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start Airtable authorization.");
+      setBusy(false);
+    }
+  };
+
+  const disconnectAirtable = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.disconnectWhatsAppAirtable();
+      setAirtableConnected(false);
+      setAirtableBases([]);
+      setAirtableTables([]);
+      setSelectedAirtableBase("");
+      setSelectedAirtableTable("");
+      setSelectedAirtableFields([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not disconnect Airtable.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadAirtableBases = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.getWhatsAppAirtableBases();
+      setAirtableBases(result.bases || []);
+      setAirtableTables([]);
+      setSelectedAirtableBase("");
+      setSelectedAirtableTable("");
+      setSelectedAirtableFields([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load Airtable bases.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseAirtableBase = async (baseId: string) => {
+    setSelectedAirtableBase(baseId);
+    setSelectedAirtableTable("");
+    setSelectedAirtableFields([]);
+    if (!baseId) {
+      setAirtableTables([]);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.getWhatsAppAirtableTables(baseId);
+      setAirtableTables(result.tables || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load Airtable tables.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importAirtableTable = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedAirtableBase || !selectedAirtableTable || !selectedAirtableFields.length) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.importWhatsAppAirtableTable({
+        base_id: selectedAirtableBase,
+        table_id: selectedAirtableTable,
+        fields: selectedAirtableFields,
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not import the Airtable table.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncKnowledgeSource = async (sourceId: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.syncWhatsAppAirtableSource(sourceId);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not sync the Airtable table.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeKnowledgeSource = async (sourceId: string) => {
+    setError("");
+    try {
+      await api.deleteWhatsAppKnowledgeSource(sourceId);
+      setKnowledgeSources((items) => items.filter((item) => item.source_id !== sourceId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not remove the knowledge source.");
     }
   };
 
@@ -299,6 +478,110 @@ export default function WhatsAppSupportPage() {
             </div>
           ))}
           {!knowledge.length && <p className="text-sm text-cream-700">No approved support knowledge has been added yet.</p>}
+        </div>
+
+        <div className="mt-6 grid gap-5 border-t border-cream-200 pt-5 lg:grid-cols-2">
+          <form onSubmit={(event) => void uploadKnowledgeFile(event)} className="space-y-3 rounded-lg border border-cream-200 p-4">
+            <div className="flex items-center gap-2 font-semibold text-cream-950"><FileUp className="h-4 w-4" /> Import a document</div>
+            <p className="text-xs text-cream-700">PDF, DOCX, XLSX, or XLS; up to 20 MB. Files are extracted to text; the uploaded binary is not retained.</p>
+            <input
+              id="whatsapp-knowledge-file"
+              type="file"
+              accept=".pdf,.docx,.xlsx,.xls,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              onChange={(event) => setKnowledgeFile(event.target.files?.[0] || null)}
+              disabled={!isTenantAdmin || busy}
+              className="block w-full text-sm"
+            />
+            <button disabled={!isTenantAdmin || busy || !knowledgeFile} className="rounded-lg bg-cream-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Import file</button>
+          </form>
+
+          <form onSubmit={(event) => void importKnowledgeLink(event)} className="space-y-3 rounded-lg border border-cream-200 p-4">
+            <div className="flex items-center gap-2 font-semibold text-cream-950"><Globe className="h-4 w-4" /> Import a web page</div>
+            <p className="text-xs text-cream-700">Crawl one public HTTP(S) page with Crawl4AI. Internal and private-network addresses are blocked.</p>
+            <input
+              type="url"
+              value={knowledgeUrl}
+              onChange={(event) => setKnowledgeUrl(event.target.value)}
+              maxLength={2048}
+              required
+              placeholder="https://example.com/support"
+              disabled={!isTenantAdmin || busy}
+              className="w-full rounded-lg border border-cream-300 px-3 py-2 text-sm"
+            />
+            <button disabled={!isTenantAdmin || busy || !knowledgeUrl.trim()} className="rounded-lg bg-cream-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Crawl link</button>
+          </form>
+        </div>
+
+        <div className="mt-5 rounded-lg border border-cream-200 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 font-semibold text-cream-950"><Database className="h-4 w-4" /> Airtable knowledge import</div>
+              <p className="mt-1 text-xs text-cream-700">Authorize read-only access, then choose a base, table, and specific fields to import.</p>
+            </div>
+            {!airtableConnected ? (
+              <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void connectAirtable()} className="rounded-lg bg-cream-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Connect Airtable</button>
+            ) : (
+              <div className="flex gap-2">
+                <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void loadAirtableBases()} className="rounded-lg border border-cream-300 px-3 py-2 text-sm font-semibold disabled:opacity-50">Choose table</button>
+                <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void disconnectAirtable()} className="rounded-lg border border-cream-300 px-3 py-2 text-sm font-semibold disabled:opacity-50">Disconnect</button>
+              </div>
+            )}
+          </div>
+          {airtableConnected && airtableBases.length > 0 && (
+            <form onSubmit={(event) => void importAirtableTable(event)} className="mt-4 space-y-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <select value={selectedAirtableBase} onChange={(event) => void chooseAirtableBase(event.target.value)} disabled={busy} className="rounded-lg border border-cream-300 px-3 py-2 text-sm">
+                  <option value="">Select base</option>
+                  {airtableBases.map((base) => <option key={base.id} value={base.id}>{base.name}</option>)}
+                </select>
+                <select
+                  value={selectedAirtableTable}
+                  onChange={(event) => {
+                    setSelectedAirtableTable(event.target.value);
+                    setSelectedAirtableFields([]);
+                  }}
+                  disabled={!selectedAirtableBase || busy}
+                  className="rounded-lg border border-cream-300 px-3 py-2 text-sm"
+                >
+                  <option value="">Select table</option>
+                  {airtableTables.map((table) => <option key={table.id} value={table.id}>{table.name}</option>)}
+                </select>
+              </div>
+              {airtableTables.find((table) => table.id === selectedAirtableTable)?.fields.map((field) => (
+                <label key={field} className="mr-4 inline-flex items-center gap-2 text-sm text-cream-800">
+                  <input
+                    type="checkbox"
+                    checked={selectedAirtableFields.includes(field)}
+                    onChange={() => setSelectedAirtableFields((items) => items.includes(field) ? items.filter((item) => item !== field) : [...items, field])}
+                    disabled={busy}
+                  />
+                  {field}
+                </label>
+              ))}
+              <button type="submit" disabled={!isTenantAdmin || busy || !selectedAirtableTable || !selectedAirtableFields.length} className="block rounded-lg bg-cream-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Import selected fields</button>
+            </form>
+          )}
+          {airtableConnected && airtableBases.length === 0 && <p className="mt-3 text-xs text-cream-700">Use “Choose table” to load the bases you authorized.</p>}
+        </div>
+
+        <div className="mt-5">
+          <h3 className="font-semibold text-cream-950">Imported sources</h3>
+          <div className="mt-2 space-y-2">
+            {knowledgeSources.map((source) => (
+              <div key={source.source_id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-cream-200 p-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-cream-950">{source.name}</p>
+                  <p className="text-xs text-cream-700">{source.source_type} · {source.chunk_count} searchable sections · {source.status.toLowerCase()}</p>
+                  {source.error_message && <p className="text-xs text-red-700">{source.error_message}</p>}
+                </div>
+                <div className="flex gap-2">
+                  {source.source_type === "AIRTABLE" && <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void syncKnowledgeSource(source.source_id)} className="rounded-lg border border-cream-300 px-3 py-1.5 text-xs font-semibold disabled:opacity-50">Sync now</button>}
+                  {isTenantAdmin && <button type="button" disabled={busy} onClick={() => void removeKnowledgeSource(source.source_id)} aria-label={`Delete source ${source.name}`} className="rounded p-1 text-cream-600 hover:bg-red-50 hover:text-red-700"><Trash2 className="h-4 w-4" /></button>}
+                </div>
+              </div>
+            ))}
+            {!knowledgeSources.length && <p className="text-sm text-cream-700">No files, web pages, or Airtable tables have been imported yet.</p>}
+          </div>
         </div>
       </section>
 

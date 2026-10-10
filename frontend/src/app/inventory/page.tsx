@@ -19,6 +19,11 @@ import {
   Tag,
   ExternalLink,
   ChevronRight,
+  Search,
+  FileUp,
+  LayoutGrid,
+  List,
+  Columns3,
 } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -28,8 +33,13 @@ export default function InventoryPage() {
   >("catalog");
 
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [barcodeLoading, setBarcodeLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [importResult, setImportResult] = useState<any | null>(null);
+  const [catalogView, setCatalogView] = useState<"list" | "pictures" | "descriptive" | "kanban">("list");
+  const [catalogSearch, setCatalogSearch] = useState("");
 
   // Core Data
   const [items, setItems] = useState<any[]>([]);
@@ -57,9 +67,15 @@ export default function InventoryPage() {
   const [itemCode, setItemCode] = useState("");
   const [itemName, setItemName] = useState("");
   const [stockUom, setStockUom] = useState("Nos");
-  const [standardRate, setStandardRate] = useState("10.00");
-  const [initialQty, setInitialQty] = useState("100");
-  const [reorderLevel, setReorderLevel] = useState("50");
+  const [standardRate, setStandardRate] = useState("0.00");
+  const [initialQty, setInitialQty] = useState("0");
+  const [reorderLevel, setReorderLevel] = useState("0");
+  const [barcode, setBarcode] = useState("");
+  const [brand, setBrand] = useState("");
+  const [category, setCategory] = useState("");
+  const [packageQuantity, setPackageQuantity] = useState("");
+  const [description, setDescription] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
 
   // ROP State
   const [ropItemCode, setRopItemCode] = useState("");
@@ -153,6 +169,21 @@ export default function InventoryPage() {
 
   // --- Handlers ---
 
+  const resetItemForm = () => {
+    setItemCode("");
+    setItemName("");
+    setStockUom("Nos");
+    setStandardRate("0.00");
+    setInitialQty("0");
+    setReorderLevel("0");
+    setBarcode("");
+    setBrand("");
+    setCategory("");
+    setPackageQuantity("");
+    setDescription("");
+    setImageUrl("");
+  };
+
   const handleCreateItem = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -163,14 +194,60 @@ export default function InventoryPage() {
         standard_rate: parseFloat(standardRate),
         initial_qty: parseFloat(initialQty),
         reorder_level: parseFloat(reorderLevel),
+        barcode: barcode.trim() || undefined,
+        brand: brand.trim() || undefined,
+        category: category.trim() || undefined,
+        package_quantity: packageQuantity.trim() || undefined,
+        description: description.trim() || undefined,
+        image_url: imageUrl.trim() || undefined,
       });
       setShowItemModal(false);
-      setItemCode("");
-      setItemName("");
+      resetItemForm();
       showToast("Master catalog item created successfully!");
       await loadAll();
     } catch (err: any) {
       setError(err.message);
+    }
+  };
+
+  const handleBarcodeLookup = async () => {
+    if (!barcode.trim()) return;
+    setBarcodeLoading(true);
+    setError(null);
+    try {
+      const product = await api.lookupItemBarcode(barcode.trim());
+      if (product.item_name) setItemName(product.item_name);
+      if (product.brand) setBrand(product.brand);
+      if (product.category) setCategory(product.category);
+      if (product.package_quantity) setPackageQuantity(product.package_quantity);
+      if (product.description) setDescription(product.description);
+      if (product.image_url) setImageUrl(product.image_url);
+      showToast(`Product details loaded from ${product.source}. Verify before saving.`);
+    } catch (err: any) {
+      setError(err.message || "Could not find a product for this barcode.");
+    } finally {
+      setBarcodeLoading(false);
+    }
+  };
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    setError(null);
+    setImportResult(null);
+    try {
+      const result = await api.importItems(file);
+      setImportResult(result);
+      showToast(
+        `Imported ${result.created} items${result.errors.length ? `; ${result.errors.length} rows need review` : ""}.`,
+      );
+      await loadAll();
+    } catch (err: any) {
+      setError(err.message || "Could not import this file.");
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -414,6 +491,12 @@ export default function InventoryPage() {
     }
   };
 
+  const visibleItems = items.filter((item) =>
+    [item.item_code, item.item_name, item.barcode, item.brand, item.category]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(catalogSearch.toLowerCase())),
+  );
+
   return (
     <div className="space-y-6">
       {/* Toast Alert */}
@@ -560,6 +643,17 @@ export default function InventoryPage() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <label className={`flex cursor-pointer items-center gap-1.5 rounded-md border border-cream-300 bg-white px-3 py-1.5 text-xs font-medium text-cream-800 hover:bg-cream-200 ${importing ? "pointer-events-none opacity-60" : ""}`}>
+                <FileUp className="h-3.5 w-3.5" />
+                {importing ? "Importing..." : "Import CSV/XLSX"}
+                <input
+                  type="file"
+                  accept=".csv,.xlsx"
+                  className="hidden"
+                  onChange={handleImportFile}
+                  disabled={importing}
+                />
+              </label>
               <button
                 onClick={() => setShowItemModal(true)}
                 className="flex items-center gap-1.5 rounded-md bg-cream-900 px-3 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 transition-colors"
@@ -586,8 +680,53 @@ export default function InventoryPage() {
             </div>
           )}
 
+          {importResult && (
+            <div className="rounded-lg border border-cream-300 bg-white p-3 text-xs text-cream-800">
+              Import finished: <strong>{importResult.created}</strong> items created from{" "}
+              {importResult.total_rows} rows.
+              {importResult.errors?.length > 0 && (
+                <ul className="mt-2 max-h-24 list-inside list-disc overflow-y-auto text-rose-700">
+                  {importResult.errors.slice(0, 10).map((row: any, index: number) => (
+                    <li key={`${row.row}-${index}`}>Row {row.row}: {row.error}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-3 rounded-lg border border-cream-300 bg-cream-100 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <label className="relative block sm:w-72">
+              <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-cream-500" />
+              <input
+                value={catalogSearch}
+                onChange={(event) => setCatalogSearch(event.target.value)}
+                placeholder="Search SKU, product, barcode..."
+                className="w-full rounded-md border border-cream-300 bg-white py-1.5 pl-8 pr-3 text-xs"
+              />
+            </label>
+            <div className="flex flex-wrap gap-1">
+              {([
+                ["list", "List", List],
+                ["pictures", "Pictures", LayoutGrid],
+                ["descriptive", "Descriptive", Layers],
+                ["kanban", "Kanban", Columns3],
+              ] as const).map(([mode, label, Icon]) => (
+                <button
+                  key={mode}
+                  onClick={() => setCatalogView(mode)}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium ${
+                    catalogView === mode ? "bg-cream-900 text-white" : "bg-white text-cream-700 hover:bg-cream-200"
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Catalog Items Table */}
-          <div className="rounded-xl border border-cream-300 bg-cream-100 overflow-hidden shadow-xs">
+          {catalogView === "list" && <div className="rounded-xl border border-cream-300 bg-cream-100 overflow-hidden shadow-xs">
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
@@ -604,17 +743,17 @@ export default function InventoryPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-cream-200">
-                  {items.length === 0 ? (
+                  {visibleItems.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="py-8 text-center text-cream-600 text-xs">
                         No items registered in catalog.
                       </td>
                     </tr>
                   ) : (
-                    items.map((it) => (
+                    visibleItems.map((it) => (
                       <tr key={it.item_id} className="hover:bg-cream-50/50 transition-colors">
                         <td className="py-2.5 px-3 font-mono font-medium text-cream-950">
-                          {it.item_code}
+                          <a className="hover:underline" href={`/inventory/items/${it.item_id}`}>{it.item_code}</a>
                           {it.has_variants && (
                             <span className="ml-1.5 rounded bg-blue-100 px-1 py-0.2 text-[9px] font-semibold text-blue-700">
                               Template
@@ -626,7 +765,9 @@ export default function InventoryPage() {
                             </span>
                           )}
                         </td>
-                        <td className="py-2.5 px-3 text-cream-800 max-w-[200px] truncate">{it.item_name}</td>
+                        <td className="py-2.5 px-3 text-cream-800 max-w-[200px] truncate">
+                          <a className="hover:underline" href={`/inventory/items/${it.item_id}`}>{it.item_name}</a>
+                        </td>
                         <td className="py-2.5 px-3 text-cream-600 font-mono text-[11px]">{it.stock_uom}</td>
                         <td className="py-2.5 px-3 text-right font-mono font-bold text-cream-950">
                           {parseFloat(it.current_qty || 0).toLocaleString()}
@@ -653,20 +794,99 @@ export default function InventoryPage() {
                           >
                             ROP
                           </button>
+                          <a
+                            href={`/inventory/items/${it.item_id}`}
+                            className="rounded bg-blue-100 px-2 py-1 text-[10px] font-medium text-blue-800 hover:bg-blue-200 transition-colors"
+                          >
+                            Details
+                          </a>
                           <button
                             onClick={() => setShowVariantModal(it)}
-                            className="rounded bg-purple-100 px-2 py-1 text-[10px] font-medium text-purple-800 hover:bg-purple-200 transition-colors"
-                          >
-                            +Variant
-                          </button>
+                            className="ml-1 rounded bg-purple-100 px-2 py-1 text-[10px] font-medium text-purple-800 hover:bg-purple-200 transition-colors"
+                          >+Variant</button>
                         </td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
-            </div>
-          </div>
+            </div></div>}
+
+            {catalogView === "pictures" && (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {visibleItems.map((item) => (
+                  <a key={item.item_id} href={`/inventory/items/${item.item_id}`} className="overflow-hidden rounded-xl border border-cream-300 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+                    <div className="flex h-44 items-center justify-center bg-cream-200">
+                      {item.image_url ? (
+                        <img src={item.image_url} alt={item.item_name} loading="lazy" className="h-full w-full object-cover" />
+                      ) : (
+                        <Package className="h-12 w-12 text-cream-500" />
+                      )}
+                    </div>
+                    <div className="space-y-1 p-4">
+                      <div className="font-mono text-[10px] text-cream-500">{item.item_code}</div>
+                      <div className="font-semibold text-cream-900">{item.item_name}</div>
+                      <div className="flex justify-between text-xs text-cream-600">
+                        <span>{item.brand || item.category || "Uncategorized"}</span>
+                        <span>{parseFloat(item.current_qty || 0).toLocaleString()} {item.stock_uom}</span>
+                      </div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            )}
+
+            {catalogView === "descriptive" && (
+              <div className="space-y-2">
+                {visibleItems.map((item) => (
+                  <a key={item.item_id} href={`/inventory/items/${item.item_id}`} className="flex gap-4 rounded-xl border border-cream-300 bg-white p-4 transition hover:bg-cream-50">
+                    <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-cream-200">
+                      {item.image_url ? <img src={item.image_url} alt="" loading="lazy" className="h-full w-full object-cover" /> : <Package className="h-7 w-7 text-cream-500" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                        <h3 className="font-semibold text-cream-900">{item.item_name}</h3>
+                        <span className="font-mono text-[11px] text-cream-500">{item.item_code}</span>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-xs text-cream-600">{item.description || "No product description has been added."}</p>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-cream-600">
+                        <span>{item.brand || "Brand not set"}</span><span>{item.category || "No category"}</span>
+                        {item.package_quantity && <span>Pack: {item.package_quantity}</span>}
+                        <span>Barcode: {item.barcode || "Not set"}</span>
+                        <span>Available: {parseFloat(item.available_qty || 0).toLocaleString()} {item.stock_uom}</span>
+                        <span>Reorder at: {parseFloat(item.reorder_level || 0).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            )}
+
+            {catalogView === "kanban" && (
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                {([
+                  ["In stock", visibleItems.filter((item) => Number(item.current_qty) > Number(item.reorder_level))],
+                  ["Low stock", visibleItems.filter((item) => Number(item.current_qty) > 0 && Number(item.current_qty) <= Number(item.reorder_level))],
+                  ["Out of stock", visibleItems.filter((item) => Number(item.current_qty) <= 0)],
+                ] as const).map(([column, columnItems]) => (
+                  <section key={column} className="min-h-48 rounded-xl border border-cream-300 bg-cream-100 p-3">
+                    <h3 className="mb-3 flex items-center justify-between text-xs font-semibold text-cream-800">{column}<span className="rounded-full bg-cream-200 px-2 py-0.5">{columnItems.length}</span></h3>
+                    <div className="space-y-2">
+                      {columnItems.map((item) => (
+                        <a key={item.item_id} href={`/inventory/items/${item.item_id}`} className="block rounded-lg border border-cream-200 bg-white p-3 hover:border-cream-400">
+                          <div className="font-mono text-[10px] text-cream-500">{item.item_code}</div>
+                          <div className="mt-1 text-xs font-semibold text-cream-900">{item.item_name}</div>
+                          <div className="mt-2 flex justify-between text-[10px] text-cream-600">
+                            <span>{parseFloat(item.current_qty || 0).toLocaleString()} {item.stock_uom}</span>
+                            <span>${parseFloat(item.valuation_rate || 0).toFixed(2)}</span>
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
         </div>
       )}
 
@@ -1238,7 +1458,7 @@ export default function InventoryPage() {
       {/* New Item Modal */}
       {showItemModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-xl space-y-4">
+          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-xl space-y-4">
             <h3 className="text-sm font-semibold text-cream-900">Create Catalog Item</h3>
             <form onSubmit={handleCreateItem} className="space-y-3 text-xs">
               <div>
@@ -1253,6 +1473,34 @@ export default function InventoryPage() {
                 />
               </div>
               <div>
+                <label className="block text-cream-700 mb-1">External Barcode (scan or enter)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={barcode}
+                    onChange={(event) => setBarcode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void handleBarcodeLookup();
+                      }
+                    }}
+                    placeholder="EAN / UPC / GTIN"
+                    className="min-w-0 flex-1 rounded border border-cream-300 bg-white px-2.5 py-1.5 font-mono text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleBarcodeLookup}
+                    disabled={barcodeLoading || !barcode.trim()}
+                    className="flex items-center gap-1 rounded border border-cream-300 bg-white px-2.5 py-1.5 font-medium text-cream-800 disabled:opacity-50"
+                  >
+                    <Barcode className="h-3.5 w-3.5" />
+                    {barcodeLoading ? "Looking up" : "Lookup"}
+                  </button>
+                </div>
+                <p className="mt-1 text-[10px] text-cream-600">USB/Bluetooth barcode scanners type into this field. Product lookup coverage varies by category.</p>
+              </div>
+              <div>
                 <label className="block text-cream-700 mb-1">Item Name</label>
                 <input
                   type="text"
@@ -1262,6 +1510,28 @@ export default function InventoryPage() {
                   placeholder="e.g. 500W Brushless DC Motor"
                   className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs"
                 />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-cream-700 mb-1">Brand</label>
+                  <input value={brand} onChange={(event) => setBrand(event.target.value)} className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs" />
+                </div>
+                <div>
+                  <label className="block text-cream-700 mb-1">Category</label>
+                  <input value={category} onChange={(event) => setCategory(event.target.value)} className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-cream-700 mb-1">Pack size / contents</label>
+                <input value={packageQuantity} onChange={(event) => setPackageQuantity(event.target.value)} placeholder="e.g. 500 g" className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs" />
+              </div>
+              <div>
+                <label className="block text-cream-700 mb-1">Image URL</label>
+                <input type="url" value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} placeholder="https://..." className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs" />
+              </div>
+              <div>
+                <label className="block text-cream-700 mb-1">Description</label>
+                <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={2} className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs" />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -1307,7 +1577,10 @@ export default function InventoryPage() {
               <div className="flex justify-end gap-2 pt-3 border-t border-cream-200">
                 <button
                   type="button"
-                  onClick={() => setShowItemModal(false)}
+                  onClick={() => {
+                    setShowItemModal(false);
+                    resetItemForm();
+                  }}
                   className="rounded px-3 py-1.5 text-cream-700 hover:bg-cream-200 transition-colors"
                 >
                   Cancel

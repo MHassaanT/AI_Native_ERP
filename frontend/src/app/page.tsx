@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ArrowUpRight,
+  Activity,
   CheckCircle2,
   DollarSign,
   FileCheck,
@@ -127,53 +128,61 @@ export default function OverviewPage() {
   ];
 
   return (
-    <div className="space-y-8">
+    <div className="mx-auto max-w-[1600px] space-y-7">
       {/* Page Header */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between border-b border-cream-300 pb-5">
+      <div className="flex flex-col gap-4 border-b border-cream-300/80 pb-6 md:flex-row md:items-end md:justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-semibold tracking-tight text-cream-900">
-              Executive Control Center
-            </h1>
+          <div className="mb-2 flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-sage-500/20 bg-sage-50 px-2.5 py-1 text-[11px] font-medium text-sage-700">
+            <span className="h-1.5 w-1.5 rounded-full bg-sage-500" />
+            Executive overview
+            </span>
             {user?.tenant_slug && (
-              <span className="rounded bg-cream-200 px-2 py-0.5 font-mono text-[11px] text-cream-800 border border-cream-300">
-                {user.tenant_name || user.tenant_slug}
-              </span>
+            <span className="rounded-full border border-cream-300 bg-white px-2.5 py-1 text-[11px] font-medium text-cream-700">
+              {user.tenant_name || user.tenant_slug}
+            </span>
             )}
           </div>
-          <p className="text-xs text-cream-700 mt-1">
-            Real-time operational and financial overview.
+          <h1 className="text-2xl font-semibold tracking-tight text-cream-900 sm:text-[28px]">
+            Welcome back{user?.full_name ? `, ${user.full_name.split(" ")[0]}` : ""}
+            </h1>
+          <p className="mt-1.5 text-sm text-cream-700">
+            Your operational and financial health, all in one place.
           </p>
         </div>
 
         <button
           onClick={() => loadLiveData()}
           title="Refresh live metrics"
-          className="rounded-md border border-cream-300 bg-cream-100 p-1.5 text-cream-700 hover:bg-cream-200 transition-colors"
+          className="inline-flex h-10 items-center justify-center gap-2 self-start rounded-lg border border-cream-300 bg-white px-3 text-xs font-medium text-cream-700 shadow-sm transition-colors hover:bg-cream-100 md:self-auto"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          Refresh data
         </button>
       </div>
 
       {/* KPI Cards Grid - Live Data */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {kpis.map((kpi) => {
           const Icon = kpi.icon;
           return (
             <div
-              key={kpi.title}
-              className="rounded-lg border border-cream-300 bg-cream-100 p-4 shadow-xs transition-hover hover:border-cream-400"
+            key={kpi.title}
+            className="group rounded-2xl border border-cream-300/80 bg-white p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-sage-500/30 hover:shadow-md sm:p-6"
             >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-cream-700">{kpi.title}</span>
-                <Icon className="h-4 w-4 text-cream-700" />
-              </div>
-              <div className="mt-3 font-mono text-2xl font-bold tracking-tight text-cream-900">
-                {kpi.value}
-              </div>
-              <div className="mt-1 text-[11px] text-sage-700 font-medium">
-                {kpi.change}
-              </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[13px] font-medium text-cream-700">{kpi.title}</span>
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-sage-50 text-sage-600 transition-colors group-hover:bg-sage-100">
+                <Icon className="h-[18px] w-[18px]" />
+              </span>
+            </div>
+            <div className="mt-5 font-mono text-[30px] font-semibold leading-none tracking-tight text-cream-900">
+              {kpi.value}
+            </div>
+            <div className="mt-3 flex items-center gap-2 text-xs text-cream-600">
+              <span className="h-1.5 w-1.5 rounded-full bg-sage-500" />
+              {kpi.change}
+            </div>
             </div>
           );
         })}
@@ -183,51 +192,69 @@ export default function OverviewPage() {
       <ModuleOnboardingWidget />
 
       {/* Two Column Section */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="rounded-lg border border-cream-300 bg-cream-100 p-5 shadow-xs lg:col-span-2">
-          <div className="flex items-center justify-between border-b border-cream-300 pb-3">
-            <div>
-              <h2 className="text-sm font-semibold text-cream-900">Workflow Runs</h2>
-              <p className="text-[11px] text-cream-700">Inspect workflow history and recover interrupted tasks.</p>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+        <div className="rounded-2xl border border-cream-300/80 bg-white p-5 shadow-sm sm:p-6 xl:col-span-2">
+          <div className="flex items-center justify-between border-b border-cream-200 pb-4">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sage-50 text-sage-600">
+                <Activity className="h-5 w-5" />
+              </span>
+              <div>
+                <h2 className="text-[15px] font-semibold text-cream-900">Workflow activity</h2>
+                <p className="mt-1 text-xs text-cream-600">Monitor runs and recover interrupted tasks.</p>
+              </div>
             </div>
             <Link
               href="/workflows"
-              className="text-[11px] font-mono text-cream-800 hover:text-cream-900 underline flex items-center gap-1"
+              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 text-xs font-medium text-sage-700 transition-colors hover:bg-sage-50"
             >
-              <span>View workflows</span>
-              <ArrowUpRight className="h-3 w-3" />
+              View workflows
+              <ArrowUpRight className="h-3.5 w-3.5" />
             </Link>
           </div>
-          <p className="mt-4 text-sm text-cream-700">
-            Durable workflow records remain available here without scheduled autonomous supervisors.
-          </p>
+          <div className="flex min-h-44 flex-col items-center justify-center px-4 py-8 text-center">
+            <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-cream-100 text-cream-600">
+              <Activity className="h-5 w-5" />
+            </span>
+            <p className="text-sm font-medium text-cream-800">Your workflow history is ready</p>
+            <p className="mt-1 max-w-sm text-xs leading-5 text-cream-600">
+              Durable workflow records are available to inspect and recover from the workflow workspace.
+            </p>
+          </div>
         </div>
 
         {/* Priority Conflict Engine Card */}
-        <div className="rounded-lg border border-cream-300 bg-cream-100 p-5 shadow-xs">
-          <h2 className="text-sm font-semibold text-cream-900">Conflict Hierarchy</h2>
-          <p className="text-[11px] text-cream-700 mt-0.5">Strict non-commutative partial order</p>
+        <div className="rounded-2xl border border-cream-300/80 bg-white p-5 shadow-sm sm:p-6">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-[15px] font-semibold text-cream-900">Conflict hierarchy</h2>
+              <p className="mt-1 text-xs text-cream-600">Priorities enforced by the decision engine</p>
+            </div>
+            <span className="rounded-full border border-sage-500/20 bg-sage-50 px-2 py-1 text-[10px] font-medium text-sage-700">
+              Active
+            </span>
+          </div>
 
-          <div className="mt-4 space-y-2 font-mono text-xs">
-            <div className="rounded border border-sage-100 bg-sage-50 p-2 text-sage-700 flex justify-between">
+          <div className="mt-5 space-y-2">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-sage-500/15 bg-sage-50 px-3 py-2.5 text-xs text-sage-700">
               <span>1. P_Statutory_Legal</span>
-              <span className="text-[10px]">Dominant</span>
+              <span className="text-[10px] font-medium">Dominant</span>
             </div>
-            <div className="rounded border border-cream-300 bg-cream-50 p-2 text-cream-800 flex justify-between">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
               <span>2. P_Financial_Solvency</span>
-              <span className="text-[10px]">Covenant</span>
+              <span className="text-[10px] text-cream-600">Covenant</span>
             </div>
-            <div className="rounded border border-cream-300 bg-cream-50 p-2 text-cream-800 flex justify-between">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
               <span>3. P_Contractual_SLA</span>
-              <span className="text-[10px]">Customer</span>
+              <span className="text-[10px] text-cream-600">Customer</span>
             </div>
-            <div className="rounded border border-cream-300 bg-cream-50 p-2 text-cream-800 flex justify-between">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
               <span>4. P_Capacity_Throughput</span>
-              <span className="text-[10px]">Shop Floor</span>
+              <span className="text-[10px] text-cream-600">Shop Floor</span>
             </div>
-            <div className="rounded border border-cream-300 bg-cream-50 p-2 text-cream-800 flex justify-between">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
               <span>5. P_Discretionary_Cost</span>
-              <span className="text-[10px]">Subordinate</span>
+              <span className="text-[10px] text-cream-600">Subordinate</span>
             </div>
           </div>
         </div>
