@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -26,7 +27,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -145,6 +146,33 @@ def _oauth_frontend_origin(request: Request, allowed_origins: set[str]) -> str |
     except ValueError:
         return None
     return referer_origin if referer_origin in allowed_origins else None
+
+
+def _airtable_oauth_popup_response(frontend_origin: str, result: str) -> HTMLResponse:
+    message = json.dumps(
+        {"type": "airtable-oauth", "result": result},
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    target_origin = json.dumps(frontend_origin).replace("<", "\\u003c")
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Airtable connection</title></head>
+  <body>
+    <p id="status">Airtable authorization finished. This window should close automatically.</p>
+    <script>
+      if (window.opener) {{
+        window.opener.postMessage({message}, {target_origin});
+        setTimeout(() => window.close(), 1200);
+      }} else {{
+        document.getElementById("status").textContent =
+          "Authorization finished, but the original ERP window was not found. Close this window and refresh the WhatsApp page.";
+      }}
+    </script>
+  </body>
+</html>""",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _serialize_knowledge_source(source: WhatsAppSupportKnowledgeSource) -> dict[str, Any]:
@@ -763,6 +791,7 @@ async def connect_whatsapp_airtable(
     return {"authorization_url": f"https://airtable.com/oauth2/v1/authorize?{query}"}
 
 
+@router.get("/callback", include_in_schema=False)
 @router.get("/airtable/callback", include_in_schema=False)
 async def whatsapp_airtable_oauth_callback(
     db: DbSessionDep,
@@ -778,11 +807,10 @@ async def whatsapp_airtable_oauth_callback(
         )
     except KnowledgeImportError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return_url = f"{payload['frontend_origin']}/whatsapp"
     if error or not code:
-        return RedirectResponse(f"{return_url}?airtable=error", status_code=303)
+        return _airtable_oauth_popup_response(payload["frontend_origin"], "error")
     if not settings.AIRTABLE_CLIENT_ID or not settings.AIRTABLE_CLIENT_SECRET:
-        return RedirectResponse(f"{return_url}?airtable=not-configured", status_code=303)
+        return _airtable_oauth_popup_response(payload["frontend_origin"], "not-configured")
     try:
         tokens = await exchange_airtable_code(code, payload["verifier"])
         if not isinstance(tokens.get("access_token"), str) or not tokens["access_token"]:
@@ -810,10 +838,10 @@ async def whatsapp_airtable_oauth_callback(
             connection.is_connected = True
             connection.connected_at = datetime.now(UTC)
         await db.flush()
-        return RedirectResponse(f"{return_url}?airtable=connected", status_code=303)
+        return _airtable_oauth_popup_response(payload["frontend_origin"], "connected")
     except KnowledgeImportError:
         logger.warning("Airtable OAuth callback failed to complete token exchange.")
-        return RedirectResponse(f"{return_url}?airtable=error", status_code=303)
+        return _airtable_oauth_popup_response(payload["frontend_origin"], "error")
 
 
 @router.delete("/airtable/connect", status_code=status.HTTP_204_NO_CONTENT)

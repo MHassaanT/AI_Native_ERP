@@ -17,6 +17,7 @@ from erp.ai.whatsapp_support_agent import (
 from erp.api.routes import whatsapp as whatsapp_routes
 from erp.api.routes.whatsapp import (
     WhatsAppInboundRequest,
+    _airtable_oauth_popup_response,
     _oauth_frontend_origin,
     _require_internal_token,
     process_whatsapp_inbound,
@@ -87,6 +88,23 @@ def test_airtable_oauth_rejects_unapproved_origin_without_referer_fallback():
     )
 
     assert _oauth_frontend_origin(request, {"https://erp.example.com"}) is None
+
+
+def test_airtable_oauth_callback_supports_configured_callback_paths():
+    paths = {route.path for route in whatsapp_routes.router.routes}
+
+    assert "/whatsapp/callback" in paths
+    assert "/whatsapp/airtable/callback" in paths
+
+
+def test_airtable_oauth_popup_posts_to_only_the_allowlisted_frontend():
+    response = _airtable_oauth_popup_response("https://erp.example.com", "connected")
+
+    assert response.status_code == 200
+    assert "window.opener.postMessage" in response.body.decode()
+    assert '"https://erp.example.com"' in response.body.decode()
+    assert "'*'" not in response.body.decode()
+    assert "window.close()" in response.body.decode()
 
 
 @pytest.mark.asyncio

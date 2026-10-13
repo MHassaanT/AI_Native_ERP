@@ -73,6 +73,7 @@ export default function WhatsAppSupportPage() {
   const [error, setError] = useState("");
   const messageListRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
+  const airtablePopupMonitorRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -113,6 +114,39 @@ export default function WhatsAppSupportPage() {
     );
     window.history.replaceState({}, "", window.location.pathname);
     if (result === "connected") void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const handleAirtableOAuthMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== "airtable-oauth") return;
+
+      if (airtablePopupMonitorRef.current !== null) {
+        window.clearInterval(airtablePopupMonitorRef.current);
+        airtablePopupMonitorRef.current = null;
+      }
+      const result = event.data.result;
+      if (result === "connected") {
+        setAirtableError("");
+        setAirtableConnected(true);
+        void refresh();
+      } else {
+        setAirtableError(
+          result === "not-configured"
+            ? "Airtable OAuth is not configured on the ERP backend."
+            : "Airtable authorization did not complete. Check the OAuth settings and try again.",
+        );
+      }
+      setBusy(false);
+    };
+
+    window.addEventListener("message", handleAirtableOAuthMessage);
+    return () => {
+      window.removeEventListener("message", handleAirtableOAuthMessage);
+      if (airtablePopupMonitorRef.current !== null) {
+        window.clearInterval(airtablePopupMonitorRef.current);
+      }
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -250,12 +284,36 @@ export default function WhatsAppSupportPage() {
   };
 
   const connectAirtable = async () => {
+    const width = 600;
+    const height = 720;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+    const popup = window.open(
+      "about:blank",
+      "airtable-oauth",
+      `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`,
+    );
+    if (!popup) {
+      setAirtableError("Your browser blocked the Airtable popup. Allow popups for this ERP site and try again.");
+      return;
+    }
+
     setBusy(true);
     setAirtableError("");
     try {
       const result = await api.getWhatsAppAirtableConnectUrl();
-      window.location.assign(result.authorization_url);
+      popup.location.href = result.authorization_url;
+      airtablePopupMonitorRef.current = window.setInterval(() => {
+        if (!popup.closed) return;
+        if (airtablePopupMonitorRef.current !== null) {
+          window.clearInterval(airtablePopupMonitorRef.current);
+          airtablePopupMonitorRef.current = null;
+        }
+        setBusy(false);
+        setAirtableError("The Airtable authorization window was closed before completing.");
+      }, 500);
     } catch (err) {
+      popup.close();
       setAirtableError(err instanceof Error ? err.message : "Could not start Airtable authorization.");
       setBusy(false);
     }
