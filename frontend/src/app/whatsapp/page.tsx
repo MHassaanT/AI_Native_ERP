@@ -64,6 +64,7 @@ export default function WhatsAppSupportPage() {
   const [selectedAirtableBase, setSelectedAirtableBase] = useState("");
   const [selectedAirtableTable, setSelectedAirtableTable] = useState("");
   const [selectedAirtableFields, setSelectedAirtableFields] = useState<string[]>([]);
+  const [airtableError, setAirtableError] = useState("");
   const [knowledgeTitle, setKnowledgeTitle] = useState("");
   const [knowledgeContent, setKnowledgeContent] = useState("");
   const [reply, setReply] = useState("");
@@ -105,7 +106,11 @@ export default function WhatsAppSupportPage() {
   useEffect(() => {
     const result = new URLSearchParams(window.location.search).get("airtable");
     if (!result) return;
-    setError(result === "connected" ? "" : "Airtable authorization did not complete. Check its OAuth configuration and try again.");
+    setAirtableError(
+      result === "connected"
+        ? ""
+        : "Airtable authorization did not complete. Check the backend OAuth configuration and try again.",
+    );
     window.history.replaceState({}, "", window.location.pathname);
     if (result === "connected") void refresh();
   }, [refresh]);
@@ -246,12 +251,12 @@ export default function WhatsAppSupportPage() {
 
   const connectAirtable = async () => {
     setBusy(true);
-    setError("");
+    setAirtableError("");
     try {
       const result = await api.getWhatsAppAirtableConnectUrl();
       window.location.assign(result.authorization_url);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start Airtable authorization.");
+      setAirtableError(err instanceof Error ? err.message : "Could not start Airtable authorization.");
       setBusy(false);
     }
   };
@@ -529,7 +534,7 @@ export default function WhatsAppSupportPage() {
               <p className="mt-1 text-xs text-cream-700">Authorize read-only access, then choose a base, table, and specific fields to import.</p>
             </div>
             {!airtableConnected ? (
-              <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void connectAirtable()} className="rounded-lg bg-cream-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Connect Airtable</button>
+              <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void connectAirtable()} className="rounded-lg bg-cream-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Connecting..." : "Connect Airtable"}</button>
             ) : (
               <div className="flex gap-2">
                 <button type="button" disabled={!isTenantAdmin || busy} onClick={() => void loadAirtableBases()} className="rounded-lg border border-cream-300 px-3 py-2 text-sm font-semibold disabled:opacity-50">Choose table</button>
@@ -537,6 +542,7 @@ export default function WhatsAppSupportPage() {
               </div>
             )}
           </div>
+          {airtableError && <p role="alert" className="mt-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">{airtableError}</p>}
           {airtableConnected && airtableBases.length > 0 && (
             <form onSubmit={(event) => void importAirtableTable(event)} className="mt-4 space-y-4">
               <div className="grid gap-3 md:grid-cols-2">

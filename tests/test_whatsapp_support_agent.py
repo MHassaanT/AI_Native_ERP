@@ -4,7 +4,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from erp.ai.whatsapp_support_agent import (
     DEFAULT_TOOLS,
@@ -17,6 +17,7 @@ from erp.ai.whatsapp_support_agent import (
 from erp.api.routes import whatsapp as whatsapp_routes
 from erp.api.routes.whatsapp import (
     WhatsAppInboundRequest,
+    _oauth_frontend_origin,
     _require_internal_token,
     process_whatsapp_inbound,
 )
@@ -59,6 +60,33 @@ async def test_internal_whatsapp_endpoint_requires_shared_token(monkeypatch):
     assert exc.value.status_code == 401
 
     await _require_internal_token("a-long-internal-test-token")
+
+
+def test_airtable_oauth_origin_uses_allowlisted_referer_when_origin_is_missing():
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"referer", b"https://erp.example.com/whatsapp"),
+            ],
+        }
+    )
+
+    assert _oauth_frontend_origin(request, {"https://erp.example.com"}) == "https://erp.example.com"
+
+
+def test_airtable_oauth_rejects_unapproved_origin_without_referer_fallback():
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"origin", b"https://untrusted.example.com"),
+                (b"referer", b"https://erp.example.com/whatsapp"),
+            ],
+        }
+    )
+
+    assert _oauth_frontend_origin(request, {"https://erp.example.com"}) is None
 
 
 @pytest.mark.asyncio

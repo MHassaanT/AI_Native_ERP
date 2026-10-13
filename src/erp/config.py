@@ -1,12 +1,14 @@
 """Configuration settings for AI-Native Multi-Agent ERP."""
 
+import json
 import uuid
 import warnings
 from decimal import Decimal
+from typing import Annotated
 from urllib.parse import unquote, urlsplit
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -26,9 +28,29 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     WEBHOOK_SIGNING_SECRET: str = "whsec_dev_ai_erp_2026"
-    CORS_ALLOWED_ORIGINS: list[str] = Field(default_factory=list)
+    CORS_ALLOWED_ORIGINS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ENABLE_OUTBOX_DISPATCHER: bool = False
     OUTBOX_DISPATCHER_POLL_SECONDS: int = Field(default=2, ge=1, le=300)
+
+    @field_validator("CORS_ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_allowed_origins(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+            if raw_value.startswith("["):
+                try:
+                    value = json.loads(raw_value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "CORS_ALLOWED_ORIGINS must be a URL or a JSON array of URLs."
+                    ) from exc
+            else:
+                value = raw_value.split(",")
+        if not isinstance(value, list) or any(not isinstance(origin, str) for origin in value):
+            raise ValueError("CORS_ALLOWED_ORIGINS must be a URL or a list of URLs.")
+        return [origin.strip().rstrip("/") for origin in value if origin.strip()]
 
     # Multi-Tenancy (Priority invariant)
     DEFAULT_TENANT_ID: uuid.UUID = Field(

@@ -12,7 +12,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import (
@@ -125,6 +125,26 @@ class WhatsAppAirtableImportRequest(BaseModel):
     base_id: str = Field(min_length=4, max_length=64, pattern=r"^app[A-Za-z0-9]+$")
     table_id: str = Field(min_length=4, max_length=64, pattern=r"^tbl[A-Za-z0-9]+$")
     fields: list[str] = Field(min_length=1, max_length=50)
+
+
+def _oauth_frontend_origin(request: Request, allowed_origins: set[str]) -> str | None:
+    origin = request.headers.get("origin", "").rstrip("/")
+    if origin:
+        return origin if origin in allowed_origins else None
+
+    referer = request.headers.get("referer")
+    if not referer:
+        return None
+    try:
+        parsed = urlsplit(referer)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        referer_origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    except ValueError:
+        return None
+    return referer_origin if referer_origin in allowed_origins else None
 
 
 def _serialize_knowledge_source(source: WhatsAppSupportKnowledgeSource) -> dict[str, Any]:
@@ -711,10 +731,16 @@ async def connect_whatsapp_airtable(
         raise HTTPException(status_code=503, detail="Airtable OAuth is not configured.")
     if not settings.AIRTABLE_REDIRECT_URI:
         raise HTTPException(status_code=503, detail="AIRTABLE_REDIRECT_URI is not configured.")
-    frontend_origin = request.headers.get("origin", "").rstrip("/")
     allowed_origins = {origin.rstrip("/") for origin in settings.CORS_ALLOWED_ORIGINS}
-    if not frontend_origin or frontend_origin not in allowed_origins:
-        raise HTTPException(status_code=400, detail="The frontend origin is not allowed for OAuth.")
+    frontend_origin = _oauth_frontend_origin(request, allowed_origins)
+    if not frontend_origin:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The frontend origin is not in CORS_ALLOWED_ORIGINS. Add the exact deployed "
+                "frontend origin, including https:// and any non-default port."
+            ),
+        )
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
     try:
         state = make_airtable_oauth_state(str(tenant_id), frontend_origin, verifier)

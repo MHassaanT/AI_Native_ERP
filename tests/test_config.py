@@ -27,3 +27,36 @@ def test_production_rejects_wildcard_cors_origin(
 ) -> None:
     with pytest.raises(ValueError, match="must not contain a wildcard"):
         Settings(**production_settings, CORS_ALLOWED_ORIGINS=["*"])
+
+
+def test_cors_origins_accepts_a_single_plain_origin(
+    production_settings: dict[str, object],
+) -> None:
+    settings = Settings(
+        **production_settings,
+        CORS_ALLOWED_ORIGINS="https://ai-native-erp-rho.vercel.app",
+    )
+
+    assert settings.CORS_ALLOWED_ORIGINS == ["https://ai-native-erp-rho.vercel.app"]
+
+
+def test_cors_origins_accepts_json_and_comma_separated_lists(
+    production_settings: dict[str, object],
+) -> None:
+    json_settings = Settings(
+        **production_settings,
+        CORS_ALLOWED_ORIGINS='["https://erp.example.com/", "https://admin.example.com"]',
+    )
+    comma_settings = Settings(
+        **production_settings,
+        CORS_ALLOWED_ORIGINS="https://erp.example.com, https://admin.example.com",
+    )
+
+    assert json_settings.CORS_ALLOWED_ORIGINS == [
+        "https://erp.example.com",
+        "https://admin.example.com",
+    ]
+    assert comma_settings.CORS_ALLOWED_ORIGINS == [
+        "https://erp.example.com",
+        "https://admin.example.com",
+    ]
