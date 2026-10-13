@@ -1,5 +1,6 @@
 """Tests for WhatsApp support agent tool exposure and OTP handling primitives."""
 
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -8,12 +9,19 @@ from fastapi import HTTPException
 from erp.ai.whatsapp_support_agent import (
     DEFAULT_TOOLS,
     TOOL_DEFINITIONS,
+    WhatsAppAgentProviderError,
     _configured_tools,
     _normalize_phone,
     _otp_digest,
 )
-from erp.api.routes.whatsapp import _require_internal_token
+from erp.api.routes import whatsapp as whatsapp_routes
+from erp.api.routes.whatsapp import (
+    WhatsAppInboundRequest,
+    _require_internal_token,
+    process_whatsapp_inbound,
+)
 from erp.config import settings
+from erp.db.models.whatsapp import WhatsAppConversation, WhatsAppMessage
 
 
 def test_support_tools_default_to_registered_support_actions():
@@ -51,3 +59,72 @@ async def test_internal_whatsapp_endpoint_requires_shared_token(monkeypatch):
     assert exc.value.status_code == 401
 
     await _require_internal_token("a-long-internal-test-token")
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_persists_inbound_and_fallback_reply(monkeypatch, tenant_id):
+    conversation = WhatsAppConversation(
+        conversation_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        phone_number="14155550123",
+        status="ACTIVE",
+    )
+
+    class Result:
+        def __init__(self, one=None, many=None):
+            self.one = one
+            self.many = many or []
+
+        def scalar_one(self):
+            return self.one
+
+        def scalar_one_or_none(self):
+            return self.one
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.many
+
+    class FakeSession:
+        def __init__(self):
+            self.execute_results = iter(
+                [Result(), Result(one=conversation), Result(), Result(many=[])]
+            )
+            self.added = []
+
+        async def execute(self, _statement):
+            return next(self.execute_results)
+
+        def add(self, instance):
+            if isinstance(instance, WhatsAppMessage) and instance.message_id is None:
+                instance.message_id = uuid.uuid4()
+            self.added.append(instance)
+
+        async def flush(self):
+            return None
+
+    async def fail_support_turn(**_kwargs):
+        raise WhatsAppAgentProviderError("LLM provider request failed (ReadTimeout).")
+
+    monkeypatch.setattr(whatsapp_routes, "run_whatsapp_support_turn", fail_support_turn)
+    session = FakeSession()
+    response = await process_whatsapp_inbound(
+        WhatsAppInboundRequest(
+            tenant_id=tenant_id,
+            provider_message_id="wamid-inbound-timeout",
+            phone_number="14155550123",
+            text="What is the latest update?",
+        ),
+        session,
+    )
+
+    inbound, outbound = session.added
+    assert inbound.direction == "INBOUND"
+    assert inbound.content == "What is the latest update?"
+    assert outbound.direction == "OUTBOUND"
+    assert outbound.content == response["answer"]
+    assert outbound.metadata_json["reply_to_provider_message_id"] == "wamid-inbound-timeout"
+    assert response["should_send"] is True
+    assert response["answer"] == whatsapp_routes.SUPPORT_UNAVAILABLE_REPLY

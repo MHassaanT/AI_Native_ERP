@@ -75,6 +75,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Support"])
 internal_router = APIRouter(prefix="/internal/whatsapp", tags=["Internal WhatsApp"])
 tenant_admin_dep = require_roles("TENANT_ADMIN")
+SUPPORT_UNAVAILABLE_REPLY = (
+    "We received your WhatsApp message, but support is temporarily unavailable. "
+    "Please try again shortly."
+)
 
 
 class WhatsAppToolBindingsRequest(BaseModel):
@@ -1039,10 +1043,14 @@ async def process_whatsapp_inbound(payload: WhatsAppInboundRequest, db: DbSessio
             inbound_text=payload.text.strip(),
             history=history,
         )
-    except WhatsAppAgentConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except WhatsAppAgentProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (WhatsAppAgentConfigurationError, WhatsAppAgentProviderError) as exc:
+        logger.warning(
+            "WhatsApp support could not generate a reply for tenant %s: %s",
+            payload.tenant_id,
+            exc,
+        )
+        answer = SUPPORT_UNAVAILABLE_REPLY
+        handoff = False
 
     outbound = WhatsAppMessage(
         tenant_id=payload.tenant_id,

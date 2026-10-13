@@ -50,7 +50,7 @@ class ConnectionManager {
         'x-internal-token': this.internalToken,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(180000),
     });
     if (!response.ok) {
       throw new Error(`ERP WhatsApp endpoint returned HTTP ${response.status}.`);

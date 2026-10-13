@@ -31,6 +31,8 @@ from erp.workflows.support import issue_service
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS_PER_TURN = 5
+LLM_REQUEST_TIMEOUT_SECONDS = 25.0
+LLM_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_TOOLS = (
     "create_support_issue",
     "get_my_support_issues",
@@ -501,7 +503,12 @@ async def _invoke_model(messages: list[dict[str, Any]], tools: list[str]) -> dic
         request_body["tool_choice"] = "auto"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                LLM_REQUEST_TIMEOUT_SECONDS,
+                connect=LLM_CONNECT_TIMEOUT_SECONDS,
+            )
+        ) as client:
             response = await client.post(
                 url,
                 headers={"Authorization": f"Bearer {api_key}"},
