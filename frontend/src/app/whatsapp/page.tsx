@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BookOpen, Database, FileUp, Globe, MessageCircle, RefreshCw, Send, Smartphone, Trash2, Wifi, WifiOff } from "lucide-react";
 import { api } from "@/lib/api";
 import { getUser } from "@/lib/auth";
@@ -70,6 +70,8 @@ export default function WhatsAppSupportPage() {
   const [busy, setBusy] = useState(false);
   const [isTenantAdmin, setIsTenantAdmin] = useState(false);
   const [error, setError] = useState("");
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
@@ -114,6 +116,7 @@ export default function WhatsAppSupportPage() {
       setIssue(null);
       return;
     }
+    shouldAutoScrollRef.current = true;
     let active = true;
     const load = async () => {
       try {
@@ -133,6 +136,13 @@ export default function WhatsAppSupportPage() {
       window.clearInterval(timer);
     };
   }, [selectedId]);
+
+  useEffect(() => {
+    const messageList = messageListRef.current;
+    if (messageList && shouldAutoScrollRef.current) {
+      messageList.scrollTop = messageList.scrollHeight;
+    }
+  }, [messages, selectedId]);
 
   const runConnectionAction = async (action: "connect" | "disconnect") => {
     setBusy(true);
@@ -585,18 +595,21 @@ export default function WhatsAppSupportPage() {
         </div>
       </section>
 
-      <section className="grid min-h-[520px] gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="overflow-hidden rounded-xl border border-cream-300 bg-white shadow-sm">
+      <section className="grid gap-5 lg:h-[min(70vh,720px)] lg:min-h-[420px] lg:grid-rows-1 lg:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="flex min-h-[360px] flex-col overflow-hidden rounded-xl border border-cream-300 bg-white shadow-sm lg:h-full lg:min-h-0">
           <div className="border-b border-cream-200 p-4">
             <h2 className="font-semibold text-cream-950">Conversations</h2>
             <p className="text-xs text-cream-700">{conversations.length} recent conversations</p>
           </div>
-          <div className="max-h-[470px] divide-y divide-cream-200 overflow-auto">
+          <div className="min-h-0 flex-1 divide-y divide-cream-200 overflow-y-auto">
             {conversations.map((conversation) => (
               <button
                 key={conversation.conversation_id}
                 type="button"
-                onClick={() => setSelectedId(conversation.conversation_id)}
+                onClick={() => {
+                  shouldAutoScrollRef.current = true;
+                  setSelectedId(conversation.conversation_id);
+                }}
                 className={`w-full p-4 text-left hover:bg-cream-50 ${selectedId === conversation.conversation_id ? "bg-cream-100" : ""}`}
               >
                 <span className="block truncate text-sm font-semibold text-cream-950">{conversation.contact_name || conversation.phone_number}</span>
@@ -608,12 +621,20 @@ export default function WhatsAppSupportPage() {
           </div>
         </div>
 
-        <div className="flex min-h-[520px] flex-col rounded-xl border border-cream-300 bg-white shadow-sm">
+        <div className="flex min-h-[420px] flex-col rounded-xl border border-cream-300 bg-white shadow-sm lg:h-full lg:min-h-0">
           <div className="border-b border-cream-200 p-4">
             <h2 className="font-semibold text-cream-950">Conversation thread</h2>
             {issue && <p className="mt-1 text-xs text-amber-800">Support issue {issue.issue_number} · {issue.status}</p>}
           </div>
-          <div className="flex-1 space-y-3 overflow-auto bg-cream-50/60 p-4">
+          <div
+            ref={messageListRef}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              shouldAutoScrollRef.current =
+                element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+            }}
+            className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-cream-50/60 p-4"
+          >
             {!selectedId && <p className="text-sm text-cream-700">Select a conversation to view its messages.</p>}
             {messages.map((message) => (
               <div key={message.message_id} className={`max-w-[85%] rounded-xl p-3 text-sm ${message.direction === "OUTBOUND" ? "ml-auto bg-green-100 text-cream-950" : "bg-white text-cream-950 shadow-sm"}`}>
