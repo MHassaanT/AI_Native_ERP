@@ -48,6 +48,7 @@ from erp.events.email_gateway import email_gateway
 from erp.events.producer import event_producer
 from erp.events.dispatcher import OutboxDispatcher
 from erp.orchestration.persistence import mark_interrupted_dags_for_recovery
+from erp.workforce.hr_agent_engine import start_hr_autonomous_engine
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,16 @@ async def lifespan(app: FastAPI):
         app.state.outbox_dispatcher_status = "disabled_by_configuration"
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.start()
+    # Start Autonomous HR Agent Engine (60s Gmail polling loop)
+    hr_agent_stop = asyncio.Event()
+    hr_agent_task = asyncio.create_task(
+        start_hr_autonomous_engine(hr_agent_stop), name="autonomous-hr-agent"
+    )
+    app.state.hr_agent_enabled = True
     yield
     # Graceful shutdown
+    hr_agent_stop.set()
+    await hr_agent_task
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.stop()
     if outbox_task:

@@ -45,6 +45,25 @@ class ApplicationEmailAnalysis(BaseModel):
     evidence: list[EvidenceQuote] = Field(max_length=20)
 
 
+class HREmailClassificationResult(BaseModel):
+    email_type: str = Field(pattern="^(job_application|project_update|other)$")
+    matched_role_id: str | None = None
+    applicant_name: str | None = None
+    desired_role: str | None = None
+    matched_project_id: str | None = None
+    project_name: str | None = None
+    progress_pct: int | None = Field(default=None, ge=0, le=100)
+    notes: str | None = None
+    blockers: str | None = None
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    reasoning: str = ""
+
+
+class EmailDraft(BaseModel):
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=12000)
+
+
 class ScreeningServiceError(Exception):
     """Base error for HR screening model failures."""
 
@@ -358,3 +377,222 @@ Interview details supplied by the recruiter:
         raise ScreeningResponseError(
             "HR screening model returned an invalid interview draft."
         ) from exc
+
+
+async def classify_hr_and_project_email(
+    *,
+    subject: str,
+    sender: str,
+    body_text: str,
+    resume_text: str = "",
+    roles: list[dict[str, Any]],
+    projects: list[dict[str, Any]],
+) -> HREmailClassificationResult:
+    """Classifies an incoming email as a job application, project status update, or other."""
+    roles_summary = "\n".join([
+        f"- Role ID: {r.get('role_id') or r.get('id')} | Title: {r.get('title') or 'Untitled'} | Requirements: {(r.get('requirements') or '')[:150]}"
+        for r in roles
+    ]) if roles else "No open roles currently available."
+
+    projects_summary = "\n".join([
+        f"- Project ID: {p.get('project_id') or p.get('id')} | Name: {p.get('project_name') or p.get('name') or 'Unnamed'} | Progress: {p.get('percent_complete') or p.get('current_progress') or 0}%"
+        for p in projects
+    ]) if projects else "No active projects currently."
+
+    prompt = f"""You are an HR & Project Operations email classifier. Analyze this incoming email and determine its type.
+
+Email Details:
+- Subject: {subject[:998]}
+- From: {_remove_contact_details(sender[:320])}
+- Body:
+{_remove_contact_details(body_text[:3000])}
+
+Resume/CV Text (if available):
+{_remove_contact_details(resume_text[:2000]) if resume_text else 'No resume text extracted.'}
+
+Currently Open Job Roles:
+{roles_summary}
+
+Active Company Projects:
+{projects_summary}
+
+Determine if this email is:
+1. "job_application": An applicant applying for a job, submitting a CV/resume, or inquiring about an open role.
+2. "project_update": A status update, progress report, completion percentage update, or reply regarding an active company project.
+3. "other": General business email, newsletter, spam, or unrelated query.
+
+Respond with ONLY a valid JSON object:
+{{
+  "email_type": "job_application" | "project_update" | "other",
+  "matched_role_id": "role_id from the list if matching, else null",
+  "applicant_name": "extracted candidate name or null",
+  "desired_role": "role title they are applying for or null",
+  "matched_project_id": "project_id from the list if matching, else null",
+  "project_name": "project name or null",
+  "progress_pct": integer 0-100 if a completion percentage is stated or implied, else null,
+  "notes": "concise 1-3 sentence summary of progress or content",
+  "blockers": "any obstacles or blockers mentioned, else null",
+  "confidence": 0.0 to 1.0,
+  "reasoning": "brief explanation"
+}}
+"""
+    try:
+        parsed = await _request_json(prompt)
+        valid_role_ids = {str(r.get("role_id") or r.get("id")) for r in roles}
+        if parsed.get("matched_role_id") and str(parsed.get("matched_role_id")) not in valid_role_ids:
+            parsed["matched_role_id"] = None
+        valid_proj_ids = {str(p.get("project_id") or p.get("id")) for p in projects}
+        if parsed.get("matched_project_id") and str(parsed.get("matched_project_id")) not in valid_proj_ids:
+            parsed["matched_project_id"] = None
+
+        return HREmailClassificationResult.model_validate(parsed)
+    except Exception as exc:
+        logger.warning("Classification LLM error: %s. Using heuristic keyword fallback.", exc)
+        lower_sub = f"{subject} {body_text[:300]}".lower()
+        if any(kw in lower_sub for kw in ["job", "application", "resume", "cv", "apply", "developer", "engineer"]):
+            cand_name = None
+            if "<" in sender:
+                cand_name = sender.split("<")[0].strip().strip('"') or None
+            matched_r = next((r for r in roles if (r.get("title") or "").lower() in lower_sub), None)
+            return HREmailClassificationResult(
+                email_type="job_application",
+                applicant_name=cand_name,
+                matched_role_id=str(matched_r["role_id"]) if matched_r else None,
+                confidence=0.6,
+                reasoning="Keyword heuristic match",
+            )
+        elif any(kw in lower_sub for kw in ["project", "update", "progress", "status", "%"]):
+            matched_p = next((p for p in projects if (p.get("project_name") or "").lower() in lower_sub), None)
+            return HREmailClassificationResult(
+                email_type="project_update",
+                matched_project_id=str(matched_p["project_id"]) if matched_p else None,
+                notes=body_text[:200],
+                confidence=0.6,
+                reasoning="Keyword heuristic match",
+            )
+        return HREmailClassificationResult(email_type="other", confidence=0.5, reasoning="Fallback to other")
+
+
+async def generate_acknowledgment_email(
+    *,
+    applicant_name: str | None,
+    role_title: str | None = None,
+    matched: bool = True,
+    company_name: str = "Enterprise ERP",
+) -> EmailDraft:
+    """Generates an automated personalized acknowledgment email to an applicant."""
+    candidate = applicant_name or "Applicant"
+    if matched and role_title:
+        context = f"The candidate applied for the '{role_title}' position at {company_name} and their application has been received."
+        instruction = f"Write a warm, professional acknowledgment confirming receipt of their application for the {role_title} role. State that our recruitment team is reviewing their profile and will reach out regarding next steps."
+    else:
+        context = f"The candidate submitted their profile to {company_name}, but there is no specific matching open position at this time."
+        instruction = f"Write a warm, professional email thanking them for their interest in {company_name}, informing them that their profile has been saved in our Talent Pool and we will contact them when a relevant position opens."
+
+    prompt = f"""You are the HR Recruitment Assistant representing {company_name}.
+Candidate Name: {candidate}
+Context: {context}
+
+{instruction}
+
+Return valid JSON with "subject" and "body" fields."""
+    try:
+        parsed = await _request_json(prompt)
+        return EmailDraft.model_validate(parsed)
+    except Exception:
+        subj = f"Application Received: {role_title} — {company_name}" if matched and role_title else f"Thank You for Your Interest in {company_name}"
+        if matched and role_title:
+            body = (
+                f"Dear {candidate},\n\n"
+                f"Thank you for applying for the {role_title} position at {company_name}.\n\n"
+                f"We have received your application and resume. Our recruitment team is currently reviewing your qualifications against the role requirements.\n\n"
+                f"If your profile matches our needs, we will reach out regarding next steps in the interview process.\n\n"
+                f"Best regards,\n"
+                f"HR & Talent Acquisition Team\n"
+                f"{company_name}"
+            )
+        else:
+            body = (
+                f"Dear {candidate},\n\n"
+                f"Thank you for your interest in joining {company_name}.\n\n"
+                f"While we do not have an immediate opening matching your background, your profile has been added to our active Talent Pool. As soon as a suitable opportunity opens up, our recruitment team will reach out to you.\n\n"
+                f"Best regards,\n"
+                f"HR & Talent Acquisition Team\n"
+                f"{company_name}"
+            )
+        return EmailDraft(subject=subj, body=body)
+
+
+async def generate_talent_pool_transfer_notice(
+    *,
+    applicant_name: str | None,
+    role_title: str,
+    company_name: str = "Enterprise ERP",
+) -> EmailDraft:
+    """Generates an email notifying a talent-pool prospect that an opening matching their profile is now available."""
+    candidate = applicant_name or "Candidate"
+    prompt = f"""You are an HR Recruitment Assistant representing {company_name}.
+Candidate Name: {candidate}
+Role: {role_title}
+
+Draft a warm, professional notification email to this candidate informing them that a new opening for '{role_title}' has opened up at {company_name}, and because their background in our Talent Pool was a strong match, their profile has been automatically transferred for active consideration.
+
+Return valid JSON with "subject" and "body"."""
+    try:
+        parsed = await _request_json(prompt)
+        return EmailDraft.model_validate(parsed)
+    except Exception:
+        return EmailDraft(
+            subject=f"New Opportunity: {role_title} at {company_name}",
+            body=(
+                f"Dear {candidate},\n\n"
+                f"We are excited to inform you that a new position for '{role_title}' is now open at {company_name}.\n\n"
+                f"Because you previously shared your profile with our Talent Pool and your experience is a strong match, our recruitment team has transferred your application for immediate consideration for this role.\n\n"
+                f"We will review your application and be in touch soon regarding next steps.\n\n"
+                f"Best regards,\n"
+                f"HR & Talent Acquisition Team\n"
+                f"{company_name}"
+            ),
+        )
+
+
+async def generate_project_pacing_reminder(
+    *,
+    project_name: str,
+    current_progress: int,
+    expected_progress: int,
+    deadline: str,
+    lead_name: str = "Team Lead",
+    last_update: str | None = None,
+    company_name: str = "Enterprise ERP",
+) -> EmailDraft:
+    """Generates a firm, professional reminder email to a project lead when a project falls behind schedule."""
+    prompt = f"""You are an autonomous AI Operations & Project Management Assistant at {company_name}.
+Project: {project_name}
+Team Lead: {lead_name}
+Current Progress: {current_progress}%
+Expected Progress: {expected_progress}%
+Target Deadline: {deadline}
+Last Status Update: {last_update or 'No recent update logged'}
+
+The project is currently behind schedule (pacing gap of {expected_progress - current_progress}%).
+Draft a concise, firm, yet professional reminder email to the team lead requesting an urgent status update and action plan to get the project back on track.
+
+Return valid JSON with "subject" and "body"."""
+    try:
+        parsed = await _request_json(prompt)
+        return EmailDraft.model_validate(parsed)
+    except Exception:
+        return EmailDraft(
+            subject=f"Project Schedule Alert: {project_name} ({current_progress}% vs expected {expected_progress}%)",
+            body=(
+                f"Hello {lead_name},\n\n"
+                f"This is an automated operational pacing notice regarding '{project_name}'.\n\n"
+                f"According to the project schedule, the expected completion progress as of today is {expected_progress}%, but current recorded progress is {current_progress}% (Target Deadline: {deadline}).\n\n"
+                f"Please submit an updated project progress report or reply to this email with any blockers or corrective actions required to bring the timeline back on track.\n\n"
+                f"Best regards,\n"
+                f"AI Operations & HR Assistant\n"
+                f"{company_name}"
+            ),
+        )
+

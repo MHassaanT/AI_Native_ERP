@@ -1,5 +1,6 @@
 """Persistence operations for tenant-scoped recruitment workflows."""
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -14,6 +15,8 @@ from erp.db.models.recruitment import (
     RecruitmentEmailReview,
     RecruitmentRole,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RecruitmentService:
@@ -432,11 +435,140 @@ class RecruitmentService:
         if prospect is None:
             return None
         prospect.status = "DISMISSED"
-        review = await self.get_email_review(db, tenant_id, prospect.source_review_id, lock=True)
-        if review is not None and review.status == "REVIEW_REQUIRED":
-            review.status = "DISMISSED"
+        if prospect.source_review_id is not None:
+            review = await self.get_email_review(db, tenant_id, prospect.source_review_id, lock=True)
+            if review is not None and review.status == "REVIEW_REQUIRED":
+                review.status = "DISMISSED"
         await db.flush()
         return prospect
+
+    async def scan_and_auto_transfer_prospects(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+        score_threshold: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Scans pooled prospects against an open role, auto-transfers matches, and sends notification emails."""
+        from erp.ai.hr_screening import (
+            generate_talent_pool_transfer_notice,
+            match_talent_pool_candidate,
+        )
+        from erp.events.gmail_integration import gmail_service
+
+        role = await self.get_role(db, tenant_id, role_id)
+        if role is None or role.status != "OPEN":
+            raise ValueError("An open job opening is required for talent pool scanning.")
+
+        prospects = [
+            p
+            for p in await self.list_talent_pool(db, tenant_id)
+            if p.status == "POOLED"
+        ]
+
+        transferred = []
+        for prospect in prospects:
+            eval_res = await match_talent_pool_candidate(
+                role_title=role.title,
+                role_description=role.description,
+                role_requirements=role.requirements,
+                profile_text=prospect.profile_text,
+            )
+            prospect.matched_role_id = role_id
+            prospect.match_score = eval_res.score
+            prospect.match_summary = eval_res.summary
+            prospect.match_evidence = [e.model_dump(mode="json") for e in eval_res.evidence]
+            prospect.matched_at = datetime.now(UTC)
+            if eval_res.score < score_threshold:
+                continue
+
+            application = await self.transfer_talent_pool_prospect(
+                db, tenant_id, prospect.prospect_id, role_id
+            )
+            application.screening_score = eval_res.score
+            application.screening_summary = eval_res.summary
+            application.matched_requirements = eval_res.matched_requirements
+            application.evidence = [e.model_dump(mode="json") for e in eval_res.evidence]
+            application.status = "EVALUATED"
+            application.evaluation_completed_at = datetime.now(UTC)
+
+            applicant_email = prospect.applicant_email
+            if applicant_email:
+                notice = await generate_talent_pool_transfer_notice(
+                    applicant_name=prospect.applicant_name,
+                    role_title=role.title,
+                )
+                try:
+                    await gmail_service.send_email_via_gmail(
+                        tenant_id=str(tenant_id),
+                        recipient=applicant_email,
+                        subject=notice.subject,
+                        body=notice.body,
+                        session=db,
+                    )
+                    prospect.notification_sent = True
+                    prospect.notification_sent_at = datetime.now(UTC)
+                except Exception:
+                    logger.exception(
+                        "Could not send talent-pool transfer notice to %s for role %s",
+                        applicant_email,
+                        role_id,
+                    )
+
+            transferred.append(
+                {
+                    "prospect_id": str(prospect.prospect_id),
+                    "application_id": str(application.application_id),
+                    "applicant_name": prospect.applicant_name,
+                    "applicant_email": prospect.applicant_email,
+                    "score": eval_res.score,
+                }
+            )
+
+        await db.flush()
+        return transferred
+
+    async def send_interview_invitation(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        application_id: uuid.UUID,
+        interview_details: str,
+    ) -> CandidateApplication:
+        """Generates and dispatches a genuine interview invitation email to the candidate via Gmail."""
+        from erp.ai.hr_screening import create_interview_draft
+        from erp.events.gmail_integration import gmail_service
+
+        application = await self.get_application(db, tenant_id, application_id)
+        if application is None:
+            raise ValueError("Candidate application not found.")
+        if not application.applicant_email:
+            raise ValueError("Candidate application does not have an email address.")
+        if application.interview_email_sent_at is not None:
+            raise ValueError("An interview invitation has already been sent for this application.")
+
+        role = await self.get_role(db, tenant_id, application.role_id)
+        role_title = role.title if role else "Open Position"
+
+        draft = await create_interview_draft(
+            candidate_name=application.applicant_name,
+            role_title=role_title,
+            interview_details=interview_details,
+        )
+
+        await gmail_service.send_email_via_gmail(
+            tenant_id=str(tenant_id),
+            recipient=application.applicant_email,
+            subject=draft.subject,
+            body=draft.body,
+            session=db,
+        )
+
+        application.interview_email_subject = draft.subject
+        application.interview_email_body = draft.body
+        application.interview_email_sent_at = datetime.now(UTC)
+        await db.flush()
+        return application
 
 
 recruitment_service = RecruitmentService()

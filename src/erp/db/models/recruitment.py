@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -73,6 +74,13 @@ class CandidateApplication(Base, TenantMixin, TimestampMixin):
     interview_email_subject: Mapped[str | None] = mapped_column(String(998), nullable=True)
     interview_email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     evaluation_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ack_email_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ack_email_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    interview_email_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -153,7 +161,7 @@ class RecruitmentEmailReview(Base, TenantMixin, TimestampMixin):
             name="fk_recruitment_email_review_role_tenant",
         ),
         CheckConstraint(
-            "status IN ('REVIEW_REQUIRED', 'APPLICATION_CREATED', 'ADDED_TO_POOL', 'NOT_APPLICATION', 'DISMISSED')",
+            "status IN ('REVIEW_REQUIRED', 'APPLICATION_CREATED', 'ADDED_TO_POOL', 'NOT_APPLICATION', 'PROJECT_UPDATE_RECORDED', 'DISMISSED')",
             name="ck_recruitment_email_review_status",
         ),
         CheckConstraint(
@@ -172,7 +180,7 @@ class CandidateTalentPoolProspect(Base, TenantMixin, TimestampMixin):
     prospect_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    source_review_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_review_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     applicant_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     applicant_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     desired_role: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -187,6 +195,10 @@ class CandidateTalentPoolProspect(Base, TenantMixin, TimestampMixin):
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notification_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notification_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         ForeignKeyConstraint(
@@ -211,4 +223,28 @@ class CandidateTalentPoolProspect(Base, TenantMixin, TimestampMixin):
             name="ck_talent_pool_match_score",
         ),
         Index("idx_talent_pool_tenant_status", "tenant_id", "status", "created_at"),
+    )
+
+
+class HREmailPollingState(Base, TenantMixin, TimestampMixin):
+    """Tracks message deduplication and last checked time for autonomous HR email intake."""
+
+    __tablename__ = "hr_email_polling_state"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    last_processed_message_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_talent_pool_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_hr_email_polling_state_tenant"),
+        Index("ix_hr_email_polling_state_tenant_id", "tenant_id"),
     )

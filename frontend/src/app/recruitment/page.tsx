@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { Briefcase, FileText, Mail, Plus, RefreshCw, Sparkles, UserRound } from "lucide-react";
+import { Bot, Briefcase, FileText, Mail, Plus, RefreshCw, Send, Sparkles, UserRound, Zap } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface RecruitmentRole {
@@ -33,7 +33,19 @@ interface CandidateApplication {
   evidence: Evidence[];
   interview_email_subject: string | null;
   interview_email_body: string | null;
+  ack_email_sent: boolean;
+  interview_email_sent_at: string | null;
   created_at: string;
+}
+
+interface AgentStatus {
+  running: boolean;
+  last_cycle_at: string | null;
+  total_emails_processed: number;
+  total_applications_created: number;
+  total_prospects_created: number;
+  total_interview_emails_sent: number;
+  errors: string[];
 }
 
 interface RecruitmentEmail {
@@ -78,6 +90,7 @@ export default function RecruitmentPage() {
   const [emailInbox, setEmailInbox] = useState<RecruitmentEmail[]>([]);
   const [emailReviews, setEmailReviews] = useState<EmailReview[]>([]);
   const [talentPool, setTalentPool] = useState<TalentPoolProspect[]>([]);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [selectedApplicationId, setSelectedApplicationId] = useState("");
   const [reviewRoleChoices, setReviewRoleChoices] = useState<Record<string, string>>({});
@@ -112,6 +125,11 @@ export default function RecruitmentPage() {
       setEmailInbox(inboxRows);
       setEmailReviews(reviewRows);
       setTalentPool(talentPoolRows);
+      // Load agent status (non-fatal)
+      try {
+        const statusData = await api.getHRAgentStatus() as AgentStatus;
+        setAgentStatus(statusData);
+      } catch { /* ignore */ }
       const activeRoleId = preferredRoleId ?? roleRows[0]?.role_id ?? "";
       setSelectedRoleId(activeRoleId);
       const candidateRows = await api.getCandidateApplications(activeRoleId || undefined);
@@ -347,6 +365,55 @@ export default function RecruitmentPage() {
     }
   };
 
+  const handleSendInterviewEmail = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selectedApplicationId) return;
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.sendInterviewEmail(selectedApplicationId, interviewDetails.trim());
+      setNotice("Interview invitation sent via Gmail.");
+      setInterviewDetails("");
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Could not send interview email.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleAutoScanTalentPool = async () => {
+    if (!selectedRoleId) return;
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.autoScanTalentPool(selectedRoleId) as { count: number };
+      setNotice(`Auto-scan complete: ${result.count} prospect(s) transferred and notified.`);
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Auto-scan failed.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleTriggerCycle = async () => {
+    setWorking(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.triggerHRCycle();
+      setNotice("Autonomous HR cycle triggered — refreshing data.");
+      await loadData(selectedRoleId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Could not trigger HR cycle.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
   const selectedRole = roles.find((role) => role.role_id === selectedRoleId);
   const selectedApplication = applications.find(
     (application) => application.application_id === selectedApplicationId,
@@ -380,6 +447,31 @@ export default function RecruitmentPage() {
       <p className="text-xs text-cream-600">
         Screening sends extracted resume text to the configured AI provider after redacting email addresses and phone numbers. Use it only when your organization is authorized to process candidate data there.
       </p>
+
+      {/* Autonomous HR Agent Status Banner */}
+      <div className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm ${agentStatus?.running ? "border-sage-400 bg-sage-50" : "border-cream-300 bg-cream-50"}`}>
+        <div className="flex items-center gap-2">
+          <Bot className={`h-4 w-4 ${agentStatus?.running ? "text-sage-700" : "text-cream-500"}`} />
+          <span className="font-medium text-cream-900">Autonomous HR Agent</span>
+          <span className={`rounded px-2 py-0.5 text-[10px] font-semibold ${agentStatus?.running ? "bg-sage-200 text-sage-800" : "bg-cream-200 text-cream-700"}`}>
+            {agentStatus?.running ? "RUNNING" : "IDLE"}
+          </span>
+          {agentStatus && (
+            <span className="text-xs text-cream-600">
+              · {agentStatus.total_emails_processed} emails · {agentStatus.total_applications_created} applications · {agentStatus.total_interview_emails_sent} interviews sent
+              {agentStatus.last_cycle_at && ` · Last sync ${new Date(agentStatus.last_cycle_at).toLocaleTimeString()}`}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleTriggerCycle()}
+          disabled={working}
+          className="inline-flex items-center gap-1.5 rounded-md border border-sage-600 bg-white px-3 py-1.5 text-xs font-medium text-sage-800 disabled:opacity-50"
+        >
+          <Zap className="h-3.5 w-3.5" /> Run cycle now
+        </button>
+      </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.4fr)]">
         <div className="space-y-6">
@@ -559,24 +651,44 @@ export default function RecruitmentPage() {
                 ) : <p className="mt-2 text-sm text-cream-700">Run screening to generate a job-related recommendation and evidence for review.</p>}
               </div>
 
-              <form onSubmit={handleDraftInterview} className="border-t border-cream-300 pt-4">
-                <h3 className="mb-2 text-sm font-semibold text-cream-900">Draft an interview invitation</h3>
+              <div className="border-t border-cream-300 pt-4">
+                <h3 className="mb-2 text-sm font-semibold text-cream-900">Interview invitation</h3>
+                {/* Email status badges */}
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {selectedApplication.ack_email_sent && (
+                    <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold bg-sage-100 text-sage-800">✓ Acknowledged</span>
+                  )}
+                  {selectedApplication.interview_email_sent_at && (
+                    <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold bg-amberGold-100 text-amberGold-800">
+                      <Send className="h-3 w-3" /> Interview sent {new Date(selectedApplication.interview_email_sent_at).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
                 <label className="block text-xs font-medium text-cream-700">
                   Interview details to include
-                  <textarea value={interviewDetails} onChange={(event) => setInterviewDetails(event.target.value)} required minLength={3} maxLength={4000} rows={3}
+                  <textarea value={interviewDetails} onChange={(event) => setInterviewDetails(event.target.value)} minLength={3} maxLength={4000} rows={3}
                     placeholder="Proposed date, time, format, and any information the candidate needs"
                     className="mt-1 w-full rounded-md border border-cream-300 bg-white px-3 py-2 text-sm text-cream-900" />
                 </label>
-                <button disabled={working} className="mt-2 rounded-md border border-cream-400 bg-white px-3 py-2 text-sm text-cream-800 disabled:opacity-50">
-                  Generate draft (does not send)
-                </button>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button type="button" onClick={(e) => { e.preventDefault(); void handleDraftInterview(e as unknown as FormEvent); }}
+                    disabled={working || !interviewDetails.trim()}
+                    className="rounded-md border border-cream-400 bg-white px-3 py-2 text-sm text-cream-800 disabled:opacity-50">
+                    Generate draft only
+                  </button>
+                  <button type="button" onClick={(e) => { e.preventDefault(); void handleSendInterviewEmail(e as unknown as FormEvent); }}
+                    disabled={working || !interviewDetails.trim() || !selectedApplication.applicant_email}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-sage-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
+                    <Send className="h-3.5 w-3.5" /> Send via Gmail
+                  </button>
+                </div>
                 {selectedApplication.interview_email_subject && (
                   <div className="mt-3 rounded-md border border-cream-300 bg-white p-3">
                     <p className="text-xs font-semibold text-cream-800">{selectedApplication.interview_email_subject}</p>
                     <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-cream-700">{selectedApplication.interview_email_body}</pre>
                   </div>
                 )}
-              </form>
+              </div>
             </section>
           )}
         </div>
@@ -686,10 +798,16 @@ export default function RecruitmentPage() {
               {" "}Candidates identified as applicants are staged here for recruiter review. Approve a candidate before matching or transferring; suggestions never transfer candidates automatically.
             </p>
           </div>
-          <button type="button" onClick={() => void handleMatchTalentPool()} disabled={working || !selectedRoleId || selectedRole?.status !== "OPEN" || !talentPool.some((prospect) => prospect.status === "POOLED")}
-            className="inline-flex items-center gap-2 rounded-md border border-sage-700 px-3 py-2 text-xs font-medium text-sage-800 disabled:opacity-50">
-            <Sparkles className="h-3.5 w-3.5" /> Match up to 20 prospects
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => void handleMatchTalentPool()} disabled={working || !selectedRoleId || selectedRole?.status !== "OPEN" || !talentPool.some((prospect) => prospect.status === "POOLED")}
+              className="inline-flex items-center gap-2 rounded-md border border-sage-700 px-3 py-2 text-xs font-medium text-sage-800 disabled:opacity-50">
+              <Sparkles className="h-3.5 w-3.5" /> Match up to 20 prospects
+            </button>
+            <button type="button" onClick={() => void handleAutoScanTalentPool()} disabled={working || !selectedRoleId || selectedRole?.status !== "OPEN"}
+              className="inline-flex items-center gap-2 rounded-md bg-sage-700 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">
+              <Zap className="h-3.5 w-3.5" /> Auto-Scan &amp; Transfer
+            </button>
+          </div>
         </div>
         {talentPool.length === 0 ? (
           <p className="rounded-md border border-cream-300 bg-white p-3 text-sm text-cream-700">The talent pool is empty. Analyze an application email to stage a candidate here.</p>

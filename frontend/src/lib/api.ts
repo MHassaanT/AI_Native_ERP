@@ -787,6 +787,18 @@ export const api = {
     fetchWithTenant(`/hr/recruitment/talent-pool/${encodeURIComponent(prospectId)}/dismiss`, {
       method: "POST",
     }),
+  sendInterviewEmail: (applicationId: string, interviewDetails: string) =>
+    fetchWithTenant(`/hr/recruitment/applications/${encodeURIComponent(applicationId)}/send-interview`, {
+      method: "POST",
+      body: JSON.stringify({ interview_details: interviewDetails }),
+    }),
+  autoScanTalentPool: (roleId: string, scoreThreshold = 50) =>
+    fetchWithTenant(
+      `/hr/recruitment/roles/${encodeURIComponent(roleId)}/auto-scan-talent-pool?score_threshold=${scoreThreshold}`,
+      { method: "POST" }
+    ),
+  getHRAgentStatus: () => fetchWithTenant("/hr/recruitment/agent-status"),
+  triggerHRCycle: () => fetchWithTenant("/hr/recruitment/autonomous-cycle", { method: "POST" }),
 
   // Onboarding & Separation
   getOnboardings: (employeeId?: string) =>

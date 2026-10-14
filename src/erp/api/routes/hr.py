@@ -536,6 +536,9 @@ def _application_response(application) -> dict[str, Any]:
         "interview_email_subject": application.interview_email_subject,
         "interview_email_body": application.interview_email_body,
         "evaluation_completed_at": application.evaluation_completed_at,
+        "ack_email_sent": getattr(application, "ack_email_sent", False),
+        "ack_email_sent_at": getattr(application, "ack_email_sent_at", None),
+        "interview_email_sent_at": getattr(application, "interview_email_sent_at", None),
         "created_at": application.created_at,
     }
 
@@ -571,6 +574,8 @@ def _talent_pool_response(prospect: CandidateTalentPoolProspect) -> dict[str, An
         "match_summary": prospect.match_summary,
         "match_evidence": prospect.match_evidence,
         "matched_at": prospect.matched_at,
+        "notification_sent": getattr(prospect, "notification_sent", False),
+        "notification_sent_at": getattr(prospect, "notification_sent_at", None),
         "created_at": prospect.created_at,
     }
 
@@ -1012,3 +1017,74 @@ async def dismiss_talent_pool_prospect(
     if prospect is None:
         raise HTTPException(status_code=404, detail="Active talent-pool prospect not found.")
     return _talent_pool_response(prospect)
+
+
+# ---------------------------------------------------------------------------
+# Autonomous HR Agent Endpoints
+# ---------------------------------------------------------------------------
+
+class SendInterviewInvitationRequest(BaseModel):
+    interview_details: str = Field(..., min_length=3, max_length=4000)
+
+
+@router.post(
+    "/recruitment/applications/{application_id}/send-interview",
+    summary="Send real interview invitation email to candidate via connected Gmail",
+)
+async def send_interview_invitation_email(
+    application_id: uuid.UUID,
+    req: SendInterviewInvitationRequest,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    try:
+        application = await recruitment_service.send_interview_invitation(
+            db, tenant_id, application_id, req.interview_details
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ScreeningProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ScreeningConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send interview email: {str(exc)}") from exc
+    return _application_response(application)
+
+
+@router.post(
+    "/recruitment/roles/{role_id}/auto-scan-talent-pool",
+    summary="Auto-scan talent pool against role, transfer matches, notify candidates",
+)
+async def auto_scan_talent_pool(
+    role_id: uuid.UUID,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+    score_threshold: int = 50,
+):
+    try:
+        transferred = await recruitment_service.scan_and_auto_transfer_prospects(
+            db, tenant_id, role_id, score_threshold=score_threshold
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"role_id": str(role_id), "transferred": transferred, "count": len(transferred)}
+
+
+@router.post(
+    "/recruitment/autonomous-cycle",
+    summary="Manually trigger an immediate autonomous HR email intake and pacing pass",
+)
+async def trigger_autonomous_hr_cycle(tenant_id: TenantIdDep, db: DbSessionDep):
+    from erp.workforce.hr_agent_engine import run_autonomous_cycle
+    metrics = await run_autonomous_cycle(str(tenant_id))
+    return metrics
+
+
+@router.get(
+    "/recruitment/agent-status",
+    summary="Get autonomous HR agent engine status and telemetry",
+)
+async def get_hr_agent_status(tenant_id: TenantIdDep):
+    from erp.workforce.hr_agent_engine import get_engine_status
+    return get_engine_status(str(tenant_id))

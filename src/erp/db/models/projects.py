@@ -55,12 +55,19 @@ class Project(Base, TenantMixin, TimestampMixin):
         String(32), nullable=False, default="IN_PROGRESS"  # PLANNING, IN_PROGRESS, ON_HOLD, COMPLETED, CANCELLED
     )
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_reminder_sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_update_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     tasks: Mapped[List["ProjectTask"]] = relationship(
         "ProjectTask", back_populates="project", cascade="all, delete-orphan"
     )
     timesheets: Mapped[List["Timesheet"]] = relationship(
         "Timesheet", back_populates="project", cascade="all, delete-orphan"
+    )
+    updates: Mapped[List["ProjectUpdate"]] = relationship(
+        "ProjectUpdate", back_populates="project", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
@@ -160,3 +167,27 @@ class Timesheet(Base, TenantMixin, TimestampMixin):
         Index("idx_ts_tenant_num", "tenant_id", "timesheet_number", unique=True),
         Index("idx_ts_tenant_emp", "tenant_id", "employee_id"),
     )
+
+
+class ProjectUpdate(Base, TenantMixin, TimestampMixin):
+    """Historical progress update logged for a project via email or manual report."""
+
+    __tablename__ = "project_updates"
+
+    update_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sender_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    progress_pct: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, nullable=False)
+    blockers: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    project: Mapped["Project"] = relationship("Project", back_populates="updates")
+
+    __table_args__ = (
+        Index("idx_proj_updates_tenant_proj", "tenant_id", "project_id", "created_at"),
+    )
+
