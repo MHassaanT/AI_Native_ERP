@@ -32,6 +32,12 @@ from erp.workflows.hr.resume_parser import extract_resume_text
 
 router = APIRouter(prefix="/hr", tags=["HR & Workforce Lifecycle"])
 
+# ============================================================================
+# Autonomous HR Agent Endpoints
+# ============================================================================
+
+from erp.workforce.hr_agent_engine import hr_agent_engine
+from erp.workflows.hr.recruitment_service import hr_recruitment_service
 
 # --- Schemas ---
 
@@ -1088,3 +1094,55 @@ async def trigger_autonomous_hr_cycle(tenant_id: TenantIdDep, db: DbSessionDep):
 async def get_hr_agent_status(tenant_id: TenantIdDep):
     from erp.workforce.hr_agent_engine import get_engine_status
     return get_engine_status(str(tenant_id))
+    
+
+
+@router.get("/recruitment/agent-status")
+async def get_hr_agent_status():
+    """Get autonomous HR agent status and statistics."""
+    return hr_recruitment_service.stats
+
+
+@router.post("/recruitment/autonomous-cycle")
+async def trigger_autonomous_cycle(
+    db: DbSessionDep,
+    tenant_id: TenantIdDep,
+):
+    """Manually trigger an autonomous HR recruitment cycle."""
+    try:
+        result = await hr_recruitment_service.run_autonomous_cycle(
+            db=db,
+            tenant_id=tenant_id,
+        )
+        await db.commit()
+        return {
+            "status": "completed",
+            "tenant_id": str(tenant_id),
+            "results": result,
+        }
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Autonomous cycle failed: {e!s}",
+        ) from e
+
+
+@router.post("/recruitment/agent/start")
+async def start_hr_agent():
+    """Start the background HR agent engine."""
+    await hr_agent_engine.start()
+    return {"status": "started", "engine": hr_agent_engine.get_status()}
+
+
+@router.post("/recruitment/agent/stop")
+async def stop_hr_agent():
+    """Stop the background HR agent engine."""
+    await hr_agent_engine.stop()
+    return {"status": "stopped"}
+
+
+@router.get("/recruitment/agent/engine-status")
+async def get_engine_status():
+    """Get the background engine status."""
+    return hr_agent_engine.get_status()

@@ -1,574 +1,423 @@
-"""Persistence operations for tenant-scoped recruitment workflows."""
+"""Autonomous HR Recruitment Service.
 
-import logging
+Orchestrates the full recruitment pipeline:
+1. Poll Gmail for new applications
+2. Parse and classify emails
+3. Match against open roles
+4. Screen candidates with AI
+5. Send acknowledgment and interview emails
+6. Manage talent pool
+"""
+
 import uuid
-from datetime import UTC, datetime
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from erp.db.models.events import InboundEmailRecord
 from erp.db.models.recruitment import (
-    CandidateApplication,
-    CandidateTalentPoolProspect,
-    RecruitmentEmailReview,
     RecruitmentRole,
+    CandidateApplication,
+    TalentPoolProspect,
+    EmailIntakeReview,
+    InterviewSchedule,
 )
+from erp.db.models.hr import Employee
+from erp.ai.hr_screening import hr_screening, ScreeningResult
 
 logger = logging.getLogger(__name__)
 
 
-class RecruitmentService:
-    """Creates and retrieves job openings and candidate applications."""
+class HRRecruitmentService:
+    """Autonomous recruitment orchestration service."""
 
-    async def create_role(
+    def __init__(self):
+        self._running = False
+        self._last_cycle_at: datetime | None = None
+        self._stats = {
+            "total_emails_processed": 0,
+            "total_applications_created": 0,
+            "total_prospects_created": 0,
+            "total_interview_emails_sent": 0,
+            "errors": [],
+        }
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def last_cycle_at(self) -> datetime | None:
+        return self._last_cycle_at
+
+    @property
+    def stats(self) -> dict[str, Any]:
+        return {
+            "running": self._running,
+            "last_cycle_at": self._last_cycle_at.isoformat() if self._last_cycle_at else None,
+            **self._stats,
+        }
+
+    async def run_autonomous_cycle(
         self,
         db: AsyncSession,
         tenant_id: uuid.UUID,
-        title: str,
-        description: str,
-        requirements: str,
-    ) -> RecruitmentRole:
-        role = RecruitmentRole(
-            tenant_id=tenant_id,
-            title=title.strip(),
-            description=description.strip(),
-            requirements=requirements.strip(),
+    ) -> dict[str, Any]:
+        """Run one full autonomous recruitment cycle."""
+        self._running = True
+        cycle_results = {
+            "emails_processed": 0,
+            "applications_created": 0,
+            "prospects_created": 0,
+            "interviews_sent": 0,
+            "errors": [],
+        }
+
+        try:
+            # Step 1: Process pending email reviews
+            email_results = await self._process_email_intake(db, tenant_id)
+            cycle_results["emails_processed"] = email_results["processed"]
+            cycle_results["applications_created"] += email_results["applications"]
+            cycle_results["prospects_created"] += email_results["prospects"]
+
+            # Step 2: Screen pending applications
+            screening_results = await self._screen_pending_applications(db, tenant_id)
+            cycle_results["applications_created"] += screening_results["screened"]
+
+            # Step 3: Process talent pool matches
+            pool_results = await self._process_talent_pool(db, tenant_id)
+            cycle_results["prospects_created"] += pool_results["matched"]
+
+            # Step 4: Send pending interview emails
+            interview_results = await self._send_pending_interviews(db, tenant_id)
+            cycle_results["interviews_sent"] = interview_results["sent"]
+
+            self._last_cycle_at = datetime.now(timezone.utc)
+            self._stats["total_emails_processed"] += cycle_results["emails_processed"]
+            self._stats["total_applications_created"] += cycle_results["applications_created"]
+            self._stats["total_prospects_created"] += cycle_results["prospects_created"]
+            self._stats["total_interview_emails_sent"] += cycle_results["interviews_sent"]
+
+        except Exception as e:
+            error_msg = f"Autonomous cycle failed: {e!s}"
+            logger.error(error_msg)
+            cycle_results["errors"].append(error_msg)
+            self._stats["errors"].append(error_msg)
+        finally:
+            self._running = False
+
+        return cycle_results
+
+    async def _process_email_intake(
+        self, db: AsyncSession, tenant_id: uuid.UUID
+    ) -> dict[str, int]:
+        """Process unprocessed email intake reviews."""
+        results = {"processed": 0, "applications": 0, "prospects": 0}
+
+        # Find reviews pending decision
+        stmt = select(EmailIntakeReview).where(
+            and_(
+                EmailIntakeReview.tenant_id == tenant_id,
+                EmailIntakeReview.review_status == "PENDING",
+            )
         )
-        db.add(role)
+        reviews = (await db.execute(stmt)).scalars().all()
+
+        for review in reviews:
+            try:
+                # Auto-classify with AI
+                classification = await hr_screening.classify_email(
+                    review.email_subject or "",
+                    review.email_body or "",
+                )
+
+                if classification["is_application"]:
+                    # Find best matching open role
+                    role = await self._find_best_role(
+                        db, tenant_id, classification.get("desired_role", "")
+                    )
+
+                    if role and classification["confidence"] >= 0.7:
+                        # Auto-create application
+                        application = CandidateApplication(
+                            tenant_id=tenant_id,
+                            role_id=role.role_id,
+                            source="GMAIL",
+                            applicant_name=classification.get("applicant_name"),
+                            applicant_email=review.sender_email,
+                            resume_filename=review.attachment_names[0] if review.attachment_names else "email_body.txt",
+                            resume_text=review.email_body,
+                            status="READY",
+                        )
+                        db.add(application)
+                        review.review_status = "CONVERTED_TO_APPLICATION"
+                        review.suggested_role_id = role.role_id
+                        results["applications"] += 1
+                    else:
+                        # Add to talent pool for later
+                        prospect = TalentPoolProspect(
+                            tenant_id=tenant_id,
+                            source_review_id=review.review_id,
+                            status="PENDING_REVIEW",
+                            applicant_name=classification.get("applicant_name"),
+                            applicant_email=review.sender_email,
+                            desired_role=classification.get("desired_role"),
+                            profile_text=review.email_body,
+                        )
+                        db.add(prospect)
+                        review.review_status = "STAGED_TO_POOL"
+                        results["prospects"] += 1
+                else:
+                    review.review_status = "DISMISSED"
+
+                results["processed"] += 1
+
+            except Exception as e:
+                logger.error(f"Failed to process review {review.review_id}: {e}")
+                review.review_status = "ERROR"
+
         await db.flush()
-        return role
+        return results
 
-    async def list_roles(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        status: str | None = None,
-    ) -> list[dict[str, Any]]:
-        stmt = select(RecruitmentRole).where(RecruitmentRole.tenant_id == tenant_id)
-        if status:
-            stmt = stmt.where(RecruitmentRole.status == status)
-        stmt = stmt.order_by(RecruitmentRole.created_at.desc())
-        roles = list((await db.execute(stmt)).scalars().all())
-        return [
-            {
-                "role_id": role.role_id,
-                "title": role.title,
-                "description": role.description,
-                "requirements": role.requirements,
-                "status": role.status,
-                "created_at": role.created_at,
-            }
-            for role in roles
-        ]
+    async def _screen_pending_applications(
+        self, db: AsyncSession, tenant_id: uuid.UUID
+    ) -> dict[str, int]:
+        """Screen applications that haven't been evaluated yet."""
+        results = {"screened": 0}
 
-    async def get_role(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        role_id: uuid.UUID,
-    ) -> RecruitmentRole | None:
-        stmt = select(RecruitmentRole).where(
-            RecruitmentRole.tenant_id == tenant_id,
-            RecruitmentRole.role_id == role_id,
-        )
-        return (await db.execute(stmt)).scalar_one_or_none()
-
-    async def close_role(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        role_id: uuid.UUID,
-    ) -> RecruitmentRole | None:
-        role = await self.get_role(db, tenant_id, role_id)
-        if role:
-            role.status = "CLOSED"
-            await db.flush()
-        return role
-
-    async def create_application(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        role_id: uuid.UUID,
-        applicant_name: str | None,
-        applicant_email: str | None,
-        resume_filename: str,
-        resume_content_type: str,
-        resume_text: str,
-        source_review_id: uuid.UUID | None = None,
-    ) -> CandidateApplication:
-        role = await self.get_role(db, tenant_id, role_id)
-        if role is None:
-            raise ValueError("Job opening not found.")
-        if role.status != "OPEN":
-            raise ValueError("Applications cannot be added to a closed job opening.")
-
-        application = CandidateApplication(
-            tenant_id=tenant_id,
-            role_id=role_id,
-            applicant_name=applicant_name.strip() if applicant_name else None,
-            applicant_email=applicant_email.strip() if applicant_email else None,
-            resume_filename=resume_filename,
-            resume_content_type=resume_content_type,
-            resume_text=resume_text,
-            source_review_id=source_review_id,
-        )
-        db.add(application)
-        await db.flush()
-        return application
-
-    async def list_applications(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        role_id: uuid.UUID | None = None,
-    ) -> list[CandidateApplication]:
-        stmt = select(CandidateApplication).where(CandidateApplication.tenant_id == tenant_id)
-        if role_id:
-            stmt = stmt.where(CandidateApplication.role_id == role_id)
-        stmt = stmt.order_by(
-            CandidateApplication.screening_score.desc().nullslast(),
-            CandidateApplication.created_at.desc(),
-        )
-        return list((await db.execute(stmt)).scalars().all())
-
-    async def get_application(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        application_id: uuid.UUID,
-    ) -> CandidateApplication | None:
         stmt = select(CandidateApplication).where(
-            CandidateApplication.tenant_id == tenant_id,
-            CandidateApplication.application_id == application_id,
-        )
-        return (await db.execute(stmt)).scalar_one_or_none()
-
-    async def delete_application(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        application_id: uuid.UUID,
-    ) -> bool:
-        application = await self.get_application(db, tenant_id, application_id)
-        if application is None:
-            return False
-        await db.delete(application)
-        await db.flush()
-        return True
-
-    async def list_email_inbox(
-        self, db: AsyncSession, tenant_id: uuid.UUID, limit: int = 50
-    ) -> list[InboundEmailRecord]:
-        stmt = (
-            select(InboundEmailRecord)
-            .outerjoin(
-                RecruitmentEmailReview,
-                (RecruitmentEmailReview.inbound_message_id == InboundEmailRecord.message_id)
-                & (RecruitmentEmailReview.tenant_id == tenant_id),
+            and_(
+                CandidateApplication.tenant_id == tenant_id,
+                CandidateApplication.status == "READY",
             )
-            .where(
-                InboundEmailRecord.tenant_id == tenant_id,
-                InboundEmailRecord.status.in_(
-                    ("HUMAN_REVIEW_REQUIRED", "ACCEPTED_FOR_MANUAL_PROCESSING")
-                ),
-                RecruitmentEmailReview.review_id.is_(None),
-            )
-            .order_by(InboundEmailRecord.received_at.desc())
-            .limit(limit)
         )
-        return list((await db.execute(stmt)).scalars().all())
+        applications = (await db.execute(stmt)).scalars().all()
 
-    async def get_inbound_email(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        message_id: str,
-        *,
-        lock: bool = False,
-    ) -> InboundEmailRecord | None:
-        stmt = select(InboundEmailRecord).where(
-            InboundEmailRecord.tenant_id == tenant_id,
-            InboundEmailRecord.message_id == message_id,
-            InboundEmailRecord.status.in_(
-                ("HUMAN_REVIEW_REQUIRED", "ACCEPTED_FOR_MANUAL_PROCESSING")
-            ),
-        )
-        if lock:
-            stmt = stmt.with_for_update()
-        return (await db.execute(stmt)).scalar_one_or_none()
+        for app in applications:
+            try:
+                # Get the role requirements
+                role_stmt = select(RecruitmentRole).where(
+                    RecruitmentRole.role_id == app.role_id
+                )
+                role = (await db.execute(role_stmt)).scalar_one_or_none()
 
-    async def get_email_review_by_message(
-        self, db: AsyncSession, tenant_id: uuid.UUID, message_id: str
-    ) -> RecruitmentEmailReview | None:
-        stmt = select(RecruitmentEmailReview).where(
-            RecruitmentEmailReview.tenant_id == tenant_id,
-            RecruitmentEmailReview.inbound_message_id == message_id,
-        )
-        return (await db.execute(stmt)).scalar_one_or_none()
+                if not role:
+                    continue
 
-    async def create_email_review(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        message_id: str,
-        *,
-        applicant_name: str | None,
-        applicant_email: str | None,
-        desired_role: str | None,
-        suggested_role_id: uuid.UUID | None,
-        confidence: float,
-        summary: str,
-        evidence: list[dict[str, str]],
-        resume_text: str,
-        is_application: bool,
-    ) -> RecruitmentEmailReview:
-        review = RecruitmentEmailReview(
-            tenant_id=tenant_id,
-            inbound_message_id=message_id,
-            applicant_name=applicant_name,
-            applicant_email=applicant_email,
-            desired_role=desired_role,
-            suggested_role_id=suggested_role_id,
-            confidence=confidence,
-            summary=summary,
-            evidence=evidence,
-            resume_text=resume_text,
-            status="REVIEW_REQUIRED" if is_application else "NOT_APPLICATION",
-        )
-        db.add(review)
+                # Run AI screening
+                screening: ScreeningResult = await hr_screening.screen_candidate(
+                    resume_text=app.resume_text or "",
+                    job_requirements=role.requirements,
+                    job_title=role.title,
+                )
+
+                app.screening_score = screening.score
+                app.screening_summary = screening.summary
+                app.matched_requirements = screening.matched_requirements
+                app.evidence = [e.model_dump() for e in screening.evidence]
+                app.status = "EVALUATED"
+
+                # Auto-schedule interview if score >= 75
+                if screening.score >= 75 and app.applicant_email:
+                    await self._schedule_interview(db, tenant_id, app, role)
+
+                results["screened"] += 1
+
+            except Exception as e:
+                logger.error(f"Failed to screen application {app.application_id}: {e}")
+
         await db.flush()
-        return review
+        return results
 
-    async def list_email_reviews(
+    async def _process_talent_pool(
         self, db: AsyncSession, tenant_id: uuid.UUID
-    ) -> list[RecruitmentEmailReview]:
-        stmt = (
-            select(RecruitmentEmailReview)
-            .where(
-                RecruitmentEmailReview.tenant_id == tenant_id,
-                RecruitmentEmailReview.status == "REVIEW_REQUIRED",
-            )
-            .order_by(RecruitmentEmailReview.created_at.desc())
-        )
-        return list((await db.execute(stmt)).scalars().all())
+    ) -> dict[str, int]:
+        """Match talent pool prospects against open roles."""
+        results = {"matched": 0}
 
-    async def get_email_review(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        review_id: uuid.UUID,
-        *,
-        lock: bool = False,
-    ) -> RecruitmentEmailReview | None:
-        stmt = select(RecruitmentEmailReview).where(
-            RecruitmentEmailReview.review_id == review_id,
-            RecruitmentEmailReview.tenant_id == tenant_id,
-        )
-        if lock:
-            stmt = stmt.with_for_update()
-        return (await db.execute(stmt)).scalar_one_or_none()
-
-    async def add_review_to_talent_pool(
-        self, db: AsyncSession, tenant_id: uuid.UUID, review_id: uuid.UUID
-    ) -> CandidateTalentPoolProspect:
-        review = await self.get_email_review(db, tenant_id, review_id, lock=True)
-        if review is None:
-            raise ValueError("Email review not found.")
-        if review.status != "REVIEW_REQUIRED":
-            raise ValueError("Email review is no longer awaiting a recruiter decision.")
-        prospect = await self.stage_email_review_in_talent_pool(db, tenant_id, review)
-        prospect.status = "POOLED"
-        review.status = "ADDED_TO_POOL"
-        await db.flush()
-        return prospect
-
-    async def stage_email_review_in_talent_pool(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        review: RecruitmentEmailReview,
-    ) -> CandidateTalentPoolProspect:
-        stmt = select(CandidateTalentPoolProspect).where(
-            CandidateTalentPoolProspect.tenant_id == tenant_id,
-            CandidateTalentPoolProspect.source_review_id == review.review_id,
-        )
-        prospect = (await db.execute(stmt)).scalar_one_or_none()
-        if prospect is None:
-            prospect = CandidateTalentPoolProspect(
-                tenant_id=tenant_id,
-                source_review_id=review.review_id,
-                applicant_name=review.applicant_name,
-                applicant_email=review.applicant_email,
-                desired_role=review.desired_role,
-                profile_text=review.resume_text,
-                status="PENDING_REVIEW",
-            )
-            db.add(prospect)
-            await db.flush()
-        return prospect
-
-    async def list_talent_pool(
-        self, db: AsyncSession, tenant_id: uuid.UUID
-    ) -> list[CandidateTalentPoolProspect]:
-        stmt = (
-            select(CandidateTalentPoolProspect)
-            .where(
-                CandidateTalentPoolProspect.tenant_id == tenant_id,
-                CandidateTalentPoolProspect.status.in_(("PENDING_REVIEW", "POOLED")),
-            )
-            .order_by(
-                CandidateTalentPoolProspect.status.asc(),
-                CandidateTalentPoolProspect.match_score.desc().nullslast(),
-                CandidateTalentPoolProspect.created_at.desc(),
+        # Get open roles
+        roles_stmt = select(RecruitmentRole).where(
+            and_(
+                RecruitmentRole.tenant_id == tenant_id,
+                RecruitmentRole.status == "OPEN",
             )
         )
-        return list((await db.execute(stmt)).scalars().all())
+        roles = (await db.execute(roles_stmt)).scalars().all()
 
-    async def save_talent_pool_match(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        prospect_id: uuid.UUID,
-        role_id: uuid.UUID,
-        *,
-        score: int,
-        summary: str,
-        evidence: list[dict[str, str]],
-    ) -> CandidateTalentPoolProspect | None:
-        prospect = (
-            await db.execute(
-                select(CandidateTalentPoolProspect)
-                .where(
-                    CandidateTalentPoolProspect.prospect_id == prospect_id,
-                    CandidateTalentPoolProspect.tenant_id == tenant_id,
-                    CandidateTalentPoolProspect.status == "POOLED",
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if prospect is None:
-            return None
-        prospect.matched_role_id = role_id
-        prospect.match_score = score
-        prospect.match_summary = summary
-        prospect.match_evidence = evidence
-        prospect.matched_at = datetime.now(UTC)
-        await db.flush()
-        return prospect
+        if not roles:
+            return results
 
-    async def transfer_talent_pool_prospect(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        prospect_id: uuid.UUID,
-        role_id: uuid.UUID,
-    ) -> CandidateApplication:
-        prospect = (
-            await db.execute(
-                select(CandidateTalentPoolProspect)
-                .where(
-                    CandidateTalentPoolProspect.prospect_id == prospect_id,
-                    CandidateTalentPoolProspect.tenant_id == tenant_id,
-                )
-                .with_for_update()
+        # Get unmatched prospects
+        prospects_stmt = select(TalentPoolProspect).where(
+            and_(
+                TalentPoolProspect.tenant_id == tenant_id,
+                TalentPoolProspect.status == "POOLED",
+                TalentPoolProspect.match_score.is_(None),
             )
-        ).scalar_one_or_none()
-        if prospect is None:
-            raise ValueError("Talent-pool prospect not found.")
-        if prospect.status != "POOLED":
-            raise ValueError("Talent-pool prospect is no longer available.")
-        application = await self.create_application(
-            db,
-            tenant_id,
-            role_id,
-            prospect.applicant_name,
-            prospect.applicant_email,
-            "email-application.txt",
-            "message/rfc822",
-            prospect.profile_text,
-            source_review_id=prospect.source_review_id,
         )
-        prospect.status = "TRANSFERRED"
-        prospect.matched_role_id = role_id
-        return application
+        prospects = (await db.execute(prospects_stmt)).scalars().all()
 
-    async def dismiss_email_review(
-        self, db: AsyncSession, tenant_id: uuid.UUID, review_id: uuid.UUID
-    ) -> RecruitmentEmailReview | None:
-        review = await self.get_email_review(db, tenant_id, review_id, lock=True)
-        if review is None or review.status != "REVIEW_REQUIRED":
-            return None
-        review.status = "DISMISSED"
-        prospect = (
-            await db.execute(
-                select(CandidateTalentPoolProspect)
-                .where(
-                    CandidateTalentPoolProspect.tenant_id == tenant_id,
-                    CandidateTalentPoolProspect.source_review_id == review.review_id,
-                    CandidateTalentPoolProspect.status == "PENDING_REVIEW",
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if prospect is not None:
-            prospect.status = "DISMISSED"
-        await db.flush()
-        return review
-
-    async def dismiss_talent_pool_prospect(
-        self, db: AsyncSession, tenant_id: uuid.UUID, prospect_id: uuid.UUID
-    ) -> CandidateTalentPoolProspect | None:
-        prospect = (
-            await db.execute(
-                select(CandidateTalentPoolProspect)
-                .where(
-                    CandidateTalentPoolProspect.prospect_id == prospect_id,
-                    CandidateTalentPoolProspect.tenant_id == tenant_id,
-                    CandidateTalentPoolProspect.status.in_(("PENDING_REVIEW", "POOLED")),
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if prospect is None:
-            return None
-        prospect.status = "DISMISSED"
-        if prospect.source_review_id is not None:
-            review = await self.get_email_review(db, tenant_id, prospect.source_review_id, lock=True)
-            if review is not None and review.status == "REVIEW_REQUIRED":
-                review.status = "DISMISSED"
-        await db.flush()
-        return prospect
-
-    async def scan_and_auto_transfer_prospects(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        role_id: uuid.UUID,
-        score_threshold: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Scans pooled prospects against an open role, auto-transfers matches, and sends notification emails."""
-        from erp.ai.hr_screening import (
-            generate_talent_pool_transfer_notice,
-            match_talent_pool_candidate,
-        )
-        from erp.events.gmail_integration import gmail_service
-
-        role = await self.get_role(db, tenant_id, role_id)
-        if role is None or role.status != "OPEN":
-            raise ValueError("An open job opening is required for talent pool scanning.")
-
-        prospects = [
-            p
-            for p in await self.list_talent_pool(db, tenant_id)
-            if p.status == "POOLED"
-        ]
-
-        transferred = []
         for prospect in prospects:
-            eval_res = await match_talent_pool_candidate(
-                role_title=role.title,
-                role_description=role.description,
-                role_requirements=role.requirements,
-                profile_text=prospect.profile_text,
-            )
-            prospect.matched_role_id = role_id
-            prospect.match_score = eval_res.score
-            prospect.match_summary = eval_res.summary
-            prospect.match_evidence = [e.model_dump(mode="json") for e in eval_res.evidence]
-            prospect.matched_at = datetime.now(UTC)
-            if eval_res.score < score_threshold:
-                continue
+            try:
+                best_match = None
+                best_score = 0
 
-            application = await self.transfer_talent_pool_prospect(
-                db, tenant_id, prospect.prospect_id, role_id
-            )
-            application.screening_score = eval_res.score
-            application.screening_summary = eval_res.summary
-            application.matched_requirements = eval_res.matched_requirements
-            application.evidence = [e.model_dump(mode="json") for e in eval_res.evidence]
-            application.status = "EVALUATED"
-            application.evaluation_completed_at = datetime.now(UTC)
-
-            applicant_email = prospect.applicant_email
-            if applicant_email:
-                notice = await generate_talent_pool_transfer_notice(
-                    applicant_name=prospect.applicant_name,
-                    role_title=role.title,
-                )
-                try:
-                    await gmail_service.send_email_via_gmail(
-                        tenant_id=str(tenant_id),
-                        recipient=applicant_email,
-                        subject=notice.subject,
-                        body=notice.body,
-                        session=db,
-                    )
-                    prospect.notification_sent = True
-                    prospect.notification_sent_at = datetime.now(UTC)
-                except Exception:
-                    logger.exception(
-                        "Could not send talent-pool transfer notice to %s for role %s",
-                        applicant_email,
-                        role_id,
+                for role in roles:
+                    match_result = await hr_screening.match_talent_pool_prospect(
+                        prospect_profile=prospect.profile_text or "",
+                        role_requirements=role.requirements,
+                        role_title=role.title,
                     )
 
-            transferred.append(
-                {
-                    "prospect_id": str(prospect.prospect_id),
-                    "application_id": str(application.application_id),
-                    "applicant_name": prospect.applicant_name,
-                    "applicant_email": prospect.applicant_email,
-                    "score": eval_res.score,
-                }
-            )
+                    if match_result.score > best_score:
+                        best_score = match_result.score
+                        best_match = (role, match_result)
+
+                if best_match and best_score >= 50:
+                    role, match_result = best_match
+                    prospect.matched_role_id = role.role_id
+                    prospect.match_score = match_result.score
+                    prospect.match_summary = match_result.summary
+                    prospect.match_evidence = [
+                        e.model_dump() for e in match_result.evidence
+                    ]
+                    results["matched"] += 1
+
+            except Exception as e:
+                logger.error(f"Failed to match prospect {prospect.prospect_id}: {e}")
 
         await db.flush()
-        return transferred
+        return results
 
-    async def send_interview_invitation(
+    async def _send_pending_interviews(
+        self, db: AsyncSession, tenant_id: uuid.UUID
+    ) -> dict[str, int]:
+        """Send scheduled interview emails."""
+        results = {"sent": 0}
+
+        stmt = select(InterviewSchedule).where(
+            and_(
+                InterviewSchedule.tenant_id == tenant_id,
+                InterviewSchedule.status == "SCHEDULED",
+                InterviewSchedule.notification_sent == False,
+            )
+        )
+        interviews = (await db.execute(stmt)).scalars().all()
+
+        for interview in interviews:
+            try:
+                # Get application and role details
+                app_stmt = select(CandidateApplication).where(
+                    CandidateApplication.application_id == interview.application_id
+                )
+                app = (await db.execute(app_stmt)).scalar_one_or_none()
+
+                if not app or not app.applicant_email:
+                    continue
+
+                # Generate interview email
+                email_result = await hr_screening.draft_interview_email(
+                    applicant_name=app.applicant_name or "Candidate",
+                    job_title=interview.role_title or "Position",
+                    interview_details=interview.interview_details or "",
+                )
+
+                # Send via Gmail service (if configured)
+                sent = await self._send_gmail_email(
+                    to_email=app.applicant_email,
+                    subject=email_result.subject,
+                    body=email_result.body,
+                )
+
+                if sent:
+                    interview.notification_sent = True
+                    interview.notification_sent_at = datetime.now(timezone.utc)
+                    app.interview_email_sent_at = datetime.now(timezone.utc)
+                    app.ack_email_sent = True
+                    results["sent"] += 1
+
+            except Exception as e:
+                logger.error(f"Failed to send interview {interview.interview_id}: {e}")
+
+        await db.flush()
+        return results
+
+    async def _find_best_role(
         self,
         db: AsyncSession,
         tenant_id: uuid.UUID,
-        application_id: uuid.UUID,
-        interview_details: str,
-    ) -> CandidateApplication:
-        """Generates and dispatches a genuine interview invitation email to the candidate via Gmail."""
-        from erp.ai.hr_screening import create_interview_draft
-        from erp.events.gmail_integration import gmail_service
-
-        application = await self.get_application(db, tenant_id, application_id)
-        if application is None:
-            raise ValueError("Candidate application not found.")
-        if not application.applicant_email:
-            raise ValueError("Candidate application does not have an email address.")
-        if application.interview_email_sent_at is not None:
-            raise ValueError("An interview invitation has already been sent for this application.")
-
-        role = await self.get_role(db, tenant_id, application.role_id)
-        role_title = role.title if role else "Open Position"
-
-        draft = await create_interview_draft(
-            candidate_name=application.applicant_name,
-            role_title=role_title,
-            interview_details=interview_details,
+        desired_role: str,
+    ) -> RecruitmentRole | None:
+        """Find the best matching open role for a candidate."""
+        stmt = select(RecruitmentRole).where(
+            and_(
+                RecruitmentRole.tenant_id == tenant_id,
+                RecruitmentRole.status == "OPEN",
+            )
         )
+        roles = (await db.execute(stmt)).scalars().all()
 
-        await gmail_service.send_email_via_gmail(
-            tenant_id=str(tenant_id),
-            recipient=application.applicant_email,
-            subject=draft.subject,
-            body=draft.body,
-            session=db,
+        if not roles:
+            return None
+
+        # Exact match first
+        for role in roles:
+            if desired_role.lower() in role.title.lower():
+                return role
+
+        # Return first open role as fallback
+        return roles[0]
+
+    async def _schedule_interview(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        application: CandidateApplication,
+        role: RecruitmentRole,
+    ) -> None:
+        """Schedule an interview for a high-scoring candidate."""
+        interview = InterviewSchedule(
+            tenant_id=tenant_id,
+            application_id=application.application_id,
+            role_id=role.role_id,
+            role_title=role.title,
+            interview_details=(
+                f"Congratulations! Based on your resume, we'd like to invite you "
+                f"for an interview for the {role.title} position. "
+                f"Please reply to this email with your availability."
+            ),
+            scheduled_at=datetime.now(timezone.utc),
+            status="SCHEDULED",
+            notification_sent=False,
         )
+        db.add(interview)
 
-        application.interview_email_subject = draft.subject
-        application.interview_email_body = draft.body
-        application.interview_email_sent_at = datetime.now(UTC)
-        await db.flush()
-        return application
+    async def _send_gmail_email(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+    ) -> bool:
+        """Send email via Gmail API. Returns True if sent successfully."""
+        try:
+            # Import here to avoid circular imports
+            from erp.integrations.gmail_service import gmail_service
+
+            return await gmail_service.send_email(
+                to=to_email,
+                subject=subject,
+                body=body,
+            )
+        except ImportError:
+            logger.warning("Gmail service not available, email not sent")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to send email to {to_email}: {e}")
+            return False
 
 
-recruitment_service = RecruitmentService()
+# Singleton instance
+hr_recruitment_service = HRRecruitmentService()
+
