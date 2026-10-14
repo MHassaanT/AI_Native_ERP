@@ -44,7 +44,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 
-type TabType = "leads" | "pipeline" | "campaigns" | "tickets" | "slas" | "warranty";
+type TabType = "leads" | "pipeline" | "campaigns" | "tickets" | "appointments" | "slas" | "warranty";
 
 const STAGES = [
   { id: "PROSPECTING", label: "Prospecting", prob: 10, color: "bg-stone-100 text-stone-700 border-stone-300" },
@@ -164,6 +164,19 @@ export default function CRMSupportPage() {
   const [claimComplaint, setClaimComplaint] = useState("");
   const [claimResolutionType, setClaimResolutionType] = useState("REPLACE_FREE");
 
+  // Tab: Appointments & Meetings
+  const [appointments, setAppointments] = useState<any[]>([]);
+  const [selectedAppointment, setSelectedAppointment] = useState<any | null>(null);
+  const [appointmentSearch, setAppointmentSearch] = useState("");
+  const [appointmentStatusFilter, setAppointmentStatusFilter] = useState("");
+  const [showAppointmentModal, setShowAppointmentModal] = useState(false);
+  const [appPartyName, setAppPartyName] = useState("");
+  const [appWith, setAppWith] = useState("LEAD");
+  const [appPartyId, setAppPartyId] = useState("");
+  const [appTime, setAppTime] = useState("");
+  const [appDuration, setAppDuration] = useState("30");
+  const [appSummary, setAppSummary] = useState("");
+
   // Load Data
   const loadData = async () => {
     setLoading(true);
@@ -179,6 +192,7 @@ export default function CRMSupportPage() {
         claimData,
         custData,
         itemData,
+        appData,
       ] = await Promise.all([
         api.getLeads({ search: leadSearch || undefined, status: leadStatusFilter || undefined }).catch(() => []),
         api.getOpportunities({ search: oppSearch || undefined }).catch(() => []),
@@ -190,6 +204,7 @@ export default function CRMSupportPage() {
         api.getWarrantyClaims().catch(() => []),
         api.getCustomers().catch(() => []),
         api.getItems().catch(() => []),
+        api.getAppointments({ status: appointmentStatusFilter || undefined }).catch(() => []),
       ]);
 
       setLeads(leadData);
@@ -202,6 +217,14 @@ export default function CRMSupportPage() {
       setClaims(claimData);
       setCustomers(custData);
       setCatalogItems(itemData);
+      setAppointments(appData);
+
+      if (selectedAppointment) {
+        const foundApp = appData.find((a: any) => a.appointment_id === selectedAppointment.appointment_id);
+        if (foundApp) {
+          setSelectedAppointment(foundApp);
+        }
+      }
 
       if (selectedIssue) {
         const found = issueData.find((i: any) => i.issue_id === selectedIssue.issue_id);
@@ -219,7 +242,7 @@ export default function CRMSupportPage() {
 
   useEffect(() => {
     loadData();
-  }, [leadSearch, leadStatusFilter, oppSearch, issueSearch, issuePriorityFilter]);
+  }, [leadSearch, leadStatusFilter, oppSearch, issueSearch, issuePriorityFilter, appointmentStatusFilter]);
 
   // Lead Actions
   const handleCreateLead = async (e: React.FormEvent) => {
@@ -678,6 +701,55 @@ export default function CRMSupportPage() {
     );
   };
 
+  // Appointment Actions
+  const handleUpdateAppointmentStatus = async (appId: string, newStatus: string) => {
+    setError(null);
+    setSuccess(null);
+    try {
+      await api.updateAppointmentStatus(appId, newStatus);
+      setSuccess(`Appointment status updated to ${newStatus}.`);
+      await loadData();
+      if (selectedAppointment && selectedAppointment.appointment_id === appId) {
+        setSelectedAppointment((prev: any) => (prev ? { ...prev, status: newStatus } : null));
+      }
+    } catch (err: any) {
+      setError(err.message || "Failed to update appointment status.");
+    }
+  };
+
+  const handleCreateAppointment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    try {
+      if (!appPartyName.trim()) throw new Error("Party name is required.");
+      if (!appTime) throw new Error("Scheduled time is required.");
+
+      const partyId =
+        appPartyId.trim() ||
+        (leads[0]?.lead_id || customers[0]?.customer_id || "00000000-0000-0000-0000-000000000001");
+
+      await api.createAppointment({
+        party_name: appPartyName.trim(),
+        appointment_with: appWith,
+        party_id: partyId,
+        scheduled_time: new Date(appTime).toISOString(),
+        duration_mins: parseInt(appDuration) || 30,
+        summary: appSummary.trim() || undefined,
+      });
+
+      setShowAppointmentModal(false);
+      setAppPartyName("");
+      setAppTime("");
+      setAppPartyId("");
+      setAppSummary("");
+      setSuccess("Appointment successfully scheduled!");
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || "Failed to schedule appointment.");
+    }
+  };
+
   return (
     <div className="space-y-6 pb-20">
       {/* Top Header */}
@@ -732,13 +804,14 @@ export default function CRMSupportPage() {
         </div>
       )}
 
-      {/* 6-Tab Navigation */}
+      {/* Tab Navigation */}
       <div className="flex overflow-x-auto gap-2 border-b border-stone-200 pb-2 scrollbar-none">
         {[
           { id: "leads", label: "Leads & Qualification", icon: Users, count: leads.length },
           { id: "pipeline", label: "Opportunity Pipeline", icon: Kanban, count: opportunities.length },
           { id: "campaigns", label: "Campaigns & Contracts", icon: Megaphone, count: campaigns.length },
           { id: "tickets", label: "Support Tickets", icon: Headset, count: issues.filter((i) => i.status !== "RESOLVED" && i.status !== "CLOSED").length },
+          { id: "appointments", label: "Appointments & Meetings", icon: Calendar, count: appointments.filter((a) => a.status === "SCHEDULED" || a.status === "CONFIRMED").length },
           { id: "slas", label: "SLA Matrices", icon: Sliders, count: slas.length },
           { id: "warranty", label: "Warranty Claims & RMA", icon: Award, count: claims.length },
         ].map((tab) => {
@@ -1553,6 +1626,291 @@ export default function CRMSupportPage() {
                 <div className="h-full flex flex-col items-center justify-center text-center text-stone-400 text-xs py-16">
                   <MessageSquare className="w-8 h-8 mb-2 stroke-[1.5]" />
                   <span>Select any support ticket on the left to inspect its threaded communications.</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: APPOINTMENTS & MEETINGS */}
+      {activeTab === "appointments" && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-white p-3 rounded-xl border border-stone-200 shadow-sm">
+            <div className="flex items-center gap-2.5 w-full sm:w-auto">
+              <div className="relative flex-1 sm:w-72">
+                <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-stone-400" />
+                <input
+                  type="text"
+                  placeholder="Search appointments by party, summary, ID..."
+                  value={appointmentSearch}
+                  onChange={(e) => setAppointmentSearch(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-stone-50 border border-stone-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-stone-400"
+                />
+              </div>
+              <select
+                value={appointmentStatusFilter}
+                onChange={(e) => setAppointmentStatusFilter(e.target.value)}
+                className="px-2.5 py-1.5 text-xs bg-stone-50 border border-stone-200 rounded-lg text-stone-700"
+              >
+                <option value="">All Statuses</option>
+                <option value="SCHEDULED">Scheduled</option>
+                <option value="CONFIRMED">Confirmed</option>
+                <option value="COMPLETED">Completed</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            </div>
+
+            <button
+              onClick={() => setShowAppointmentModal(true)}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-stone-900 hover:bg-stone-800 text-white rounded-lg shadow-sm transition"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Schedule Appointment
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            {/* Appointments List Table */}
+            <div className="lg:col-span-7 bg-white border border-stone-200 rounded-xl overflow-hidden shadow-sm">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-stone-50 border-b border-stone-200 text-stone-500 font-medium">
+                    <th className="py-2.5 px-3">Party & Source</th>
+                    <th className="py-2.5 px-3">Scheduled Time</th>
+                    <th className="py-2.5 px-3">Duration</th>
+                    <th className="py-2.5 px-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-100 text-stone-800">
+                  {appointments
+                    .filter((app) => {
+                      if (!appointmentSearch.trim()) return true;
+                      const q = appointmentSearch.toLowerCase();
+                      return (
+                        app.party_name?.toLowerCase().includes(q) ||
+                        app.summary?.toLowerCase().includes(q) ||
+                        app.appointment_id?.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((app) => {
+                      const isSelected = selectedAppointment?.appointment_id === app.appointment_id;
+                      const isWhatsApp = app.appointment_with === "WHATSAPP_CONTACT";
+                      return (
+                        <tr
+                          key={app.appointment_id}
+                          onClick={() => setSelectedAppointment(app)}
+                          className={`cursor-pointer transition ${
+                            isSelected ? "bg-stone-100 font-medium" : "hover:bg-stone-50/60"
+                          }`}
+                        >
+                          <td className="py-2.5 px-3">
+                            <div className="font-semibold text-stone-900">{app.party_name}</div>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              {isWhatsApp ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 rounded">
+                                  <MessageSquare className="w-2.5 h-2.5" /> WhatsApp Contact
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.5 text-[10px] font-medium bg-stone-100 text-stone-600 rounded">
+                                  {app.appointment_with}
+                                </span>
+                              )}
+                            </div>
+                            {app.summary && (
+                              <div className="text-[11px] text-stone-500 line-clamp-1 mt-0.5">
+                                {app.summary}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="text-stone-900 font-medium">
+                              {new Date(app.scheduled_time).toLocaleDateString(undefined, {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                              })}
+                            </div>
+                            <div className="text-[11px] text-stone-500">
+                              {new Date(app.scheduled_time).toLocaleTimeString(undefined, {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-stone-600">
+                            {app.duration_mins || 30} mins
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                app.status === "CONFIRMED"
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : app.status === "SCHEDULED"
+                                  ? "bg-blue-50 text-blue-700 border-blue-200"
+                                  : app.status === "COMPLETED"
+                                  ? "bg-purple-50 text-purple-700 border-purple-200"
+                                  : "bg-rose-50 text-rose-700 border-rose-200"
+                              }`}
+                            >
+                              {app.status}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  {appointments.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="py-12 text-center text-stone-400">
+                        <Calendar className="w-7 h-7 mx-auto mb-1.5 opacity-40" />
+                        No appointments found. Appointments booked by the WhatsApp agent or staff will appear here.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Selected Appointment Details & Actions */}
+            <div className="lg:col-span-5 bg-white border border-stone-200 rounded-xl p-4 shadow-sm">
+              {selectedAppointment ? (
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between border-b border-stone-100 pb-3">
+                    <div>
+                      <span className="text-[11px] font-mono text-stone-400 block mb-0.5">
+                        ID: {selectedAppointment.appointment_id.slice(0, 8)}...
+                      </span>
+                      <h3 className="text-base font-bold text-stone-900">
+                        {selectedAppointment.party_name}
+                      </h3>
+                      <div className="mt-1">
+                        {selectedAppointment.appointment_with === "WHATSAPP_CONTACT" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 rounded">
+                            <MessageSquare className="w-3 h-3" /> Booked via WhatsApp
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[11px] font-medium bg-stone-100 text-stone-700 rounded">
+                            {selectedAppointment.appointment_with}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <span
+                      className={`px-2.5 py-1 rounded-md text-xs font-bold border ${
+                        selectedAppointment.status === "CONFIRMED"
+                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                          : selectedAppointment.status === "SCHEDULED"
+                          ? "bg-blue-50 text-blue-700 border-blue-200"
+                          : selectedAppointment.status === "COMPLETED"
+                          ? "bg-purple-50 text-purple-700 border-purple-200"
+                          : "bg-rose-50 text-rose-700 border-rose-200"
+                      }`}
+                    >
+                      {selectedAppointment.status}
+                    </span>
+                  </div>
+
+                  {/* Appointment Metadata */}
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="p-2.5 bg-stone-50 rounded-lg border border-stone-100">
+                      <div className="text-stone-500 font-medium mb-0.5 flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5" /> Date & Time
+                      </div>
+                      <div className="font-semibold text-stone-900">
+                        {new Date(selectedAppointment.scheduled_time).toLocaleString(undefined, {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })}
+                      </div>
+                    </div>
+                    <div className="p-2.5 bg-stone-50 rounded-lg border border-stone-100">
+                      <div className="text-stone-500 font-medium mb-0.5 flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5" /> Duration
+                      </div>
+                      <div className="font-semibold text-stone-900">
+                        {selectedAppointment.duration_mins || 30} minutes
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Summary / Notes */}
+                  <div className="p-3 bg-stone-50 rounded-lg border border-stone-100 text-xs">
+                    <div className="font-medium text-stone-600 mb-1">Appointment Summary & Notes:</div>
+                    <div className="text-stone-800 whitespace-pre-wrap leading-relaxed">
+                      {selectedAppointment.summary || "No specific summary notes entered."}
+                    </div>
+                  </div>
+
+                  {/* Status Actions */}
+                  <div className="pt-2 border-t border-stone-100">
+                    <div className="text-xs font-semibold text-stone-700 mb-2">Update Status:</div>
+                    <div className="flex flex-wrap gap-2">
+                      {selectedAppointment.status === "SCHEDULED" && (
+                        <>
+                          <button
+                            onClick={() =>
+                              handleUpdateAppointmentStatus(selectedAppointment.appointment_id, "CONFIRMED")
+                            }
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition shadow-sm"
+                          >
+                            <Check className="w-3.5 h-3.5" /> Confirm Appointment
+                          </button>
+                          <button
+                            onClick={() =>
+                              handleUpdateAppointmentStatus(selectedAppointment.appointment_id, "CANCELLED")
+                            }
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg transition"
+                          >
+                            <X className="w-3.5 h-3.5" /> Cancel Appointment
+                          </button>
+                        </>
+                      )}
+
+                      {selectedAppointment.status === "CONFIRMED" && (
+                        <>
+                          <button
+                            onClick={() =>
+                              handleUpdateAppointmentStatus(selectedAppointment.appointment_id, "COMPLETED")
+                            }
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition shadow-sm"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" /> Mark Completed
+                          </button>
+                          <button
+                            onClick={() =>
+                              handleUpdateAppointmentStatus(selectedAppointment.appointment_id, "CANCELLED")
+                            }
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg transition"
+                          >
+                            <X className="w-3.5 h-3.5" /> Cancel Appointment
+                          </button>
+                        </>
+                      )}
+
+                      {selectedAppointment.status === "COMPLETED" && (
+                        <div className="text-xs text-stone-500 italic flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-purple-600" />
+                          This appointment has been completed.
+                        </div>
+                      )}
+
+                      {selectedAppointment.status === "CANCELLED" && (
+                        <button
+                          onClick={() =>
+                            handleUpdateAppointmentStatus(selectedAppointment.appointment_id, "SCHEDULED")
+                          }
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg transition"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" /> Reschedule / Reopen
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-center text-stone-400 text-xs py-16">
+                  <Calendar className="w-8 h-8 mb-2 stroke-[1.5]" />
+                  <span>Select any appointment on the left to inspect its details and update status.</span>
                 </div>
               )}
             </div>
@@ -2891,6 +3249,101 @@ export default function CRMSupportPage() {
                   className="px-4 py-1.5 text-xs font-semibold bg-stone-900 hover:bg-stone-800 text-white rounded-lg shadow-sm"
                 >
                   File & Validate Claim
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Schedule Appointment */}
+      {showAppointmentModal && (
+        <div className="fixed inset-0 bg-stone-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl border border-stone-200 max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <h3 className="font-bold text-sm text-stone-900">Schedule Consultation / Appointment</h3>
+              <button onClick={() => setShowAppointmentModal(false)} className="text-stone-400 hover:text-stone-600">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateAppointment} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-stone-600 mb-1 font-medium">Party / Contact Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={appPartyName}
+                  onChange={(e) => setAppPartyName(e.target.value)}
+                  placeholder="e.g. Acme Corp or Jane Doe"
+                  className="w-full p-2 bg-stone-50 border border-stone-200 rounded-lg"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-stone-600 mb-1 font-medium">Appointment With</label>
+                  <select
+                    value={appWith}
+                    onChange={(e) => setAppWith(e.target.value)}
+                    className="w-full p-2 bg-stone-50 border border-stone-200 rounded-lg"
+                  >
+                    <option value="LEAD">Lead</option>
+                    <option value="CUSTOMER">Customer</option>
+                    <option value="WHATSAPP_CONTACT">WhatsApp Contact</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-stone-600 mb-1 font-medium">Duration</label>
+                  <select
+                    value={appDuration}
+                    onChange={(e) => setAppDuration(e.target.value)}
+                    className="w-full p-2 bg-stone-50 border border-stone-200 rounded-lg"
+                  >
+                    <option value="15">15 minutes</option>
+                    <option value="30">30 minutes</option>
+                    <option value="45">45 minutes</option>
+                    <option value="60">60 minutes</option>
+                    <option value="90">90 minutes</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-stone-600 mb-1 font-medium">Scheduled Date & Time *</label>
+                <input
+                  type="datetime-local"
+                  required
+                  value={appTime}
+                  onChange={(e) => setAppTime(e.target.value)}
+                  className="w-full p-2 bg-stone-50 border border-stone-200 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-stone-600 mb-1 font-medium">Summary / Consultation Purpose</label>
+                <textarea
+                  rows={3}
+                  value={appSummary}
+                  onChange={(e) => setAppSummary(e.target.value)}
+                  placeholder="e.g. ERP integration consultation, product onboarding..."
+                  className="w-full p-2 bg-stone-50 border border-stone-200 rounded-lg"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+                <button
+                  type="button"
+                  onClick={() => setShowAppointmentModal(false)}
+                  className="px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 text-xs font-semibold bg-stone-900 hover:bg-stone-800 text-white rounded-lg shadow-sm"
+                >
+                  Schedule Appointment
                 </button>
               </div>
             </form>

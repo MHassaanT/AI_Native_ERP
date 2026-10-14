@@ -919,6 +919,11 @@ export const api = {
   },
   createAppointment: (data: any) =>
     fetchWithTenant("/crm/appointments", { method: "POST", body: JSON.stringify(data) }),
+  updateAppointmentStatus: (appointmentId: string, status: string) =>
+    fetchWithTenant(`/crm/appointments/${appointmentId}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
   getContracts: (status?: string) =>
     fetchWithTenant(`/crm/contracts${status ? `?status=${status}` : ""}`),
   createContract: (data: any) =>
