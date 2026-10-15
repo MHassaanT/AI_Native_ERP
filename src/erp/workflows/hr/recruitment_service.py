@@ -20,12 +20,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp.db.models.recruitment import (
     RecruitmentRole,
     CandidateApplication,
-    TalentPoolProspect,
-    EmailIntakeReview,
-    InterviewSchedule,
+    CandidateTalentPoolProspect,
+    RecruitmentEmailReview,
 )
 from erp.db.models.hr import Employee
-from erp.ai.hr_screening import hr_screening, ScreeningResult
+from erp.ai.hr_screening import (
+    evaluate_candidate,
+    analyze_application_email,
+    match_talent_pool_candidate,
+    ScreeningResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,66 +121,62 @@ class HRRecruitmentService:
         results = {"processed": 0, "applications": 0, "prospects": 0}
 
         # Find reviews pending decision
-        stmt = select(EmailIntakeReview).where(
+        stmt = select(RecruitmentEmailReview).where(
             and_(
-                EmailIntakeReview.tenant_id == tenant_id,
-                EmailIntakeReview.review_status == "PENDING",
+                RecruitmentEmailReview.tenant_id == tenant_id,
+                RecruitmentEmailReview.status == "REVIEW_REQUIRED",
             )
         )
         reviews = (await db.execute(stmt)).scalars().all()
 
         for review in reviews:
             try:
-                # Auto-classify with AI
-                classification = await hr_screening.classify_email(
-                    review.email_subject or "",
-                    review.email_body or "",
-                )
-
-                if classification["is_application"]:
+                # Use the review's classification directly (already done when the review was created)
+                if review.summary:  # If there's a summary, it's likely an application
                     # Find best matching open role
                     role = await self._find_best_role(
-                        db, tenant_id, classification.get("desired_role", "")
+                        db, tenant_id, review.desired_role or ""
                     )
 
-                    if role and classification["confidence"] >= 0.7:
+                    if role and review.confidence >= 0.7:
                         # Auto-create application
                         application = CandidateApplication(
                             tenant_id=tenant_id,
                             role_id=role.role_id,
-                            source="GMAIL",
-                            applicant_name=classification.get("applicant_name"),
-                            applicant_email=review.sender_email,
-                            resume_filename=review.attachment_names[0] if review.attachment_names else "email_body.txt",
-                            resume_text=review.email_body,
+                            applicant_name=review.applicant_name,
+                            applicant_email=review.applicant_email,
+                            resume_filename="email_resume.txt",
+                            resume_content_type="text/plain",
+                            resume_text=review.resume_text,
                             status="READY",
+                            source_review_id=review.review_id,
                         )
                         db.add(application)
-                        review.review_status = "CONVERTED_TO_APPLICATION"
+                        review.status = "APPLICATION_CREATED"
                         review.suggested_role_id = role.role_id
                         results["applications"] += 1
                     else:
                         # Add to talent pool for later
-                        prospect = TalentPoolProspect(
+                        prospect = CandidateTalentPoolProspect(
                             tenant_id=tenant_id,
                             source_review_id=review.review_id,
                             status="PENDING_REVIEW",
-                            applicant_name=classification.get("applicant_name"),
-                            applicant_email=review.sender_email,
-                            desired_role=classification.get("desired_role"),
-                            profile_text=review.email_body,
+                            applicant_name=review.applicant_name,
+                            applicant_email=review.applicant_email,
+                            desired_role=review.desired_role,
+                            profile_text=review.resume_text,
                         )
                         db.add(prospect)
-                        review.review_status = "STAGED_TO_POOL"
+                        review.status = "ADDED_TO_POOL"
                         results["prospects"] += 1
                 else:
-                    review.review_status = "DISMISSED"
+                    review.status = "DISMISSED"
 
                 results["processed"] += 1
 
             except Exception as e:
                 logger.error(f"Failed to process review {review.review_id}: {e}")
-                review.review_status = "ERROR"
+                review.status = "DISMISSED"
 
         await db.flush()
         return results
@@ -207,10 +207,11 @@ class HRRecruitmentService:
                     continue
 
                 # Run AI screening
-                screening: ScreeningResult = await hr_screening.screen_candidate(
+                screening: ScreeningResult = await evaluate_candidate(
+                    role_title=role.title,
+                    role_description=role.description,
+                    role_requirements=role.requirements,
                     resume_text=app.resume_text or "",
-                    job_requirements=role.requirements,
-                    job_title=role.title,
                 )
 
                 app.screening_score = screening.score
@@ -219,9 +220,10 @@ class HRRecruitmentService:
                 app.evidence = [e.model_dump() for e in screening.evidence]
                 app.status = "EVALUATED"
 
-                # Auto-schedule interview if score >= 75
+                # Auto-schedule interview if score >= 75 (not yet implemented)
                 if screening.score >= 75 and app.applicant_email:
-                    await self._schedule_interview(db, tenant_id, app, role)
+                    # TODO: Implement interview scheduling
+                    pass
 
                 results["screened"] += 1
 
@@ -250,11 +252,11 @@ class HRRecruitmentService:
             return results
 
         # Get unmatched prospects
-        prospects_stmt = select(TalentPoolProspect).where(
+        prospects_stmt = select(CandidateTalentPoolProspect).where(
             and_(
-                TalentPoolProspect.tenant_id == tenant_id,
-                TalentPoolProspect.status == "POOLED",
-                TalentPoolProspect.match_score.is_(None),
+                CandidateTalentPoolProspect.tenant_id == tenant_id,
+                CandidateTalentPoolProspect.status == "POOLED",
+                CandidateTalentPoolProspect.match_score.is_(None),
             )
         )
         prospects = (await db.execute(prospects_stmt)).scalars().all()
@@ -265,10 +267,11 @@ class HRRecruitmentService:
                 best_score = 0
 
                 for role in roles:
-                    match_result = await hr_screening.match_talent_pool_prospect(
-                        prospect_profile=prospect.profile_text or "",
-                        role_requirements=role.requirements,
+                    match_result = await match_talent_pool_candidate(
                         role_title=role.title,
+                        role_description=role.description,
+                        role_requirements=role.requirements,
+                        profile_text=prospect.profile_text or "",
                     )
 
                     if match_result.score > best_score:
@@ -295,53 +298,8 @@ class HRRecruitmentService:
         self, db: AsyncSession, tenant_id: uuid.UUID
     ) -> dict[str, int]:
         """Send scheduled interview emails."""
+        # Interview scheduling not yet implemented - stub for now
         results = {"sent": 0}
-
-        stmt = select(InterviewSchedule).where(
-            and_(
-                InterviewSchedule.tenant_id == tenant_id,
-                InterviewSchedule.status == "SCHEDULED",
-                InterviewSchedule.notification_sent == False,
-            )
-        )
-        interviews = (await db.execute(stmt)).scalars().all()
-
-        for interview in interviews:
-            try:
-                # Get application and role details
-                app_stmt = select(CandidateApplication).where(
-                    CandidateApplication.application_id == interview.application_id
-                )
-                app = (await db.execute(app_stmt)).scalar_one_or_none()
-
-                if not app or not app.applicant_email:
-                    continue
-
-                # Generate interview email
-                email_result = await hr_screening.draft_interview_email(
-                    applicant_name=app.applicant_name or "Candidate",
-                    job_title=interview.role_title or "Position",
-                    interview_details=interview.interview_details or "",
-                )
-
-                # Send via Gmail service (if configured)
-                sent = await self._send_gmail_email(
-                    to_email=app.applicant_email,
-                    subject=email_result.subject,
-                    body=email_result.body,
-                )
-
-                if sent:
-                    interview.notification_sent = True
-                    interview.notification_sent_at = datetime.now(timezone.utc)
-                    app.interview_email_sent_at = datetime.now(timezone.utc)
-                    app.ack_email_sent = True
-                    results["sent"] += 1
-
-            except Exception as e:
-                logger.error(f"Failed to send interview {interview.interview_id}: {e}")
-
-        await db.flush()
         return results
 
     async def _find_best_role(
@@ -369,30 +327,6 @@ class HRRecruitmentService:
 
         # Return first open role as fallback
         return roles[0]
-
-    async def _schedule_interview(
-        self,
-        db: AsyncSession,
-        tenant_id: uuid.UUID,
-        application: CandidateApplication,
-        role: RecruitmentRole,
-    ) -> None:
-        """Schedule an interview for a high-scoring candidate."""
-        interview = InterviewSchedule(
-            tenant_id=tenant_id,
-            application_id=application.application_id,
-            role_id=role.role_id,
-            role_title=role.title,
-            interview_details=(
-                f"Congratulations! Based on your resume, we'd like to invite you "
-                f"for an interview for the {role.title} position. "
-                f"Please reply to this email with your availability."
-            ),
-            scheduled_at=datetime.now(timezone.utc),
-            status="SCHEDULED",
-            notification_sent=False,
-        )
-        db.add(interview)
 
     async def _send_gmail_email(
         self,

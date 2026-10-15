@@ -14,10 +14,13 @@ from erp.api.routes import (
     auth_router,
     billing_router,
     commercial_router,
+    companies_router,
     crm_router,
-    health_router,
+    currency_router,
     events_router,
+    health_router,
     hr_router,
+    internal_whatsapp_router,
     inventory_rop_router,
     iot_telemetry_router,
     ledger_router,
@@ -30,25 +33,22 @@ from erp.api.routes import (
     projects_router,
     quality_router,
     reconciliation_router,
+    reports_router,
     setup_router,
     stock_router,
+    subcontracting_router,
     support_router,
     webhooks_router,
-    workforce_router,
-    reports_router,
-    subcontracting_router,
-    companies_router,
-    currency_router,
-    workflows_router,
     whatsapp_router,
-    internal_whatsapp_router,
+    workflows_router,
+    workforce_router,
 )
 from erp.config import settings
+from erp.events.dispatcher import OutboxDispatcher
 from erp.events.email_gateway import email_gateway
 from erp.events.producer import event_producer
-from erp.events.dispatcher import OutboxDispatcher
 from erp.orchestration.persistence import mark_interrupted_dags_for_recovery
-from erp.workforce.hr_agent_engine import start_hr_autonomous_engine
+from erp.workforce.hr_agent_engine import hr_agent_engine
 
 logger = logging.getLogger(__name__)
 
@@ -84,16 +84,12 @@ async def lifespan(app: FastAPI):
         app.state.outbox_dispatcher_status = "disabled_by_configuration"
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.start()
-    # Start Autonomous HR Agent Engine (60s Gmail polling loop)
-    hr_agent_stop = asyncio.Event()
-    hr_agent_task = asyncio.create_task(
-        start_hr_autonomous_engine(hr_agent_stop), name="autonomous-hr-agent"
-    )
+    # Start Autonomous HR Agent Engine
+    await hr_agent_engine.start()
     app.state.hr_agent_enabled = True
     yield
     # Graceful shutdown
-    hr_agent_stop.set()
-    await hr_agent_task
+    await hr_agent_engine.stop()
     if settings.ENABLE_SMTP_GATEWAY:
         email_gateway.stop()
     if outbox_task:
