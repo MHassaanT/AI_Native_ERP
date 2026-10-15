@@ -248,3 +248,35 @@ class HREmailPollingState(Base, TenantMixin, TimestampMixin):
         UniqueConstraint("tenant_id", name="uq_hr_email_polling_state_tenant"),
         Index("ix_hr_email_polling_state_tenant_id", "tenant_id"),
     )
+    
+    class TalentPoolProspect(Base, TenantMixin, TimestampMixin):
+    """Talent pool prospects staged from email intake or manual review."""
+
+    __tablename__ = "talent_pool_prospects"
+
+    prospect_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source_review_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("email_intake_reviews.review_id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="PENDING_REVIEW",  # PENDING_REVIEW, POOLED, TRANSFERRED, DISMISSED
+    )
+    applicant_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    applicant_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    desired_role: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    profile_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    matched_role_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("recruitment_roles.role_id"), nullable=True
+    )
+    match_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    match_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    match_evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    __table_args__ = (
+        Index("idx_talent_pool_status", "tenant_id", "status"),
+        Index("idx_talent_pool_email", "tenant_id", "applicant_email"),
+    )
