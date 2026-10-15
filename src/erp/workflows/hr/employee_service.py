@@ -4,6 +4,7 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
+import secrets
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,12 @@ from erp.db.models.hr import (
 
 class EmployeeService:
     """Manages the full employee lifecycle, organization structure, and onboarding/exit tasks."""
+
+    def _generate_attendance_token(self, employee_id: uuid.UUID, tenant_id: uuid.UUID) -> str:
+        """Generate a unique attendance token for an employee."""
+        token_bytes = secrets.token_bytes(32)
+        token_hex = token_bytes.hex()
+        return f"ATT-{token_hex[:16]}-{employee_id.hex[:8]}-{tenant_id.hex[:8]}"
 
     async def create_department(
         self,
@@ -143,10 +150,16 @@ class EmployeeService:
             iban_or_routing=iban_or_routing,
             certifications=certifications or [],
             max_weekly_hours=max_weekly_hours,
+            attendance_token=None,
             is_active=True,
         )
         db.add(emp)
         await db.flush()
+
+        # Generate and set attendance token after employee has an ID
+        emp.attendance_token = self._generate_attendance_token(emp.employee_id, tenant_id)
+        await db.flush()
+
         return emp
 
     async def get_employee(
@@ -175,6 +188,92 @@ class EmployeeService:
             stmt = stmt.where(Employee.status == status)
         stmt = stmt.order_by(Employee.employee_code.asc())
         return list((await db.execute(stmt)).scalars().all())
+
+    async def update_employee(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        employee_id: uuid.UUID,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        email: str | None = None,
+        department_name: str | None = None,
+        department_id: uuid.UUID | None = None,
+        designation_name: str | None = None,
+        designation_id: uuid.UUID | None = None,
+        reports_to_id: uuid.UUID | None = None,
+        gender: str | None = None,
+        date_of_birth: date | None = None,
+        date_of_joining: date | None = None,
+        employment_type: str | None = None,
+        status: str | None = None,
+        phone: str | None = None,
+        emergency_phone: str | None = None,
+        bank_name: str | None = None,
+        bank_account_no: str | None = None,
+        iban_or_routing: str | None = None,
+        certifications: list[str] | None = None,
+        max_weekly_hours: int | None = None,
+    ) -> Employee:
+        emp = await self.get_employee(db, tenant_id, employee_id)
+        if not emp:
+            raise ValueError(f"Employee {employee_id} not found")
+
+        if first_name is not None:
+            emp.first_name = first_name
+        if last_name is not None:
+            emp.last_name = last_name
+        if email is not None:
+            emp.email = email
+        if department_name is not None:
+            emp.department = department_name
+        if department_id is not None:
+            emp.department_id = department_id
+        if designation_name is not None:
+            emp.designation = designation_name
+        if designation_id is not None:
+            emp.designation_id = designation_id
+        if reports_to_id is not None:
+            emp.reports_to_id = reports_to_id
+        if gender is not None:
+            emp.gender = gender
+        if date_of_birth is not None:
+            emp.date_of_birth = date_of_birth
+        if date_of_joining is not None:
+            emp.date_of_joining = date_of_joining
+        if employment_type is not None:
+            emp.employment_type = employment_type
+        if status is not None:
+            emp.status = status
+        if phone is not None:
+            emp.phone = phone
+        if emergency_phone is not None:
+            emp.emergency_phone = emergency_phone
+        if bank_name is not None:
+            emp.bank_name = bank_name
+        if bank_account_no is not None:
+            emp.bank_account_no = bank_account_no
+        if iban_or_routing is not None:
+            emp.iban_or_routing = iban_or_routing
+        if certifications is not None:
+            emp.certifications = certifications
+        if max_weekly_hours is not None:
+            emp.max_weekly_hours = max_weekly_hours
+
+        await db.flush()
+        return emp
+
+    async def delete_employee(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        employee_id: uuid.UUID,
+    ) -> None:
+        emp = await self.get_employee(db, tenant_id, employee_id)
+        if not emp:
+            raise ValueError(f"Employee {employee_id} not found")
+        await db.delete(emp)
+        await db.flush()
 
     async def create_onboarding(
         self,

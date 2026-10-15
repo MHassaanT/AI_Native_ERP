@@ -241,6 +241,55 @@ async def get_employee_hr(employee_id: uuid.UUID, tenant_id: TenantIdDep, db: Db
     return emp
 
 
+@router.patch("/employees/{employee_id}", summary="Update employee")
+async def update_employee_hr(
+    employee_id: uuid.UUID,
+    req: CreateEmployeeFullRequest,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+):
+    try:
+        return await employee_service.update_employee(
+            db=db,
+            tenant_id=tenant_id,
+            employee_id=employee_id,
+            first_name=req.first_name,
+            last_name=req.last_name,
+            email=req.email,
+            department_name=req.department_name,
+            department_id=req.department_id,
+            designation_name=req.designation_name,
+            designation_id=req.designation_id,
+            reports_to_id=req.reports_to_id,
+            gender=req.gender,
+            date_of_birth=req.date_of_birth,
+            date_of_joining=req.date_of_joining,
+            employment_type=req.employment_type,
+            phone=req.phone,
+            emergency_phone=req.emergency_phone,
+            bank_name=req.bank_name,
+            bank_account_no=req.bank_account_no,
+            iban_or_routing=req.iban_or_routing,
+            certifications=req.certifications,
+            max_weekly_hours=req.max_weekly_hours,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to update employee: {str(e)}"
+        ) from e
+
+
+@router.delete("/employees/{employee_id}", summary="Delete employee")
+async def delete_employee_hr(employee_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        await employee_service.delete_employee(db, tenant_id, employee_id)
+        return {"message": "Employee deleted successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+
+
 # Onboarding & Separation
 @router.post(
     "/onboarding", status_code=status.HTTP_201_CREATED, summary="Start employee onboarding"

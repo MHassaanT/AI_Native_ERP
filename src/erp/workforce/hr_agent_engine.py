@@ -81,15 +81,6 @@ class HRAgentEngine:
 
         return all_results
 
-    def get_status(self) -> dict[str, Any]:
-        """Get current engine status."""
-        return {
-            "running": self.is_running,
-            "cycle_interval_seconds": self.cycle_interval,
-            "registered_tenants": len(self._tenant_ids),
-            "service_stats": hr_recruitment_service.stats,
-        }
-
     async def _run_loop(self) -> None:
         """Main background loop."""
         while not self._shutdown_event.is_set():
@@ -128,6 +119,20 @@ class HRAgentEngine:
                 await db.rollback()
                 logger.error(f"Cycle failed for tenant {tenant_id}: {e}")
                 raise
+
+    def get_status(self) -> dict[str, Any]:
+        """Get current engine status."""
+        return {
+            "running": self.is_running,
+            "cycle_interval_seconds": self.cycle_interval,
+            "registered_tenants": len(self._tenant_ids),
+            "service_stats": hr_recruitment_service.stats,
+        }
+
+
+def get_engine_status() -> dict[str, Any]:
+    """Get the status of the global HR agent engine instance."""
+    return hr_agent_engine.get_status()
 
 
 # Singleton instance

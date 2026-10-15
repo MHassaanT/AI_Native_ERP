@@ -106,6 +106,7 @@ class Employee(Base, TenantMixin, TimestampMixin):
     max_weekly_hours: Mapped[int] = mapped_column(
         Integer, nullable=False, default=48, doc="Statutory labor law ceiling"
     )
+    attendance_token: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     __table_args__ = (
