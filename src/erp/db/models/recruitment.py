@@ -249,7 +249,8 @@ class HREmailPollingState(Base, TenantMixin, TimestampMixin):
         Index("ix_hr_email_polling_state_tenant_id", "tenant_id"),
     )
     
-    class TalentPoolProspect(Base, TenantMixin, TimestampMixin):
+
+class TalentPoolProspect(Base, TenantMixin, TimestampMixin):
     """Talent pool prospects staged from email intake or manual review."""
 
     __tablename__ = "talent_pool_prospects"
