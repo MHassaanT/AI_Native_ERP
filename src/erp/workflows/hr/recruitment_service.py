@@ -351,6 +351,493 @@ class HRRecruitmentService:
             logger.error(f"Failed to send email to {to_email}: {e}")
             return False
 
+    # ============================================================================
+    # CRUD Methods for API Routes
+    # ============================================================================
+
+    async def create_role(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        title: str,
+        description: str,
+        requirements: str,
+    ) -> RecruitmentRole:
+        """Create a new recruitment role."""
+        role = RecruitmentRole(
+            tenant_id=tenant_id,
+            title=title,
+            description=description,
+            requirements=requirements,
+            status="OPEN",
+        )
+        db.add(role)
+        await db.flush()
+        return role
+
+    async def list_roles(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List recruitment roles, optionally filtered by status."""
+        stmt = select(RecruitmentRole).where(RecruitmentRole.tenant_id == tenant_id)
+        if role_status:
+            stmt = stmt.where(RecruitmentRole.status == role_status)
+        stmt = stmt.order_by(desc(RecruitmentRole.created_at))
+        roles = (await db.execute(stmt)).scalars().all()
+        return [
+            {
+                "role_id": role.role_id,
+                "title": role.title,
+                "description": role.description,
+                "requirements": role.requirements,
+                "status": role.status,
+                "created_at": role.created_at,
+            }
+            for role in roles
+        ]
+
+    async def get_role(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+    ) -> RecruitmentRole | None:
+        """Get a specific recruitment role."""
+        stmt = select(RecruitmentRole).where(
+            and_(
+                RecruitmentRole.role_id == role_id,
+                RecruitmentRole.tenant_id == tenant_id,
+            )
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    async def close_role(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+    ) -> RecruitmentRole | None:
+        """Close a recruitment role."""
+        role = await self.get_role(db, tenant_id, role_id)
+        if role:
+            role.status = "CLOSED"
+            await db.flush()
+        return role
+
+    async def create_application(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+        applicant_name: str | None,
+        applicant_email: str | None,
+        resume_filename: str,
+        resume_content_type: str,
+        resume_text: str,
+        source_review_id: uuid.UUID | None = None,
+    ) -> CandidateApplication:
+        """Create a candidate application."""
+        # Verify role exists
+        role = await self.get_role(db, tenant_id, role_id)
+        if not role:
+            raise ValueError("Role not found")
+
+        application = CandidateApplication(
+            tenant_id=tenant_id,
+            role_id=role_id,
+            applicant_name=applicant_name or "Unknown",
+            applicant_email=applicant_email,
+            resume_filename=resume_filename,
+            resume_content_type=resume_content_type,
+            resume_text=resume_text,
+            status="READY",
+            source_review_id=source_review_id,
+        )
+        db.add(application)
+        await db.flush()
+        return application
+
+    async def list_applications(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID | None = None,
+    ) -> list[CandidateApplication]:
+        """List candidate applications, optionally filtered by role."""
+        stmt = select(CandidateApplication).where(CandidateApplication.tenant_id == tenant_id)
+        if role_id:
+            stmt = stmt.where(CandidateApplication.role_id == role_id)
+        stmt = stmt.order_by(desc(CandidateApplication.created_at))
+        return (await db.execute(stmt)).scalars().all()
+
+    async def get_application(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        application_id: uuid.UUID,
+    ) -> CandidateApplication | None:
+        """Get a specific candidate application."""
+        stmt = select(CandidateApplication).where(
+            and_(
+                CandidateApplication.application_id == application_id,
+                CandidateApplication.tenant_id == tenant_id,
+            )
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    async def delete_application(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        application_id: uuid.UUID,
+    ) -> bool:
+        """Delete a candidate application."""
+        application = await self.get_application(db, tenant_id, application_id)
+        if application:
+            await db.delete(application)
+            await db.flush()
+            return True
+        return False
+
+    async def list_email_inbox(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+    ) -> list[Any]:
+        """List inbound emails for recruitment review."""
+        # This would query a Gmail sync table - stub for now
+        # Return empty list since Gmail integration isn't fully set up
+        return []
+
+    async def get_inbound_email(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        message_id: str,
+        lock: bool = False,
+    ) -> Any | None:
+        """Get a specific inbound email."""
+        # Stub for Gmail integration
+        return None
+
+    async def get_email_review_by_message(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        message_id: str,
+    ) -> RecruitmentEmailReview | None:
+        """Get an email review by message ID."""
+        stmt = select(RecruitmentEmailReview).where(
+            and_(
+                RecruitmentEmailReview.tenant_id == tenant_id,
+                RecruitmentEmailReview.inbound_message_id == message_id,
+            )
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    async def create_email_review(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        message_id: str,
+        applicant_name: str,
+        applicant_email: str,
+        desired_role: str,
+        suggested_role_id: uuid.UUID | None,
+        confidence: float,
+        summary: str,
+        evidence: list[dict[str, Any]],
+        resume_text: str,
+        is_application: bool,
+    ) -> RecruitmentEmailReview:
+        """Create an email review."""
+        review = RecruitmentEmailReview(
+            tenant_id=tenant_id,
+            inbound_message_id=message_id,
+            applicant_name=applicant_name,
+            applicant_email=applicant_email,
+            desired_role=desired_role,
+            suggested_role_id=suggested_role_id,
+            confidence=confidence,
+            summary=summary,
+            evidence=evidence,
+            resume_text=resume_text,
+            status="REVIEW_REQUIRED" if is_application else "DISMISSED",
+        )
+        db.add(review)
+        await db.flush()
+        return review
+
+    async def list_email_reviews(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+    ) -> list[RecruitmentEmailReview]:
+        """List email reviews awaiting decision."""
+        stmt = select(RecruitmentEmailReview).where(
+            and_(
+                RecruitmentEmailReview.tenant_id == tenant_id,
+                RecruitmentEmailReview.status == "REVIEW_REQUIRED",
+            )
+        ).order_by(desc(RecruitmentEmailReview.created_at))
+        return (await db.execute(stmt)).scalars().all()
+
+    async def get_email_review(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        review_id: uuid.UUID,
+        lock: bool = False,
+    ) -> RecruitmentEmailReview | None:
+        """Get a specific email review."""
+        stmt = select(RecruitmentEmailReview).where(
+            and_(
+                RecruitmentEmailReview.review_id == review_id,
+                RecruitmentEmailReview.tenant_id == tenant_id,
+            )
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    async def stage_email_review_in_talent_pool(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        review: RecruitmentEmailReview,
+    ) -> CandidateTalentPoolProspect:
+        """Stage an email review into the talent pool."""
+        prospect = CandidateTalentPoolProspect(
+            tenant_id=tenant_id,
+            source_review_id=review.review_id,
+            status="PENDING_REVIEW",
+            applicant_name=review.applicant_name,
+            applicant_email=review.applicant_email,
+            desired_role=review.desired_role,
+            profile_text=review.resume_text,
+        )
+        db.add(prospect)
+        review.status = "ADDED_TO_POOL"
+        await db.flush()
+        return prospect
+
+    async def add_review_to_talent_pool(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        review_id: uuid.UUID,
+    ) -> CandidateTalentPoolProspect:
+        """Add a reviewed email to the talent pool."""
+        review = await self.get_email_review(db, tenant_id, review_id)
+        if not review:
+            raise ValueError("Email review not found")
+        if review.status != "REVIEW_REQUIRED":
+            raise ValueError("Email review is no longer pending")
+        return await self.stage_email_review_in_talent_pool(db, tenant_id, review)
+
+    async def dismiss_email_review(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        review_id: uuid.UUID,
+    ) -> RecruitmentEmailReview | None:
+        """Dismiss an email review."""
+        review = await self.get_email_review(db, tenant_id, review_id)
+        if review:
+            review.status = "DISMISSED"
+            await db.flush()
+        return review
+
+    async def list_talent_pool(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+    ) -> list[CandidateTalentPoolProspect]:
+        """List talent pool prospects."""
+        stmt = select(CandidateTalentPoolProspect).where(
+            CandidateTalentPoolProspect.tenant_id == tenant_id
+        ).order_by(desc(CandidateTalentPoolProspect.created_at))
+        return (await db.execute(stmt)).scalars().all()
+
+    async def save_talent_pool_match(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        prospect: CandidateTalentPoolProspect,
+        role_id: uuid.UUID,
+        match_score: int,
+        match_summary: str,
+        match_evidence: list[dict[str, Any]],
+    ) -> CandidateTalentPoolProspect:
+        """Save a talent pool match result."""
+        prospect.matched_role_id = role_id
+        prospect.match_score = match_score
+        prospect.match_summary = match_summary
+        prospect.match_evidence = match_evidence
+        prospect.matched_at = datetime.now(timezone.utc)
+        await db.flush()
+        return prospect
+
+    async def transfer_talent_pool_prospect(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        prospect_id: uuid.UUID,
+        role_id: uuid.UUID,
+    ) -> CandidateApplication:
+        """Transfer a talent pool prospect to a candidate application."""
+        prospect_stmt = select(CandidateTalentPoolProspect).where(
+            and_(
+                CandidateTalentPoolProspect.prospect_id == prospect_id,
+                CandidateTalentPoolProspect.tenant_id == tenant_id,
+            )
+        )
+        prospect = (await db.execute(prospect_stmt)).scalar_one_or_none()
+        if not prospect:
+            raise ValueError("Prospect not found")
+
+        # Verify role exists
+        role = await self.get_role(db, tenant_id, role_id)
+        if not role:
+            raise ValueError("Role not found")
+
+        # Create application from prospect
+        application = CandidateApplication(
+            tenant_id=tenant_id,
+            role_id=role_id,
+            applicant_name=prospect.applicant_name,
+            applicant_email=prospect.applicant_email,
+            resume_filename="talent_pool.txt",
+            resume_content_type="text/plain",
+            resume_text=prospect.profile_text,
+            status="READY",
+            source_review_id=prospect.source_review_id,
+        )
+        db.add(application)
+
+        # Update prospect status
+        prospect.status = "TRANSFERRED"
+        await db.flush()
+        return application
+
+    async def dismiss_talent_pool_prospect(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        prospect_id: uuid.UUID,
+    ) -> CandidateTalentPoolProspect | None:
+        """Dismiss a talent pool prospect."""
+        prospect_stmt = select(CandidateTalentPoolProspect).where(
+            and_(
+                CandidateTalentPoolProspect.prospect_id == prospect_id,
+                CandidateTalentPoolProspect.tenant_id == tenant_id,
+            )
+        )
+        prospect = (await db.execute(prospect_stmt)).scalar_one_or_none()
+        if prospect:
+            prospect.status = "DISMISSED"
+            await db.flush()
+        return prospect
+
+    async def send_interview_invitation(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        application_id: uuid.UUID,
+        interview_details: str,
+    ) -> CandidateApplication:
+        """Send an interview invitation email to a candidate."""
+        application = await self.get_application(db, tenant_id, application_id)
+        if not application:
+            raise ValueError("Application not found")
+
+        if not application.applicant_email:
+            raise ValueError("Candidate has no email address")
+
+        # Get role for email content
+        role = await self.get_role(db, tenant_id, application.role_id)
+        if not role:
+            raise ValueError("Role not found")
+
+        # Generate interview email draft
+        from erp.ai.hr_screening import create_interview_draft
+        draft = await create_interview_draft(
+            candidate_name=application.applicant_name,
+            role_title=role.title,
+            interview_details=interview_details,
+        )
+
+        # Send email
+        sent = await self._send_gmail_email(
+            to_email=application.applicant_email,
+            subject=draft.subject,
+            body=draft.body,
+        )
+
+        if sent:
+            application.interview_email_subject = draft.subject
+            application.interview_email_body = draft.body
+            application.interview_email_sent_at = datetime.now(timezone.utc)
+            await db.flush()
+
+        return application
+
+    async def scan_and_auto_transfer_prospects(
+        self,
+        db: AsyncSession,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Scan talent pool and auto-transfer high-score prospects to a role."""
+        role = await self.get_role(db, tenant_id, role_id)
+        if not role:
+            raise ValueError("Role not found")
+
+        # Get pooled prospects
+        prospects_stmt = select(CandidateTalentPoolProspect).where(
+            and_(
+                CandidateTalentPoolProspect.tenant_id == tenant_id,
+                CandidateTalentPoolProspect.status == "POOLED",
+            )
+        )
+        prospects = (await db.execute(prospects_stmt)).scalars().all()
+
+        results = {"scanned": len(prospects), "transferred": 0}
+
+        for prospect in prospects:
+            try:
+                # Match prospect against role
+                match_result = await match_talent_pool_candidate(
+                    role_title=role.title,
+                    role_description=role.description,
+                    role_requirements=role.requirements,
+                    profile_text=prospect.profile_text or "",
+                )
+
+                # Auto-transfer if score >= 70
+                if match_result.score >= 70:
+                    await self.transfer_talent_pool_prospect(
+                        db, tenant_id, prospect.prospect_id, role_id
+                    )
+                    results["transferred"] += 1
+                else:
+                    # Save match result for manual review
+                    await self.save_talent_pool_match(
+                        db,
+                        tenant_id,
+                        prospect,
+                        role_id,
+                        match_result.score,
+                        match_result.summary,
+                        [e.model_dump() for e in match_result.evidence],
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed to scan prospect {prospect.prospect_id}: {e}")
+
+        return results
+
 
 # Singleton instance
 hr_recruitment_service = HRRecruitmentService()
