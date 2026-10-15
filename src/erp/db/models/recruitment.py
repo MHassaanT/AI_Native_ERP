@@ -14,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    Integer,
     UniqueConstraint,
     text,
 )
