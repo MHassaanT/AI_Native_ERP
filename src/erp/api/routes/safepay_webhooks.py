@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,14 +33,15 @@ def _event_datetime(value: Any) -> datetime | None:
     return None
 
 
-def _verified_signature(raw_body: bytes, signature: str | None) -> bool:
+def _verified_signature(data: dict[str, Any], signature: str | None) -> bool:
     secret = settings.SAFEPAY_WEBHOOK_SECRET
     if not secret or not signature:
         return False
     received = signature.strip().lower()
-    if received.startswith("sha256="):
-        received = received[7:]
-    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    # SafePay's @sfpy/node-sdk signs JSON.stringify(request.body.data) with
+    # HMAC-SHA512. It does not sign the raw request body.
+    canonical_data = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    expected = hmac.new(secret.encode(), canonical_data, hashlib.sha512).hexdigest()
     return hmac.compare_digest(expected, received)
 
 
@@ -49,19 +51,17 @@ async def receive_subscription_webhook(
     db: DbSessionDep,
     signature: str | None = Header(default=None, alias="X-SFPY-SIGNATURE"),
 ):
-    raw_body = await request.body()
     if not settings.SAFEPAY_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail="SafePay webhook verification is not configured.")
-    if not _verified_signature(raw_body, signature):
-        logger.warning("Rejected SafePay webhook because its signature did not verify.")
-        raise HTTPException(status_code=401, detail="Invalid SafePay webhook signature.")
-
     try:
         event = await request.json()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON webhook payload.") from exc
     if not isinstance(event, dict) or not isinstance(event.get("data"), dict):
         raise HTTPException(status_code=400, detail="Malformed SafePay webhook payload.")
+    if not _verified_signature(event["data"], signature):
+        logger.warning("Rejected SafePay webhook because its signature did not verify.")
+        raise HTTPException(status_code=401, detail="Invalid SafePay webhook signature.")
 
     event_id = event.get("id") or event.get("token")
     event_type = event.get("type")
