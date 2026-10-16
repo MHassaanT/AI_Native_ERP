@@ -52,6 +52,7 @@ async def receive_subscription_webhook(
     if not settings.SAFEPAY_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail="SafePay webhook verification is not configured.")
     if not _verified_signature(raw_body, signature):
+        logger.warning("Rejected SafePay webhook because its signature did not verify.")
         raise HTTPException(status_code=401, detail="Invalid SafePay webhook signature.")
 
     try:
@@ -67,11 +68,18 @@ async def receive_subscription_webhook(
         raise HTTPException(status_code=400, detail="SafePay webhook is missing event ID or type.")
 
     existing = await db.get(SafePayWebhookEvent, event_id)
-    if existing:
+    if existing and not existing.processing_error:
         return {"ok": True, "duplicate": True}
+    if existing:
+        # A prior delivery was persisted but could not be correlated. Reprocess
+        # it on SafePay's retry instead of permanently swallowing the event.
+        record = existing
+        record.processing_error = None
+    else:
+        record = SafePayWebhookEvent(event_id=event_id, event_type=event_type, payload=event)
+        db.add(record)
 
-    record = SafePayWebhookEvent(event_id=event_id, event_type=event_type, payload=event)
-    db.add(record)
+    logger.info("Received SafePay webhook event %s (%s).", event_type, event_id)
     data = event["data"]
     metadata = data.get("metadata")
     nested_subscription = data.get("subscription")
@@ -137,4 +145,8 @@ async def receive_subscription_webhook(
 
     record.processed_at = datetime.now(UTC)
     await db.commit()
+    if record.processing_error == "No pending subscription matched the SafePay reference.":
+        # Ask SafePay to retry. The event remains available for audit and is
+        # eligible for reprocessing when its subscription correlation appears.
+        raise HTTPException(status_code=503, detail="Subscription reference is not available yet.")
     return {"ok": True, "duplicate": False}
