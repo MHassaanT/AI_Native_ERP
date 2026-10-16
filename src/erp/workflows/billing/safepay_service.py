@@ -42,27 +42,30 @@ class SafePayService:
     def is_configured(self) -> bool:
         return bool(settings.SAFEPAY_SECRET_KEY)
 
-    async def _get_auth_token(self) -> str:
+    async def _get_auth_token(self, *, force_refresh: bool = False) -> str:
         if not settings.SAFEPAY_SECRET_KEY:
             raise RuntimeError("SafePay server secret is not configured.")
 
         now = time.monotonic()
-        if self._token and now < self._token_expires_at - 300:
+        if not force_refresh and self._token and now < self._token_expires_at - 300:
             return self._token
 
         async with self._token_lock:
             now = time.monotonic()
-            if self._token and now < self._token_expires_at - 300:
+            if not force_refresh and self._token and now < self._token_expires_at - 300:
                 return self._token
             async with httpx.AsyncClient(timeout=15) as client:
                 response = await client.post(
                     f"{self.api_host}/client/passport/v1/token",
                     headers={"X-SFPY-MERCHANT-SECRET": settings.SAFEPAY_SECRET_KEY},
+                    json={},
                 )
                 response.raise_for_status()
-                token = response.json().get("data")
-                if not isinstance(token, str) or not token:
+                response_body = response.json()
+                token = response_body.get("data") if isinstance(response_body, dict) else None
+                if not isinstance(token, str) or not token.strip():
                     raise RuntimeError("SafePay did not return an authentication token.")
+                token = token.strip()
                 self._token = token
                 self._token_expires_at = now + 3600
                 return token
@@ -70,7 +73,9 @@ class SafePayService:
     async def create_subscription_checkout(
         self, plan_id: str, reference: str, redirect_url: str, cancel_url: str
     ) -> str:
-        token = await self._get_auth_token()
+        # Start every checkout session with a fresh token. This avoids sending
+        # SafePay a token rejected by a prior/expired checkout attempt.
+        token = await self._get_auth_token(force_refresh=True)
         params = urlencode(
             {
                 "plan_id": plan_id,
