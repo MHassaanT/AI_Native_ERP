@@ -76,7 +76,6 @@ class Employee(Base, TenantMixin, TimestampMixin):
     department_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("departments.department_id"), nullable=True
     )
-    designation: Mapped[str | None] = mapped_column(String(128), nullable=True)
     designation_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("designations.designation_id"), nullable=True
     )

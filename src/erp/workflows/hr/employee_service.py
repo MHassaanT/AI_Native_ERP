@@ -38,6 +38,18 @@ class EmployeeService:
         parent_department_id: uuid.UUID | None = None,
         department_head_id: uuid.UUID | None = None,
     ) -> Department:
+        # Check if department already exists for this tenant
+        stmt = (
+            select(Department)
+            .where(Department.tenant_id == tenant_id)
+            .where(Department.department_name == department_name)
+        )
+        result = await db.execute(stmt)
+        existing_dept = result.scalar_one_or_none()
+        
+        if existing_dept:
+            return existing_dept
+        
         dept = Department(
             tenant_id=tenant_id,
             department_name=department_name,

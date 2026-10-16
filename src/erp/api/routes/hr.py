@@ -1136,16 +1136,6 @@ async def trigger_autonomous_hr_cycle(tenant_id: TenantIdDep, db: DbSessionDep):
     return metrics
 
 
-@router.get(
-    "/recruitment/agent-status",
-    summary="Get autonomous HR agent engine status and telemetry",
-)
-async def get_hr_agent_status(tenant_id: TenantIdDep):
-    from erp.workforce.hr_agent_engine import get_engine_status
-    return get_engine_status(str(tenant_id))
-    
-
-
 @router.get("/recruitment/agent-status")
 async def get_hr_agent_status():
     """Get autonomous HR agent status and statistics."""
