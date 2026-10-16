@@ -1,265 +1,131 @@
-"use client";
-
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  ArrowRight,
   ArrowUpRight,
-  Activity,
-  CheckCircle2,
-  DollarSign,
-  FileCheck,
-  Package,
-  RefreshCw,
+  Boxes,
+  BarChart3,
+  Check,
   ShieldCheck,
-  Users,
-  Wrench,
+  Sparkles,
+  Workflow,
 } from "lucide-react";
-import { api } from "@/lib/api";
-import { getUser } from "@/lib/auth";
-import { ModuleOnboardingWidget } from "@/components/module-onboarding";
 
-export default function OverviewPage() {
-  const [user, setUser] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+const modules = [
+  { icon: BarChart3, title: "Finance, in focus", detail: "A live view of cash, ledgers, and financial controls." },
+  { icon: Boxes, title: "Operations, connected", detail: "Bring inventory, procurement, production, and people together." },
+  { icon: Workflow, title: "Workflows that move", detail: "Coordinate repeatable work across teams and business systems." },
+];
 
-  // Live Metrics
-  const [cashBuffer, setCashBuffer] = useState<string>("$0.00");
-  const [cashNote, setCashNote] = useState<string>("GAAP 1010 Account active");
-  const [matchRate, setMatchRate] = useState<string>("0.0%");
-  const [matchNote, setMatchNote] = useState<string>("0 invoices processed");
-  const [ledgerDrift, setLedgerDrift] = useState<string>("0.0000");
-  const [isFreshTenant, setIsFreshTenant] = useState<boolean>(true);
-
-  const loadLiveData = async () => {
-    setLoading(true);
-    try {
-      const currentUser = getUser();
-      setUser(currentUser);
-
-      const [accountsRes, invoicesRes, entriesRes] = await Promise.allSettled([
-        api.getAccounts(),
-        api.getInvoices(),
-        api.getGLEntries(),
-      ]);
-
-      // 1. GL Accounts & Cash Buffer
-      if (accountsRes.status === "fulfilled" && Array.isArray(accountsRes.value)) {
-        const cashAccounts = accountsRes.value.filter(
-          (acc: any) =>
-            acc.account_type === "ASSET" &&
-            (acc.account_code?.startsWith("10") || acc.account_name?.toLowerCase().includes("cash"))
-        );
-        const totalCash = cashAccounts.reduce((sum: number, acc: any) => sum + Number(acc.current_balance || 0), 0);
-        if (totalCash > 0) {
-          setCashBuffer(`$${totalCash.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-          setCashNote("Live GL Cash & Equivalents");
-        } else {
-          setCashBuffer("$0.00");
-          setCashNote("Awaiting initial funding deposit");
-        }
-      }
-
-      // 2. Accounts Payable 3-Way Match Rate
-      if (invoicesRes.status === "fulfilled" && Array.isArray(invoicesRes.value)) {
-        const invoices = invoicesRes.value;
-        if (invoices.length === 0) {
-          setMatchRate("0.0%");
-          setMatchNote("0 invoices in database");
-          setIsFreshTenant(true);
-        } else {
-          setIsFreshTenant(false);
-          const matched = invoices.filter((i: any) => i.match_status === "MATCHED").length;
-          const rate = ((matched / invoices.length) * 100).toFixed(1);
-          setMatchRate(`${rate}%`);
-          setMatchNote(`${matched} of ${invoices.length} matched touchless`);
-        }
-      }
-
-      // 3. Ledger Zero-Sum Drift
-      if (entriesRes.status === "fulfilled" && Array.isArray(entriesRes.value)) {
-        const entries = entriesRes.value;
-        if (entries.length === 0) {
-          setLedgerDrift("0.0000");
-        } else {
-          let totalDebit = 0;
-          let totalCredit = 0;
-          entries.forEach((e: any) => {
-            if (Array.isArray(e.lines)) {
-              e.lines.forEach((l: any) => {
-                totalDebit += Number(l.debit_amount || 0);
-                totalCredit += Number(l.credit_amount || 0);
-              });
-            }
-          });
-          const drift = Math.abs(totalDebit - totalCredit);
-          setLedgerDrift(drift.toFixed(4));
-        }
-      }
-    } catch {
-      // Fallbacks already initialized to zero-state
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadLiveData();
-  }, []);
-
-  const kpis = [
-    {
-      title: "13-Week Cash Buffer",
-      value: cashBuffer,
-      change: cashNote,
-      icon: DollarSign,
-    },
-    {
-      title: "Touchless 3-Way Match Rate",
-      value: matchRate,
-      change: matchNote,
-      icon: CheckCircle2,
-    },
-    {
-      title: "Ledger Zero-Sum Drift",
-      value: ledgerDrift,
-      change: "Invariants 100% verified",
-      icon: ShieldCheck,
-    },
-  ];
-
+export default function LandingPage() {
   return (
-    <div className="mx-auto max-w-[1600px] space-y-7">
-      {/* Page Header */}
-      <div className="flex flex-col gap-4 border-b border-cream-300/80 pb-6 md:flex-row md:items-end md:justify-between">
-        <div>
-          <div className="mb-2 flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-sage-500/20 bg-sage-50 px-2.5 py-1 text-[11px] font-medium text-sage-700">
-            <span className="h-1.5 w-1.5 rounded-full bg-sage-500" />
-            Executive overview
-            </span>
-            {user?.tenant_slug && (
-            <span className="rounded-full border border-cream-300 bg-white px-2.5 py-1 text-[11px] font-medium text-cream-700">
-              {user.tenant_name || user.tenant_slug}
-            </span>
-            )}
+    <main className="min-h-screen overflow-hidden bg-[#f8faf7] text-cream-900">
+      <header className="mx-auto flex h-[76px] max-w-7xl items-center justify-between px-5 sm:px-8">
+        <Link href="/" className="flex items-center gap-3" aria-label="AI-Native ERP home">
+          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-sage-600 text-xs font-bold tracking-wide text-white">AI</span>
+          <span>
+            <span className="block text-sm font-semibold tracking-tight">AI-Native ERP</span>
+            <span className="block text-[11px] text-cream-600">One clear view of your business</span>
+          </span>
+        </Link>
+        <nav className="flex items-center gap-2 sm:gap-3">
+          <Link href="/login" className="rounded-lg px-3 py-2 text-sm font-medium text-cream-700 transition hover:bg-white hover:text-cream-900">Log in</Link>
+          <Link href="/signup" className="inline-flex items-center gap-2 rounded-lg bg-cream-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-sage-700">
+            Get started <ArrowRight className="h-4 w-4" />
+          </Link>
+        </nav>
+      </header>
+
+      <section className="mx-auto grid max-w-7xl items-center gap-14 px-5 pb-20 pt-12 sm:px-8 sm:pt-20 lg:grid-cols-[1fr_0.95fr] lg:gap-12 lg:pb-28">
+        <div className="max-w-2xl">
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-sage-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-sage-700 shadow-sm">
+            <Sparkles className="h-3.5 w-3.5" /> A calmer way to run your business
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-cream-900 sm:text-[28px]">
-            Welcome back{user?.full_name ? `, ${user.full_name.split(" ")[0]}` : ""}
-            </h1>
-          <p className="mt-1.5 text-sm text-cream-700">
-            Your operational and financial health, all in one place.
+          <h1 className="max-w-xl text-4xl font-semibold leading-[1.08] tracking-[-0.045em] text-cream-900 sm:text-5xl lg:text-[62px]">
+            Your whole business, <span className="text-sage-600">working as one.</span>
+          </h1>
+          <p className="mt-6 max-w-lg text-base leading-7 text-cream-600 sm:text-lg sm:leading-8">
+            Bring finance, operations, and everyday work into one considered workspace. See what matters, keep teams aligned, and move forward with confidence.
           </p>
-        </div>
-
-        <button
-          onClick={() => loadLiveData()}
-          title="Refresh live metrics"
-          className="inline-flex h-10 items-center justify-center gap-2 self-start rounded-lg border border-cream-300 bg-white px-3 text-xs font-medium text-cream-700 shadow-sm transition-colors hover:bg-cream-100 md:self-auto"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh data
-        </button>
-      </div>
-
-      {/* KPI Cards Grid - Live Data */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {kpis.map((kpi) => {
-          const Icon = kpi.icon;
-          return (
-            <div
-            key={kpi.title}
-            className="group rounded-2xl border border-cream-300/80 bg-white p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-sage-500/30 hover:shadow-md sm:p-6"
-            >
-            <div className="flex items-center justify-between">
-              <span className="text-[13px] font-medium text-cream-700">{kpi.title}</span>
-              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-sage-50 text-sage-600 transition-colors group-hover:bg-sage-100">
-                <Icon className="h-[18px] w-[18px]" />
-              </span>
-            </div>
-            <div className="mt-5 font-mono text-[30px] font-semibold leading-none tracking-tight text-cream-900">
-              {kpi.value}
-            </div>
-            <div className="mt-3 flex items-center gap-2 text-xs text-cream-600">
-              <span className="h-1.5 w-1.5 rounded-full bg-sage-500" />
-              {kpi.change}
-            </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Dynamic Grounded In-App Module Onboarding Widget */}
-      <ModuleOnboardingWidget />
-
-      {/* Two Column Section */}
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
-        <div className="rounded-2xl border border-cream-300/80 bg-white p-5 shadow-sm sm:p-6 xl:col-span-2">
-          <div className="flex items-center justify-between border-b border-cream-200 pb-4">
-            <div className="flex items-start gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sage-50 text-sage-600">
-                <Activity className="h-5 w-5" />
-              </span>
-              <div>
-                <h2 className="text-[15px] font-semibold text-cream-900">Workflow activity</h2>
-                <p className="mt-1 text-xs text-cream-600">Monitor runs and recover interrupted tasks.</p>
-              </div>
-            </div>
-            <Link
-              href="/workflows"
-              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 text-xs font-medium text-sage-700 transition-colors hover:bg-sage-50"
-            >
-              View workflows
-              <ArrowUpRight className="h-3.5 w-3.5" />
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+            <Link href="/signup" className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-sage-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-sage-700">
+              Create your workspace <ArrowRight className="h-4 w-4" />
+            </Link>
+            <Link href="/login" className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-cream-300 bg-white px-5 text-sm font-semibold text-cream-800 transition hover:border-sage-300 hover:bg-sage-50">
+              Sign in to your account
             </Link>
           </div>
-          <div className="flex min-h-44 flex-col items-center justify-center px-4 py-8 text-center">
-            <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-cream-100 text-cream-600">
-              <Activity className="h-5 w-5" />
-            </span>
-            <p className="text-sm font-medium text-cream-800">Your workflow history is ready</p>
-            <p className="mt-1 max-w-sm text-xs leading-5 text-cream-600">
-              Durable workflow records are available to inspect and recover from the workflow workspace.
-            </p>
+          <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2 text-xs text-cream-600">
+            {["A workspace for every team", "Built-in controls", "One connected operation"].map((item) => (
+              <span key={item} className="inline-flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-sage-600" />{item}</span>
+            ))}
           </div>
         </div>
 
-        {/* Priority Conflict Engine Card */}
-        <div className="rounded-2xl border border-cream-300/80 bg-white p-5 shadow-sm sm:p-6">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-[15px] font-semibold text-cream-900">Conflict hierarchy</h2>
-              <p className="mt-1 text-xs text-cream-600">Priorities enforced by the decision engine</p>
+        <div className="relative mx-auto w-full max-w-[560px]">
+          <div className="absolute -inset-8 rounded-[40px] bg-gradient-to-br from-sage-100/70 via-transparent to-[#edf1e9] blur-2xl" />
+          <div className="relative rounded-2xl border border-cream-200 bg-white p-3 shadow-[0_24px_80px_-32px_rgba(37,55,40,0.28)] sm:p-4">
+            <div className="flex items-center justify-between border-b border-cream-100 px-2 pb-3">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-sage-50 text-sage-700"><BarChart3 className="h-4 w-4" /></span>
+                <div><p className="text-xs font-semibold">Business overview</p><p className="mt-0.5 text-[10px] text-cream-500">Monday, October 19</p></div>
+              </div>
+              <span className="rounded-full border border-sage-100 bg-sage-50 px-2.5 py-1 text-[10px] font-medium text-sage-700">All systems clear</span>
             </div>
-            <span className="rounded-full border border-sage-500/20 bg-sage-50 px-2 py-1 text-[10px] font-medium text-sage-700">
-              Active
-            </span>
-          </div>
-
-          <div className="mt-5 space-y-2">
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-sage-500/15 bg-sage-50 px-3 py-2.5 text-xs text-sage-700">
-              <span>1. P_Statutory_Legal</span>
-              <span className="text-[10px] font-medium">Dominant</span>
+            <div className="grid grid-cols-3 gap-2.5 py-3 sm:gap-3 sm:py-4">
+              {[["Cash position", "$248.6k", "+8.2%"], ["Open orders", "184", "On track"], ["Team capacity", "92%", "This week"]].map(([label, value, note]) => (
+                <div key={label} className="rounded-xl border border-cream-100 bg-[#fbfcfa] p-3 sm:p-4">
+                  <p className="text-[9px] leading-4 text-cream-500 sm:text-[10px]">{label}</p>
+                  <p className="mt-2 text-base font-semibold tracking-tight text-cream-900 sm:text-xl">{value}</p>
+                  <p className="mt-1 text-[9px] text-sage-700 sm:text-[10px]">{note}</p>
+                </div>
+              ))}
             </div>
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
-              <span>2. P_Financial_Solvency</span>
-              <span className="text-[10px] text-cream-600">Covenant</span>
+            <div className="rounded-xl border border-cream-100 p-4 sm:p-5">
+              <div className="flex items-start justify-between">
+                <div><p className="text-xs font-semibold">Operations at a glance</p><p className="mt-1 text-[10px] text-cream-500">Activity across your workspace</p></div>
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-sage-50 text-sage-700"><Workflow className="h-3.5 w-3.5" /></span>
+              </div>
+              <div className="mt-5 flex h-24 items-end gap-2 sm:h-28 sm:gap-3">
+                {[35, 48, 43, 66, 55, 72, 61, 86, 70, 94, 78, 100].map((height, index) => (
+                  <div key={index} className="flex-1 rounded-t-md bg-sage-100" style={{ height: `${height}%` }}>
+                    <div className={`h-full w-full rounded-t-md ${index > 8 ? "bg-sage-500" : ""}`} />
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex justify-between text-[9px] text-cream-400"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
             </div>
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
-              <span>3. P_Contractual_SLA</span>
-              <span className="text-[10px] text-cream-600">Customer</span>
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
-              <span>4. P_Capacity_Throughput</span>
-              <span className="text-[10px] text-cream-600">Shop Floor</span>
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-cream-200 bg-[#fbfcfa] px-3 py-2.5 text-xs text-cream-800">
-              <span>5. P_Discretionary_Cost</span>
-              <span className="text-[10px] text-cream-600">Subordinate</span>
+            <div className="mt-3 flex items-center gap-3 rounded-xl bg-[#f6f8f5] p-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white text-sage-700 shadow-sm"><ShieldCheck className="h-4 w-4" /></span>
+              <div className="min-w-0 flex-1"><p className="text-[11px] font-semibold">Your controls are in place</p><p className="mt-0.5 truncate text-[10px] text-cream-500">Approvals, access, and audit history in one view</p></div>
+              <ArrowUpRight className="h-4 w-4 text-cream-400" />
             </div>
           </div>
         </div>
-      </div>
+      </section>
 
-    </div>
+      <section className="border-y border-cream-200/80 bg-white/65">
+        <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-16">
+          <div className="max-w-xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-sage-700">A clearer way to work</p>
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">Everything connected. Nothing in the way.</h2>
+            <p className="mt-3 text-sm leading-6 text-cream-600">Keep the important parts of your operation close, with the context to make the next decision.</p>
+          </div>
+          <div className="mt-9 grid gap-4 md:grid-cols-3">
+            {modules.map(({ icon: Icon, title, detail }) => (
+              <article key={title} className="rounded-xl border border-cream-200 bg-white p-5 shadow-sm">
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-sage-50 text-sage-700"><Icon className="h-5 w-5" /></span>
+                <h3 className="mt-4 text-sm font-semibold">{title}</h3>
+                <p className="mt-2 text-sm leading-6 text-cream-600">{detail}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <footer className="mx-auto flex max-w-7xl flex-col gap-3 px-5 py-6 text-xs text-cream-500 sm:flex-row sm:items-center sm:justify-between sm:px-8">
+        <span>© {new Date().getFullYear()} AI-Native ERP</span>
+        <span>One thoughtful workspace for the work that matters.</span>
+      </footer>
+    </main>
   );
 }

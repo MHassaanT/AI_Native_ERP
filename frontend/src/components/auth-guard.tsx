@@ -12,15 +12,15 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setMounted(true);
-    const isPublic = pathname === "/login" || pathname === "/signup";
+    const isPublic = pathname === "/" || pathname === "/login" || pathname === "/signup";
     const authStatus = isAuthenticated();
 
     if (!authStatus && !isPublic) {
       setIsAuthorized(false);
       router.replace("/login");
-    } else if (authStatus && isPublic) {
+    } else if (authStatus && (pathname === "/login" || pathname === "/signup")) {
       setIsAuthorized(true);
-      router.replace("/");
+      router.replace("/overview");
     } else {
       setIsAuthorized(true);
     }
@@ -38,7 +38,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  const isPublic = pathname === "/login" || pathname === "/signup";
+  const isPublic = pathname === "/" || pathname === "/login" || pathname === "/signup";
   if (!isAuthorized && !isPublic) {
     return (
       <div className="min-h-[70vh] flex flex-col items-center justify-center">

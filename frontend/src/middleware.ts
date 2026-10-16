@@ -42,20 +42,22 @@ export function middleware(request: NextRequest) {
   const rawToken = request.cookies.get("ai_erp_token")?.value;
   const hasValidToken = isTokenValid(rawToken);
   const payload = parseTokenPayload(rawToken);
+  const isLandingPage = pathname === "/";
   const isAuthPage = pathname === "/login" || pathname === "/signup";
   const isSetupPage = pathname === "/setup";
 
   // If user has an invalid/expired token in cookies, clear it immediately
   if (rawToken && !hasValidToken) {
-    const response = isAuthPage
+    const response = isAuthPage || isLandingPage
       ? NextResponse.next()
       : NextResponse.redirect(new URL("/login", request.url));
     response.cookies.delete("ai_erp_token");
     return response;
   }
 
-  // If user is NOT logged in and trying to access ANY protected page (including / and /setup), redirect to /login
-  if (!hasValidToken && !isAuthPage) {
+  // The landing page and account entry points are public. All workspace routes
+  // (including setup) require a valid session.
+  if (!hasValidToken && !isAuthPage && !isLandingPage) {
     const loginUrl = new URL("/login", request.url);
     const response = NextResponse.redirect(loginUrl);
     if (rawToken) response.cookies.delete("ai_erp_token");
@@ -71,14 +73,14 @@ export function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL("/setup", request.url));
     }
 
-    // If setup is already done and user tries to access /setup, redirect to dashboard /
+    // If setup is already done and user tries to access /setup, redirect to the overview.
     if (isSetupDone && isSetupPage) {
-      return NextResponse.redirect(new URL("/", request.url));
+      return NextResponse.redirect(new URL("/overview", request.url));
     }
 
     // If user visits /login or /signup while authenticated
     if (isAuthPage) {
-      return NextResponse.redirect(new URL(isSetupDone ? "/" : "/setup", request.url));
+      return NextResponse.redirect(new URL(isSetupDone ? "/overview" : "/setup", request.url));
     }
   }
 

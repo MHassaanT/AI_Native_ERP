@@ -36,6 +36,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const isAuthPage = pathname === "/login" || pathname === "/signup";
 
+  if (pathname === "/") {
+    return <AuthGuard>{children}</AuthGuard>;
+  }
+
   // Auth pages (Login / Signup) render clean without the sidebar
   if (isAuthPage) {
     return (

@@ -120,7 +120,7 @@ export function Sidebar({
       {/* 1. Brand & Logo Header */}
       <div className={`flex items-center h-[68px] px-4 border-b border-cream-300/80 bg-white/70 ${isRail ? "justify-center" : "justify-between"}`}>
         <Link
-          href="/"
+          href="/overview"
           onClick={onCloseMobile}
           className={`flex items-center gap-3 group ${isRail ? "justify-center" : ""}`}
         >

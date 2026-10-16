@@ -208,7 +208,7 @@ export default function SetupWizardPage() {
       }
 
       setTimeout(() => {
-        window.location.href = "/";
+        window.location.href = "/overview";
       }, 800);
     } catch (err: any) {
       clearInterval(interval);
