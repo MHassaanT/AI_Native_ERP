@@ -99,6 +99,27 @@ def test_agent_removal_revision_fits_alembic_version_column():
     assert len(migration.revision) <= 32
 
 
+def test_attendance_token_migration_expands_alembic_version_column():
+    """Verify migration 022 expands alembic_version.version_num to handle longer revision IDs."""
+    revision_path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "022_add_employee_attendance_token.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_022", revision_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    # This revision is 33 characters, exceeding the default VARCHAR(32) limit
+    assert len(migration.revision) == 33
+
+    # Verify the migration file contains the ALTER TABLE statement
+    migration_content = revision_path.read_text()
+    assert "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)" in migration_content
+
+
 def test_hr_email_pool_migration_follows_recruitment_revision():
     migration_path = (
         Path(__file__).parents[1] / "alembic" / "versions" / "016_hr_email_talent_pool.py"

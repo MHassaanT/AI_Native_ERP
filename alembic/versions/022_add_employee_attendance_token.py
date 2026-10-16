@@ -16,6 +16,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Expand alembic_version.version_num column to accommodate longer revision IDs
+    # This revision ID is 33 characters, exceeding the default VARCHAR(32) limit
+    op.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)")
+
     op.add_column(
         "employees",
         sa.Column(
@@ -29,3 +33,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column("employees", "attendance_token")
+    op.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(32)")
