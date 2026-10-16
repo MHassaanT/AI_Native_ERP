@@ -924,7 +924,9 @@ export default function WorkforcePage() {
                             </td>
                             <td className="px-4 py-3 font-mono text-stone-700">{emp.employee_code}</td>
                             <td className="px-4 py-3 text-stone-600">{emp.department || "General"}</td>
-                            <td className="px-4 py-3 text-stone-600">{emp.designation || "Staff"}</td>
+                            <td className="px-4 py-3 text-stone-600">
+                              {designations.find((d) => d.designation_id === emp.designation_id)?.designation_name || "Staff"}
+                            </td>
                             <td className="px-4 py-3 text-stone-600">{emp.date_of_joining || "—"}</td>
                             <td className="px-4 py-3">
                               <span
@@ -1024,7 +1026,7 @@ export default function WorkforcePage() {
                   <div className="divide-y divide-stone-100 max-h-[460px] overflow-y-auto">
                     {designations.map((desig) => {
                       const empCount = employees.filter(
-                        (e) => e.designation === desig.designation_name || e.designation_id === desig.designation_id
+                        (e) => e.designation_id === desig.designation_id
                       ).length;
                       return (
                         <div key={desig.designation_id} className="p-4 hover:bg-stone-50/50 transition flex items-center justify-between">

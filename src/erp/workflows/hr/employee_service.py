@@ -139,6 +139,15 @@ class EmployeeService:
                 "Please choose a unique Employee Code."
             )
 
+        # Employee records store a foreign key to Designation; the old free
+        # text `designation` column was removed by migration 023.
+        if designation_id is None and designation_name:
+            designation_stmt = select(Designation.designation_id).where(
+                Designation.tenant_id == tenant_id,
+                Designation.designation_name == designation_name,
+            )
+            designation_id = (await db.execute(designation_stmt)).scalar_one_or_none()
+
         emp = Employee(
             tenant_id=tenant_id,
             employee_code=code_clean,
@@ -147,7 +156,6 @@ class EmployeeService:
             email=email,
             department=department_name,
             department_id=department_id,
-            designation=designation_name,
             designation_id=designation_id,
             reports_to_id=reports_to_id,
             gender=gender,
@@ -241,10 +249,18 @@ class EmployeeService:
             emp.department = department_name
         if department_id is not None:
             emp.department_id = department_id
-        if designation_name is not None:
-            emp.designation = designation_name
         if designation_id is not None:
             emp.designation_id = designation_id
+        elif designation_name is not None:
+            designation_stmt = select(Designation.designation_id).where(
+                Designation.tenant_id == tenant_id,
+                Designation.designation_name == designation_name,
+            )
+            resolved_designation_id = (
+                await db.execute(designation_stmt)
+            ).scalar_one_or_none()
+            if resolved_designation_id is not None:
+                emp.designation_id = resolved_designation_id
         if reports_to_id is not None:
             emp.reports_to_id = reports_to_id
         if gender is not None:
