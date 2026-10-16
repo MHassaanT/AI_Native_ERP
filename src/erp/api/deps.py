@@ -2,11 +2,12 @@
 
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.auth.security import decode_access_token
@@ -109,11 +110,18 @@ async def get_current_tenant_id(
                             detail=f"Invalid tenant UUID: {x_tenant_id}",
                         ) from err
                 if _requires_active_subscription(request):
+                    now = datetime.now(UTC)
                     has_active_subscription = await db.scalar(
                         select(SaaSSubscription.subscription_id)
                         .where(
                             SaaSSubscription.tenant_id == token_tenant_id,
-                            SaaSSubscription.status == "active",
+                            or_(
+                                SaaSSubscription.status == "active",
+                                and_(
+                                    SaaSSubscription.status == "trialing",
+                                    SaaSSubscription.current_period_end > now,
+                                ),
+                            ),
                         )
                         .limit(1)
                     )

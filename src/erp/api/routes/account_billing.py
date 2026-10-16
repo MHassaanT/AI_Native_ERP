@@ -8,7 +8,7 @@ from decimal import Decimal
 import httpx
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from erp.api.deps import CurrentUserDep, DbSessionDep
 from erp.config import settings
@@ -72,6 +72,13 @@ def _subscription_payload(sub: SaaSSubscription | None) -> dict | None:
     }
 
 
+def _subscription_has_access(sub: SaaSSubscription, now: datetime | None = None) -> bool:
+    if sub.status == "active":
+        return True
+    now = now or datetime.now(UTC)
+    return sub.status == "trialing" and bool(sub.current_period_end and sub.current_period_end > now)
+
+
 @router.get("/plans")
 async def get_subscription_plans(_: CurrentUserDep):
     """Returns the configured SafePay plan without exposing merchant credentials."""
@@ -87,14 +94,14 @@ async def get_subscription_status(user: CurrentUserDep, db: DbSessionDep):
         .limit(20)
     )
     subscriptions = list((await db.execute(stmt)).scalars().all())
-    current = next((sub for sub in subscriptions if sub.status == "active"), None)
+    current = next((sub for sub in subscriptions if _subscription_has_access(sub)), None)
     if current is None and subscriptions:
         current = subscriptions[0]
     return {
         "plans": _plan_payloads(),
         "subscription": _subscription_payload(current),
         "history": [_subscription_payload(sub) for sub in subscriptions],
-        "has_access": any(sub.status == "active" for sub in subscriptions),
+        "has_access": any(_subscription_has_access(sub) for sub in subscriptions),
     }
 
 
@@ -115,7 +122,13 @@ async def create_subscription_checkout(
     active = await db.scalar(
         select(SaaSSubscription.subscription_id).where(
             SaaSSubscription.tenant_id == user.tenant_id,
-            SaaSSubscription.status == "active",
+            or_(
+                SaaSSubscription.status == "active",
+                and_(
+                    SaaSSubscription.status == "trialing",
+                    SaaSSubscription.current_period_end > datetime.now(UTC),
+                ),
+            ),
         ).limit(1)
     )
     if active:
@@ -176,7 +189,13 @@ async def cancel_subscription(user: CurrentUserDep, db: DbSessionDep):
         select(SaaSSubscription)
         .where(
             SaaSSubscription.tenant_id == user.tenant_id,
-            SaaSSubscription.status == "active",
+            or_(
+                SaaSSubscription.status == "active",
+                and_(
+                    SaaSSubscription.status == "trialing",
+                    SaaSSubscription.current_period_end > datetime.now(UTC),
+                ),
+            ),
         )
         .order_by(SaaSSubscription.created_at.desc())
         .limit(1)

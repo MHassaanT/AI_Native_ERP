@@ -3,15 +3,16 @@
 import hashlib
 import hmac
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from erp.api.deps import DbSessionDep
 from erp.config import settings
 from erp.db.models.saas_subscription import SafePayWebhookEvent, SaaSSubscription
+from erp.db.models.user import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks/safepay", tags=["SafePay Webhooks"])
@@ -66,6 +67,7 @@ async def receive_subscription_webhook(
     event_type = event.get("type")
     if not isinstance(event_id, str) or not isinstance(event_type, str):
         raise HTTPException(status_code=400, detail="SafePay webhook is missing event ID or type.")
+    event_type = event_type.strip().lower()
 
     existing = await db.get(SafePayWebhookEvent, event_id)
     if existing and not existing.processing_error:
@@ -102,6 +104,35 @@ async def receive_subscription_webhook(
     else:
         subscription = None
 
+    # SafePay's documented v2 subscription payloads may omit the merchant
+    # reference. For the first event, safely associate it by plan + billing
+    # email only when there is exactly one recent candidate.
+    plan_id = data.get("plan_id")
+    customer_email = data.get("customer_email")
+    if (
+        subscription is None
+        and isinstance(plan_id, str)
+        and isinstance(customer_email, str)
+    ):
+        candidates = list((await db.execute(
+            select(SaaSSubscription)
+            .join(User, User.tenant_id == SaaSSubscription.tenant_id)
+            .where(
+                SaaSSubscription.plan_id == plan_id,
+                SaaSSubscription.status == "pending",
+                func.lower(User.email) == customer_email.strip().lower(),
+                SaaSSubscription.created_at >= datetime.now(UTC) - timedelta(days=7),
+            )
+            .order_by(SaaSSubscription.created_at.desc())
+            .limit(2)
+            .with_for_update(of=SaaSSubscription)
+        )).scalars().all())
+        if len(candidates) == 1:
+            subscription = candidates[0]
+            logger.info("Matched SafePay subscription event by unique plan and billing email.")
+        elif len(candidates) > 1:
+            logger.error("SafePay event matched multiple subscriptions by plan and billing email.")
+
     if subscription:
         received_plan_id = data.get("plan_id")
         if received_plan_id and received_plan_id != subscription.plan_id:
@@ -112,9 +143,26 @@ async def receive_subscription_webhook(
                 subscription.safepay_subscription_id = safepay_id
 
             if event_type == "subscription.created":
-                # Checkout creation is not payment confirmation. Keep access pending.
+                # A verified SafePay trial grants access only through the
+                # provider-reported period end. Creation alone never implies paid.
+                provider_status = str(data.get("status") or "").upper()
+                subscription.current_period_start = _event_datetime(
+                    data.get("current_period_start_date") or data.get("started_at")
+                ) or subscription.current_period_start
+                subscription.current_period_end = _event_datetime(
+                    data.get("trial_end_date")
+                    or data.get("trial_ends_at")
+                    or data.get("current_period_end_date")
+                ) or subscription.current_period_end
                 if subscription.status not in {"active", "past_due", "cancelled", "ended"}:
-                    subscription.status = "pending"
+                    if (
+                        provider_status == "TRIALING"
+                        and subscription.current_period_end
+                        and subscription.current_period_end > datetime.now(UTC)
+                    ):
+                        subscription.status = "trialing"
+                    else:
+                        subscription.status = "pending"
             elif event_type == "subscription.payment.succeeded":
                 subscription.status = "active"
                 subscription.last_payment_at = _event_datetime(

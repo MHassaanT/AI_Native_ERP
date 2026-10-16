@@ -117,6 +117,7 @@ export default function SubscriptionBillingPage() {
   const plans = billing?.plans ?? [];
   const subscription = billing?.subscription;
   const active = billing?.has_access ?? false;
+  const isTrialing = subscription?.status === "trialing";
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6 lg:px-8">
@@ -144,9 +145,9 @@ export default function SubscriptionBillingPage() {
             <section className="mb-8 rounded-2xl border border-sage-300 bg-sage-50/70 p-5 sm:p-6">
               <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> Active subscription</div>
+                  <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> {isTrialing ? "Free trial active" : "Active subscription"}</div>
                   <h2 className="text-xl font-semibold text-cream-950">{subscription.plan_name}</h2>
-                  <p className="mt-1 text-sm text-cream-700">{subscription.currency} {subscription.amount ?? "—"} / {subscription.billing_interval === "YEAR" ? "year" : "month"} · Renews {formatDate(subscription.current_period_end)}</p>
+                  <p className="mt-1 text-sm text-cream-700">{subscription.currency} {subscription.amount ?? "—"} / {subscription.billing_interval === "YEAR" ? "year" : "month"} · {isTrialing ? "Trial ends" : "Renews"} {formatDate(subscription.current_period_end)}</p>
                   {subscription.cancellation_requested_at && <p className="mt-2 text-xs text-amberGold-700">Cancellation requested; SafePay confirmation is pending.</p>}
                 </div>
                 <div className="flex flex-wrap gap-2">
