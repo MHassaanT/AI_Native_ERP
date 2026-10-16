@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   Menu,
   ShieldCheck,
@@ -17,7 +17,6 @@ interface TopBarProps {
 
 export function TopBar({ onOpenMobile }: TopBarProps) {
   const pathname = usePathname();
-  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
 
   useEffect(() => {
@@ -30,7 +29,7 @@ export function TopBar({ onOpenMobile }: TopBarProps) {
 
   const handleLogout = () => {
     clearAuth();
-    router.push("/login");
+    window.location.assign("/");
   };
 
   // Find active group and item

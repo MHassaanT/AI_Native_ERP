@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   Mail,
@@ -47,7 +47,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: "Workspace & AI",
     items: [
-      { href: "/", label: "Overview", icon: LayoutDashboard },
+      { href: "/overview", label: "Overview", icon: LayoutDashboard },
       { href: "/inbox", label: "Email / RFQ Hub", icon: Mail },
       { href: "/workflows", label: "Workflow Runs", icon: Activity },
       { href: "/workforce", label: "Workforce & Shifts", icon: Users },
@@ -99,7 +99,6 @@ export function Sidebar({
   onCloseMobile,
 }: SidebarProps) {
   const pathname = usePathname();
-  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
 
   useEffect(() => {
@@ -112,7 +111,7 @@ export function Sidebar({
 
   const handleLogout = () => {
     clearAuth();
-    router.push("/login");
+    window.location.assign("/");
   };
 
   const renderNavContent = (isRail: boolean) => (
