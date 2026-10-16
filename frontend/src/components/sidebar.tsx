@@ -23,6 +23,7 @@ import {
   Store,
   Briefcase,
   Receipt,
+  CreditCard,
   ShoppingBag,
   Headset,
   BarChart3,
@@ -76,6 +77,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/reports", label: "Reports & Analytics", icon: BarChart3 },
       { href: "/billing", label: "Billing & Subscriptions", icon: Receipt },
+      { href: "/billing/subscription", label: "Plan & Payment", icon: CreditCard },
       { href: "/accounts-payable", label: "3-Way Invoice Match", icon: FileCheck },
       { href: "/bank-reconciliation", label: "Bank Reconciliation", icon: Landmark },
       { href: "/ledger", label: "General Ledger", icon: BookOpen },

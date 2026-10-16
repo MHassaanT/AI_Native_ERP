@@ -45,6 +45,7 @@ export function middleware(request: NextRequest) {
   const isLandingPage = pathname === "/";
   const isAuthPage = pathname === "/login" || pathname === "/signup";
   const isSetupPage = pathname === "/setup";
+  const isSubscriptionPage = pathname === "/billing/subscription";
 
   // If user has an invalid/expired token in cookies, clear it immediately
   if (rawToken && !hasValidToken) {
@@ -68,9 +69,9 @@ export function middleware(request: NextRequest) {
   if (hasValidToken) {
     const isSetupDone = payload?.setup_complete !== false; // defaults to true if omitted for legacy tokens
 
-    // If setup is pending, force redirect to /setup unless already on /setup
-    if (!isSetupDone && !isSetupPage) {
-      return NextResponse.redirect(new URL("/setup", request.url));
+    // Require a subscription before setup or workspace access, but keep billing reachable.
+    if (!isSetupDone && !isSetupPage && !isSubscriptionPage) {
+      return NextResponse.redirect(new URL("/billing/subscription", request.url));
     }
 
     // If setup is already done and user tries to access /setup, redirect to the overview.
@@ -80,7 +81,7 @@ export function middleware(request: NextRequest) {
 
     // If user visits /login or /signup while authenticated
     if (isAuthPage) {
-      return NextResponse.redirect(new URL(isSetupDone ? "/overview" : "/setup", request.url));
+      return NextResponse.redirect(new URL("/billing/subscription", request.url));
     }
   }
 

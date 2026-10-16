@@ -186,6 +186,7 @@ from erp.db.models.sales import (
     SalesOrderItem,
     SalesQuotation,
 )
+from erp.db.models.saas_subscription import SafePayWebhookEvent, SaaSSubscription
 from erp.db.models.subcontracting import (
     SubcontractingOrder,
     SubcontractingOrderItem,
@@ -223,6 +224,8 @@ __all__ = [
     "OnboardingProgress",
     "OnboardingStep",
     "TenantOAuthConnection",
+    "SaaSSubscription",
+    "SafePayWebhookEvent",
     "User",
     "OperatorCertificationRecord",
     "GeneralLedgerEntry",

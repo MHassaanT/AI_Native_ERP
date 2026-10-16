@@ -23,6 +23,35 @@ is configured. A separate
 database password. Do not include a trailing slash or wildcard origin unless
 it is part of the actual frontend origin.
 
+### SafePay workspace subscriptions
+
+The workspace subscription page (`/billing/subscription`) offers a monthly plan
+at USD 50 and an annual plan at USD 550 (one month free, saving USD 50 compared
+with twelve monthly payments). SafePay hosted checkout handles recurring
+payments; only a verified `subscription.payment.succeeded` webhook activates
+workspace access. The checkout return page is not treated as payment proof.
+
+In Railway, configure these backend variables from your SafePay sandbox account:
+
+- `SAFEPAY_ENV=sandbox`, `SAFEPAY_SECRET_KEY`, and `SAFEPAY_WEBHOOK_SECRET`
+- `SAFEPAY_MONTHLY_PLAN_ID` and `SAFEPAY_ANNUAL_PLAN_ID` with the two dashboard plan IDs
+- `SAFEPAY_MONTHLY_PLAN_PRICE=50.00`, `SAFEPAY_ANNUAL_PLAN_PRICE=550.00`, and `SAFEPAY_PLAN_CURRENCY=USD`
+- `FRONTEND_BASE_URL` set to the deployed Vercel origin, without a trailing slash
+- `REQUIRE_ACTIVE_SAAS_SUBSCRIPTION=True`
+
+Do not put SafePay secrets in Vercel or any `NEXT_PUBLIC_` variable. Run
+`alembic upgrade head` against the Railway database to create the subscription
+and webhook inbox tables. Then register this webhook URL in the SafePay
+dashboard: `https://<Railway backend host>/api/v1/webhooks/safepay/subscriptions`.
+Enable the subscription lifecycle events, especially
+`subscription.payment.succeeded`, `subscription.payment.failed`,
+`subscription.cancelled`, `subscription.ended`, `subscription.paused`, and
+`subscription.resumed`. Configure the webhook signing secret to match
+`SAFEPAY_WEBHOOK_SECRET`. Use SafePay sandbox credentials and test plan IDs
+first; switch to live credentials, plan IDs, and `SAFEPAY_ENV=production` only
+when ready for real payments. Workspace API access remains gated until SafePay
+confirms an initial payment.
+
 ## Quickstart
 
 ### 1. Configure local environment and start infrastructure

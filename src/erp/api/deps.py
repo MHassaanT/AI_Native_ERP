@@ -4,7 +4,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from erp.auth.security import decode_access_token
 from erp.config import settings
 from erp.db.models.user import User
+from erp.db.models.saas_subscription import SaaSSubscription
 from erp.db.session import async_session_factory
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login", auto_error=False)
@@ -78,6 +79,7 @@ CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
 async def get_current_tenant_id(
     db: DbSessionDep,
+    request: Request,
     token: Annotated[str | None, Depends(oauth2_scheme)] = None,
     x_tenant_id: Annotated[str | None, Header()] = None,
 ) -> uuid.UUID:
@@ -106,6 +108,20 @@ async def get_current_tenant_id(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Invalid tenant UUID: {x_tenant_id}",
                         ) from err
+                if _requires_active_subscription(request):
+                    has_active_subscription = await db.scalar(
+                        select(SaaSSubscription.subscription_id)
+                        .where(
+                            SaaSSubscription.tenant_id == token_tenant_id,
+                            SaaSSubscription.status == "active",
+                        )
+                        .limit(1)
+                    )
+                    if not has_active_subscription:
+                        raise HTTPException(
+                            status_code=402,
+                            detail="An active workspace subscription is required. Open Plan & Billing to continue.",
+                        )
                 return token_tenant_id
         except HTTPException:
             raise
@@ -133,6 +149,18 @@ async def get_current_tenant_id(
 
 
 TenantIdDep = Annotated[uuid.UUID, Depends(get_current_tenant_id)]
+
+
+def _requires_active_subscription(request: Request) -> bool:
+    """Apply the SaaS access gate while keeping billing recovery endpoints available."""
+    if not settings.REQUIRE_ACTIVE_SAAS_SUBSCRIPTION:
+        return False
+    if settings.DEBUG and settings.ENVIRONMENT != "production":
+        return False
+    billing_path = f"{settings.API_V1_STR}/billing/account-subscription"
+    if request.url.path.startswith(billing_path):
+        return False
+    return True
 
 
 def require_roles(*roles: str):

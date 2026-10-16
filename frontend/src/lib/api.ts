@@ -75,6 +75,16 @@ export const api = {
 
   getMe: () => fetchWithTenant("/auth/me"),
 
+  // --- SafePay SaaS subscription ---
+  getAccountSubscription: () => fetchWithTenant("/billing/account-subscription/status"),
+  createAccountSubscriptionCheckout: (plan_code: "monthly" | "annual") =>
+    fetchWithTenant("/billing/account-subscription/checkout", {
+      method: "POST",
+      body: JSON.stringify({ plan_code }),
+    }),
+  cancelAccountSubscription: () =>
+    fetchWithTenant("/billing/account-subscription/cancel", { method: "POST" }),
+
   // --- Setup Wizard ---
   getSetupStatus: () => fetchWithTenant("/setup/status"),
   getSetupCountries: () => fetchWithTenant("/setup/countries"),

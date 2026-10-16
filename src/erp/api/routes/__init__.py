@@ -2,6 +2,7 @@
 
 from erp.api.routes.ap import router as ap_router
 from erp.api.routes.assets import router as assets_router
+from erp.api.routes.account_billing import router as account_billing_router
 from erp.api.routes.audit_soc2 import router as audit_soc2_router
 from erp.api.routes.auth import router as auth_router
 from erp.api.routes.billing import router as billing_router
@@ -28,6 +29,7 @@ from erp.api.routes.support import router as support_router
 from erp.api.routes.webhooks import router as webhooks_router
 from erp.api.routes.workforce import router as workforce_router
 from erp.api.routes.reports import router as reports_router
+from erp.api.routes.safepay_webhooks import router as safepay_webhooks_router
 from erp.api.routes.subcontracting import router as subcontracting_router
 from erp.api.routes.companies import router as companies_router
 from erp.api.routes.currency import router as currency_router
@@ -38,6 +40,7 @@ from erp.api.routes.whatsapp import router as whatsapp_router
 __all__ = [
     "ap_router",
     "assets_router",
+    "account_billing_router",
     "audit_soc2_router",
     "auth_router",
     "billing_router",
@@ -65,6 +68,7 @@ __all__ = [
     "workforce_router",
     "workflows_router",
     "reports_router",
+    "safepay_webhooks_router",
     "subcontracting_router",
     "companies_router",
     "currency_router",

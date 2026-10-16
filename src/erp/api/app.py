@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from erp.api.routes import (
     ap_router,
+    account_billing_router,
     assets_router,
     audit_soc2_router,
     auth_router,
@@ -34,6 +35,7 @@ from erp.api.routes import (
     quality_router,
     reconciliation_router,
     reports_router,
+    safepay_webhooks_router,
     setup_router,
     stock_router,
     subcontracting_router,
@@ -128,6 +130,8 @@ def create_app() -> FastAPI:
     app.include_router(events_router, prefix=settings.API_V1_STR)
     app.include_router(ledger_router, prefix=settings.API_V1_STR)
     app.include_router(billing_router, prefix=settings.API_V1_STR)
+    app.include_router(account_billing_router, prefix=settings.API_V1_STR)
+    app.include_router(safepay_webhooks_router, prefix=settings.API_V1_STR)
     app.include_router(workflows_router, prefix=settings.API_V1_STR)
     app.include_router(ap_router, prefix=settings.API_V1_STR)
     app.include_router(procurement_router, prefix=settings.API_V1_STR)

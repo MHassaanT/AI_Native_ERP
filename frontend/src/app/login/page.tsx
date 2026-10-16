@@ -28,7 +28,7 @@ export default function LoginPage() {
       });
 
       setAuth(res.access_token, res.user);
-      window.location.href = res.user?.setup_complete === false ? "/setup" : "/overview";
+      window.location.href = "/billing/subscription";
     } catch (err: any) {
       setError(err.message || "Invalid credentials. Please verify your email and password.");
     } finally {

@@ -41,7 +41,7 @@ export default function SignupPage() {
       });
 
       setAuth(res.access_token, res.user);
-      window.location.href = "/setup";
+      window.location.href = "/billing/subscription";
     } catch (err: any) {
       setError(err.message || "Registration failed. Please check the details.");
     } finally {

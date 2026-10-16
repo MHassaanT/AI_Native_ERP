@@ -32,6 +32,20 @@ class Settings(BaseSettings):
     ENABLE_OUTBOX_DISPATCHER: bool = False
     OUTBOX_DISPATCHER_POLL_SECONDS: int = Field(default=2, ge=1, le=300)
 
+    # SafePay SaaS subscriptions (keep all merchant credentials server-side).
+    SAFEPAY_ENV: str = "sandbox"
+    SAFEPAY_SECRET_KEY: str | None = None
+    SAFEPAY_WEBHOOK_SECRET: str | None = None
+    SAFEPAY_MONTHLY_PLAN_ID: str | None = None
+    SAFEPAY_ANNUAL_PLAN_ID: str | None = None
+    SAFEPAY_MONTHLY_PLAN_PRICE: Decimal = Decimal("50.00")
+    SAFEPAY_ANNUAL_PLAN_PRICE: Decimal = Decimal("550.00")
+    SAFEPAY_PLAN_CURRENCY: str = "USD"
+    SAFEPAY_HOST: str | None = None
+    SAFEPAY_CHECKOUT_HOST: str | None = None
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
+    REQUIRE_ACTIVE_SAAS_SUBSCRIPTION: bool = True
+
     @field_validator("CORS_ALLOWED_ORIGINS", mode="before")
     @classmethod
     def parse_cors_allowed_origins(cls, value: object) -> list[str]:
@@ -77,6 +91,18 @@ class Settings(BaseSettings):
                 raise ValueError("Default development SECRET_KEY is forbidden in production.")
             if not self.WEBHOOK_SIGNING_SECRET or "dev" in self.WEBHOOK_SIGNING_SECRET.lower():
                 raise ValueError("A production WEBHOOK_SIGNING_SECRET must be configured.")
+            if self.REQUIRE_ACTIVE_SAAS_SUBSCRIPTION and not all(
+                [
+                    self.SAFEPAY_SECRET_KEY,
+                    self.SAFEPAY_WEBHOOK_SECRET,
+                    self.SAFEPAY_MONTHLY_PLAN_ID,
+                    self.SAFEPAY_ANNUAL_PLAN_ID,
+                ]
+            ):
+                raise ValueError(
+                    "SafePay subscription billing requires SAFEPAY_SECRET_KEY, "
+                    "SAFEPAY_WEBHOOK_SECRET, SAFEPAY_MONTHLY_PLAN_ID, and SAFEPAY_ANNUAL_PLAN_ID."
+                )
             # Managed database providers (including Railway) expose credentials in
             # DATABASE_URL and do not necessarily expose POSTGRES_PASSWORD separately.
             database_password = unquote(urlsplit(self.DATABASE_URL).password or "")
