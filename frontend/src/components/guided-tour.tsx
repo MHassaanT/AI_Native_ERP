@@ -61,12 +61,10 @@ function TourDialog({ steps, index, onPrevious, onNext, onDismiss, action }: {
         <h2 id="guided-tour-title" className="mt-2 text-xl font-semibold tracking-tight text-cream-900">{step.title}</h2>
         <p className="mt-2 text-sm leading-6 text-cream-700">{step.description}</p>
         <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-cream-200"><div className="h-full rounded-full bg-sage-500 transition-all" style={{ width: `${((index + 1) / steps.length) * 100}%` }} /></div>
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-          <button onClick={onPrevious} disabled={index === 0} className="inline-flex items-center gap-1.5 rounded-lg px-2 py-2 text-sm font-medium text-cream-700 hover:bg-cream-100 disabled:cursor-not-allowed disabled:opacity-40"><ArrowLeft className="h-4 w-4" />Previous</button>
-          <div className="flex items-center gap-2">
-            {action && step.actionLabel && <button onClick={action} className="rounded-lg border border-cream-300 px-3 py-2 text-sm font-medium text-cream-800 hover:bg-cream-50">{step.actionLabel}</button>}
-            <button onClick={onNext} className="inline-flex items-center gap-1.5 rounded-lg bg-sage-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sage-700">{last ? "Finish tour" : "Next"}<ArrowRight className="h-4 w-4" /></button>
-          </div>
+        {action && step.actionLabel && <button onClick={action} className="mt-5 w-full rounded-lg border border-sage-300 bg-sage-50 px-3 py-2.5 text-sm font-semibold text-sage-800 hover:bg-sage-100">{step.actionLabel} — then continue your setup</button>}
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button onClick={onPrevious} disabled={index === 0} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cream-300 px-3 py-2 text-sm font-medium text-cream-700 hover:bg-cream-100 disabled:cursor-not-allowed disabled:opacity-40"><ArrowLeft className="h-4 w-4" />Previous</button>
+          <button onClick={onNext} className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sage-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sage-700">{last ? "Finish" : "Next"}<ArrowRight className="h-4 w-4" /></button>
         </div>
         <button onClick={onDismiss} className="mt-4 text-xs text-cream-500 underline underline-offset-2 hover:text-cream-800">Skip tour</button>
       </section>
@@ -96,6 +94,7 @@ export function WorkspaceTour() {
 
 export function AgentSetupTour({ id, steps }: { id: string; steps: TourStep[] }) {
   const [index, setIndex] = useState<number | null>(null);
+  const [minimized, setMinimized] = useState(false);
   useEffect(() => {
     try { if (localStorage.getItem(storageKey(id)) !== "done") setIndex(0); } catch { setIndex(0); }
   }, [id]);
@@ -103,6 +102,7 @@ export function AgentSetupTour({ id, steps }: { id: string; steps: TourStep[] })
   const end = () => { try { localStorage.setItem(storageKey(id), "done"); } catch {} setIndex(null); };
   const action = () => {
     const href = steps[index].href;
+    setMinimized(true);
     if (!href) return;
     if (href.startsWith("#")) {
       document.querySelector(href)?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -110,5 +110,16 @@ export function AgentSetupTour({ id, steps }: { id: string; steps: TourStep[] })
     }
     window.location.assign(href);
   };
+  if (minimized) {
+    return (
+      <button
+        type="button"
+        onClick={() => setMinimized(false)}
+        className="fixed bottom-5 right-5 z-[90] inline-flex items-center gap-2 rounded-full border border-sage-700 bg-sage-600 px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-sage-700"
+      >
+        <Compass className="h-4 w-4" /> Resume setup guide · {index + 1}/{steps.length}
+      </button>
+    );
+  }
   return <TourDialog steps={steps} index={index} onPrevious={() => setIndex(Math.max(0, index - 1))} onNext={() => index === steps.length - 1 ? end() : setIndex(index + 1)} onDismiss={end} action={action} />;
 }
