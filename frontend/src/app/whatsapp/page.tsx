@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BookOpen, Database, FileUp, Globe, MessageCircle, RefreshCw, Send, Smartphone, Trash2, Wifi, WifiOff } from "lucide-react";
 import { api } from "@/lib/api";
 import { getUser } from "@/lib/auth";
+import { AgentSetupTour } from "@/components/guided-tour";
 
 type ConnectionStatus = {
   status: string;
@@ -420,6 +421,11 @@ export default function WhatsAppSupportPage() {
 
   return (
     <div className="space-y-6">
+      <AgentSetupTour id="whatsapp-support" steps={[
+        { title: "Set up customer support", description: "Pair the business WhatsApp number from the connection panel. The service uses the linked tenant number; customers are not given access to this workspace.", href: "#whatsapp-connection", actionLabel: "Pair WhatsApp" },
+        { title: "Give the agent approved knowledge", description: "Add FAQs and policies, or import a reviewed document, web page, or Airtable table. The agent searches this tenant-scoped knowledge before answering.", href: "#whatsapp-knowledge", actionLabel: "Add knowledge" },
+        { title: "Keep a human in control", description: "Choose the tools the agent may use, monitor conversations, and escalate sensitive issues to your support team when needed.", href: "#whatsapp-tools", actionLabel: "Configure tools" },
+      ]} />
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-sm font-semibold uppercase tracking-wider text-cream-600">Customer support channel</p>
@@ -440,7 +446,7 @@ export default function WhatsAppSupportPage() {
       {error && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
 
       <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
-        <div className="rounded-xl border border-cream-300 bg-white p-5 shadow-sm">
+        <div id="whatsapp-connection" className="scroll-mt-24 rounded-xl border border-cream-300 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="rounded-lg bg-green-100 p-2 text-green-800"><MessageCircle className="h-5 w-5" /></div>
@@ -481,7 +487,7 @@ export default function WhatsAppSupportPage() {
           </div>
         </div>
 
-        <div className="rounded-xl border border-cream-300 bg-white p-5 shadow-sm">
+        <div id="whatsapp-tools" className="scroll-mt-24 rounded-xl border border-cream-300 bg-white p-5 shadow-sm">
           <h2 className="font-semibold text-cream-950">Agent tools</h2>
           <p className="mt-1 text-sm text-cream-700">Only enabled actions are available to the support agent.</p>
           <div className="mt-4 max-h-72 space-y-3 overflow-auto">
@@ -504,7 +510,7 @@ export default function WhatsAppSupportPage() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-cream-300 bg-white p-5 shadow-sm">
+      <section id="whatsapp-knowledge" className="scroll-mt-24 rounded-xl border border-cream-300 bg-white p-5 shadow-sm">
         <div className="flex items-center gap-2">
           <BookOpen className="h-5 w-5 text-cream-700" />
           <h2 className="font-semibold text-cream-950">Approved support knowledge</h2>

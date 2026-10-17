@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { Sidebar } from "./sidebar";
 import { TopBar } from "./top-bar";
 import { AuthGuard } from "./auth-guard";
+import { WorkspaceTour } from "./guided-tour";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -45,7 +46,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen flex flex-col justify-center bg-cream-50 text-cream-900 font-sans">
         <main className="w-full">
-          <AuthGuard>{children}</AuthGuard>
+          <AuthGuard><WorkspaceTour />{children}</AuthGuard>
         </main>
         <footer className="py-4 text-center text-xs text-cream-600">
           AI-Native Multi-Agent ERP &bull; Deterministic Invariant Firewall Active

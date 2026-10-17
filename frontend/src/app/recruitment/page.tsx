@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Bot, Briefcase, FileText, Mail, Plus, RefreshCw, Send, Sparkles, UserRound, Zap } from "lucide-react";
 import { api } from "@/lib/api";
+import { AgentSetupTour } from "@/components/guided-tour";
 
 interface RecruitmentRole {
   role_id: string;
@@ -421,6 +422,11 @@ export default function RecruitmentPage() {
 
   return (
     <main className="space-y-6 pb-12">
+      <AgentSetupTour id="recruitment" steps={[
+        { title: "Set up your recruitment agent", description: "Start by creating a job opening with clear, job-related requirements. The agent uses this context to organize candidate evidence; recruiters retain every hiring decision.", href: "#recruitment-job-opening", actionLabel: "Create an opening" },
+        { title: "Connect your hiring inbox", description: "Connect and sync the tenant Gmail account in the Email / RFQ Hub. Recruitment then stages likely applications for recruiter review; it does not read attachments automatically.", href: "/inbox", actionLabel: "Open Email / RFQ Hub" },
+        { title: "Review before acting", description: "Upload a resume or review a staged email, then use screening for evidence-backed recommendations. Nothing is rejected or emailed automatically.", href: "#recruitment-candidates", actionLabel: "View candidates" },
+      ]} />
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-cream-300 pb-4">
         <div>
           <h1 className="text-2xl font-semibold text-cream-900">Recruitment &amp; Screening</h1>
@@ -475,7 +481,7 @@ export default function RecruitmentPage() {
 
       <div className="grid gap-6 xl:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.4fr)]">
         <div className="space-y-6">
-          <section className="rounded-lg border border-cream-300 bg-cream-100 p-4">
+          <section id="recruitment-job-opening" className="rounded-lg border border-cream-300 bg-cream-100 p-4">
             <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-cream-900">
               <Plus className="h-4 w-4" /> Create job opening
             </h2>
@@ -501,7 +507,7 @@ export default function RecruitmentPage() {
             </form>
           </section>
 
-          <section className="rounded-lg border border-cream-300 bg-cream-100 p-4">
+          <section id="recruitment-candidates" className="rounded-lg border border-cream-300 bg-cream-100 p-4">
             <div className="mb-4 flex items-center justify-between gap-2">
               <h2 className="flex items-center gap-2 text-sm font-semibold text-cream-900">
                 <Briefcase className="h-4 w-4" /> Job openings
