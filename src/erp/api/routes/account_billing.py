@@ -97,11 +97,19 @@ async def get_subscription_status(user: CurrentUserDep, db: DbSessionDep):
     current = next((sub for sub in subscriptions if _subscription_has_access(sub)), None)
     if current is None and subscriptions:
         current = subscriptions[0]
+    subscription_required = settings.REQUIRE_ACTIVE_SAAS_SUBSCRIPTION
     return {
         "plans": _plan_payloads(),
         "subscription": _subscription_payload(current),
         "history": [_subscription_payload(sub) for sub in subscriptions],
-        "has_access": any(_subscription_has_access(sub) for sub in subscriptions),
+        # The frontend guard consumes this endpoint too. Reflect the same
+        # enforcement switch used by the API dependency so an explicitly
+        # disabled subscription requirement does not leave users redirected.
+        "has_access": (
+            not subscription_required
+            or any(_subscription_has_access(sub) for sub in subscriptions)
+        ),
+        "subscription_required": subscription_required,
     }
 
 

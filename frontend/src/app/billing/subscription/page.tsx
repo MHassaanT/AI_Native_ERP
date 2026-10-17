@@ -36,6 +36,7 @@ type BillingStatus = {
   subscription: Subscription | null;
   history: Subscription[];
   has_access: boolean;
+  subscription_required: boolean;
 };
 
 const formatDate = (value: string | null) => value
@@ -118,6 +119,7 @@ export default function SubscriptionBillingPage() {
   const subscription = billing?.subscription;
   const active = billing?.has_access ?? false;
   const isTrialing = subscription?.status === "trialing";
+  const billingDisabled = billing?.subscription_required === false;
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6 lg:px-8">
@@ -141,13 +143,20 @@ export default function SubscriptionBillingPage() {
         <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-cream-600"><Loader2 className="h-4 w-4 animate-spin" />Loading your billing details…</div>
       ) : (
         <>
+          {billingDisabled && !subscription && (
+            <section className="mb-8 rounded-2xl border border-sage-300 bg-sage-50/70 p-5 sm:p-6">
+              <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> Billing access disabled</div>
+              <p className="text-sm text-cream-700">Subscription enforcement is disabled for this environment.</p>
+              <button onClick={openWorkspace} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-cream-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-cream-800">Open workspace <ArrowRight className="h-4 w-4" /></button>
+            </section>
+          )}
           {active && subscription && (
             <section className="mb-8 rounded-2xl border border-sage-300 bg-sage-50/70 p-5 sm:p-6">
               <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> {isTrialing ? "Free trial active" : "Active subscription"}</div>
+                  <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> {billingDisabled ? "Billing access disabled" : isTrialing ? "Free trial active" : "Active subscription"}</div>
                   <h2 className="text-xl font-semibold text-cream-950">{subscription.plan_name}</h2>
-                  <p className="mt-1 text-sm text-cream-700">{subscription.currency} {subscription.amount ?? "—"} / {subscription.billing_interval === "YEAR" ? "year" : "month"} · {isTrialing ? "Trial ends" : "Renews"} {formatDate(subscription.current_period_end)}</p>
+                  <p className="mt-1 text-sm text-cream-700">{billingDisabled ? "Subscription enforcement is disabled for this environment." : `${subscription.currency} ${subscription.amount ?? "—"} / ${subscription.billing_interval === "YEAR" ? "year" : "month"} · ${isTrialing ? "Trial ends" : "Renews"} ${formatDate(subscription.current_period_end)}`}</p>
                   {subscription.cancellation_requested_at && <p className="mt-2 text-xs text-amberGold-700">Cancellation requested; SafePay confirmation is pending.</p>}
                 </div>
                 <div className="flex flex-wrap gap-2">
