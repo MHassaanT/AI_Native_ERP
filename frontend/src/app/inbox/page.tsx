@@ -74,6 +74,7 @@ export default function InboxPage() {
   const [selectedEmail, setSelectedEmail] = useState<any | null>(null);
   const [reviewNotes, setReviewNotes] = useState("");
   const [reviewingEmail, setReviewingEmail] = useState(false);
+  const [classifyingEmail, setClassifyingEmail] = useState(false);
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [confirmingOrder, setConfirmingOrder] = useState(false);
   const [draftCustomerId, setDraftCustomerId] = useState("");
@@ -156,6 +157,22 @@ export default function InboxPage() {
       setOauthError(err?.message || "Could not record the inbound message review.");
     } finally {
       setReviewingEmail(false);
+    }
+  };
+
+  const handleClassifyEmailAsOrder = async () => {
+    if (!selectedEmail) return;
+    setClassifyingEmail(true);
+    setOauthError(null);
+    try {
+      const result = await api.classifyInboundEmailAsOrder(selectedEmail.message_id);
+      const updatedEmail = { ...selectedEmail, ...result, suggested_event_type: result.event_type };
+      setSelectedEmail(updatedEmail);
+      setInboxEmails((items) => items.map((item) => item.message_id === result.message_id ? { ...item, ...updatedEmail } : item));
+    } catch (err: any) {
+      setOauthError(err?.message || "Could not confirm this message as a customer order.");
+    } finally {
+      setClassifyingEmail(false);
     }
   };
 
@@ -898,6 +915,16 @@ export default function InboxPage() {
                   </div>
                 </div>
               )}
+
+              {selectedEmail.event_type !== "erp.crm.inbound_customer_order" &&
+                selectedEmail.suggested_event_type === "erp.crm.inbound_customer_order" && (
+                  <div className="rounded-lg border border-sage-300 bg-sage-50 p-3 space-y-2">
+                    <p className="text-[11px] text-cream-800">This message reads like a customer order, but was originally classified as an inquiry. Confirm the classification to enable a reviewed order draft. This will not create or fulfill an order.</p>
+                    <button onClick={handleClassifyEmailAsOrder} disabled={classifyingEmail} className="rounded bg-sage-700 px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-50">
+                      {classifyingEmail ? "Updating classification…" : "Confirm as customer order"}
+                    </button>
+                  </div>
+                )}
 
               {selectedEmail.status === "HUMAN_REVIEW_REQUIRED" ? (
                 <div className="rounded-lg border border-amberGold-300 bg-amberGold-50 p-4 space-y-3">

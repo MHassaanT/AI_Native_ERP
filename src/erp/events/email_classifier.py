@@ -78,7 +78,9 @@ def classify_inbound_email(
     # 3. Detect Customer Purchase Orders (Firm Orders)
     order_keywords = [
         "purchase order", "po#", "po-", "po ", "p.o.", "order confirmation",
-        "place an order", "placing an order", "we order", "order for", "firm order",
+        "place an order", "placing an order", "would like to order", "i would like to order",
+        "i'd like to order", "we would like to order", "want to order", "we want to order",
+        "we order", "order for", "firm order",
         "accept quote", "accept quotation", "accept the quote", "proceed with order",
         "attached purchase order", "please deliver", "please process our order",
         "confirming order", "order dispatch", "buying", "confirm order", "order attached"

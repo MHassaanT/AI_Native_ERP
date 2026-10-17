@@ -257,6 +257,12 @@ async def get_tenant_inbox(tenant_id: TenantIdDep, db: DbSessionDep):
             "body_text": record.body_text,
             "attachments": [{"filename": name} for name in record.attachment_names],
             "event_type": record.event_type,
+            "suggested_event_type": classify_inbound_email(
+                sender=record.sender,
+                subject=record.subject,
+                body_text=record.body_text,
+                recipient=record.recipient,
+            ).event_type,
             "tenant_id": str(record.tenant_id),
             "status": record.status,
             "associated_dag_id": record.associated_dag_id,
@@ -270,6 +276,35 @@ async def get_tenant_inbox(tenant_id: TenantIdDep, db: DbSessionDep):
         }
         for record in rows
     ]
+
+
+@router.post("/email/inbox/{message_id}/classify-as-order", summary="Confirm a detected customer order classification")
+async def classify_inbound_email_as_order(
+    message_id: str,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+    reviewer: User = controller_review_dep,
+):
+    """Correct a misclassified staged message without creating an order or running fulfillment."""
+    if reviewer.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Reviewer is not a member of this tenant.")
+    record = (
+        await db.execute(
+            select(InboundEmailRecord)
+            .where(InboundEmailRecord.message_id == message_id, InboundEmailRecord.tenant_id == tenant_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Inbound message not found.")
+    if record.sales_order_id:
+        raise HTTPException(status_code=409, detail="A sales order is already linked to this message.")
+    classification = classify_inbound_email(record.sender, record.subject, record.body_text, record.recipient)
+    if classification.intent != EmailIntent.CUSTOMER_ORDER:
+        raise HTTPException(status_code=409, detail="The message does not meet customer-order classification rules.")
+    record.event_type = classification.event_type
+    await db.flush()
+    return {"message_id": record.message_id, "event_type": record.event_type}
 
 
 @router.post("/email/inbox/{message_id}/review", summary="Record a tenant reviewer decision for an inbound message")

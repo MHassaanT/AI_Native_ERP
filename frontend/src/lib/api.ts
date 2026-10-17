@@ -131,6 +131,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  classifyInboundEmailAsOrder: (messageId: string) =>
+    fetchWithTenant(`/webhooks/email/inbox/${encodeURIComponent(messageId)}/classify-as-order`, { method: "POST" }),
   createSalesOrderFromEmail: (messageId: string, data: { customer_id: string; order_number: string; delivery_date: string; items: Array<{ item_id: string; quantity: string; unit_price: string }> }) =>
     fetchWithTenant(`/webhooks/email/inbox/${encodeURIComponent(messageId)}/sales-order`, {
       method: "POST",
