@@ -120,6 +120,16 @@ export default function SubscriptionBillingPage() {
   const active = billing?.has_access ?? false;
   const isTrialing = subscription?.status === "trialing";
   const billingDisabled = billing?.subscription_required === false;
+  const needsSetup = user?.setup_complete === false;
+  const workspaceActionLabel = needsSetup ? "Complete workspace setup" : "Open workspace";
+  const workspaceAction = (
+    <button
+      onClick={openWorkspace}
+      className="inline-flex items-center gap-2 rounded-lg border border-[#202923] bg-[#202923] px-4 py-2.5 text-sm font-medium text-white hover:border-[#414a43] hover:bg-[#414a43]"
+    >
+      {workspaceActionLabel} <ArrowRight className="h-4 w-4" />
+    </button>
+  );
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6 lg:px-8">
@@ -146,8 +156,8 @@ export default function SubscriptionBillingPage() {
           {billingDisabled && !subscription && (
             <section className="mb-8 rounded-2xl border border-sage-300 bg-sage-50/70 p-5 sm:p-6">
               <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> Billing access disabled</div>
-              <p className="text-sm text-cream-700">Subscription enforcement is disabled for this environment.</p>
-              <button onClick={openWorkspace} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-cream-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-cream-800">Open workspace <ArrowRight className="h-4 w-4" /></button>
+              <p className="text-sm text-cream-700">Subscription enforcement is disabled for this environment.{needsSetup ? " Complete workspace setup to open the ERP modules." : " You can open the workspace now."}</p>
+              <div className="mt-4">{workspaceAction}</div>
             </section>
           )}
           {active && subscription && (
@@ -156,12 +166,12 @@ export default function SubscriptionBillingPage() {
                 <div>
                   <div className="mb-2 inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-sage-700"><span className="h-2 w-2 rounded-full bg-sage-500" /> {billingDisabled ? "Billing access disabled" : isTrialing ? "Free trial active" : "Active subscription"}</div>
                   <h2 className="text-xl font-semibold text-cream-950">{subscription.plan_name}</h2>
-                  <p className="mt-1 text-sm text-cream-700">{billingDisabled ? "Subscription enforcement is disabled for this environment." : `${subscription.currency} ${subscription.amount ?? "—"} / ${subscription.billing_interval === "YEAR" ? "year" : "month"} · ${isTrialing ? "Trial ends" : "Renews"} ${formatDate(subscription.current_period_end)}`}</p>
+                  <p className="mt-1 text-sm text-cream-700">{billingDisabled ? `Subscription enforcement is disabled. Provider status: ${subscription.status}.${needsSetup ? " Complete workspace setup to open ERP modules." : " Workspace access is available."}` : `${subscription.currency} ${subscription.amount ?? "—"} / ${subscription.billing_interval === "YEAR" ? "year" : "month"} · ${isTrialing ? "Trial ends" : "Renews"} ${formatDate(subscription.current_period_end)}`}</p>
                   {subscription.cancellation_requested_at && <p className="mt-2 text-xs text-amberGold-700">Cancellation requested; SafePay confirmation is pending.</p>}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <button onClick={openWorkspace} className="inline-flex items-center gap-2 rounded-lg bg-cream-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-cream-800">Open workspace <ArrowRight className="h-4 w-4" /></button>
-                  {isAdmin && !subscription.cancellation_requested_at && <button onClick={() => void cancelSubscription()} disabled={busy === "cancel"} className="rounded-lg border border-cream-300 bg-white px-4 py-2.5 text-sm font-medium text-cream-700 hover:border-rose-300 hover:text-rose-700 disabled:opacity-60">{busy === "cancel" ? "Sending…" : "Cancel plan"}</button>}
+                  {workspaceAction}
+                  {isAdmin && !billingDisabled && ["active", "trialing"].includes(subscription.status) && !subscription.cancellation_requested_at && <button onClick={() => void cancelSubscription()} disabled={busy === "cancel"} className="rounded-lg border border-cream-300 bg-white px-4 py-2.5 text-sm font-medium text-cream-700 hover:border-rose-300 hover:text-rose-700 disabled:opacity-60">{busy === "cancel" ? "Sending…" : "Cancel plan"}</button>}
                 </div>
               </div>
             </section>
