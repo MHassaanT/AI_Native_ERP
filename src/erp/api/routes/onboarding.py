@@ -94,7 +94,9 @@ async def get_onboarding_progress(
 
     for st in step_rows:
         if not st.is_complete:
-            is_valid = await validate_step_completion(db, tenant_id, st.step_key)
+            is_valid = await validate_step_completion(
+                db, tenant_id, st.step_key, created_after=st.validation_baseline_at
+            )
             if is_valid:
                 st.is_complete = True
                 st.completed_at = now_utc
@@ -186,13 +188,17 @@ async def manually_complete_step(
 
     # Check if parent module is now complete
     m_steps = (
-        await db.execute(
-            select(OnboardingStep).where(
-                OnboardingStep.tenant_id == current_user.tenant_id,
-                OnboardingStep.module_slug == step.module_slug,
+        (
+            await db.execute(
+                select(OnboardingStep).where(
+                    OnboardingStep.tenant_id == current_user.tenant_id,
+                    OnboardingStep.module_slug == step.module_slug,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     if all(s.is_complete for s in m_steps):
         mod = (
@@ -236,7 +242,9 @@ async def validate_step(
     if not step:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Step not found.")
 
-    is_valid = await validate_step_completion(db, current_user.tenant_id, step.step_key)
+    is_valid = await validate_step_completion(
+        db, current_user.tenant_id, step.step_key, created_after=step.validation_baseline_at
+    )
     if is_valid and not step.is_complete:
         step.is_complete = True
         step.completed_at = datetime.now(UTC)
@@ -260,13 +268,17 @@ async def skip_module(
 ) -> dict:
     """Skips an entire module by marking all its checklist steps complete."""
     steps = (
-        await db.execute(
-            select(OnboardingStep).where(
-                OnboardingStep.tenant_id == current_user.tenant_id,
-                OnboardingStep.module_slug == module_slug,
+        (
+            await db.execute(
+                select(OnboardingStep).where(
+                    OnboardingStep.tenant_id == current_user.tenant_id,
+                    OnboardingStep.module_slug == module_slug,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     now_utc = datetime.now(UTC)
     for st in steps:

@@ -4,6 +4,7 @@ Each step actually queries the underlying PostgreSQL models to verify real recor
 """
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -16,6 +17,19 @@ from erp.db.models.manufacturing import BOM, MaintenanceTicket, WorkOrder, Works
 from erp.db.models.operator_cert import OperatorCertificationRecord
 from erp.db.models.purchasing import GoodsReceiptNote, PurchaseOrder, Supplier, SupplierInvoice
 from erp.db.models.sales import Customer, SalesQuotation
+
+
+def _tenant_record_conditions(
+    model: Any,
+    tenant_id: uuid.UUID,
+    created_after: datetime | None,
+    *conditions: Any,
+) -> tuple[Any, ...]:
+    """Scopes checklist validation to records created after setup, when available."""
+    filters: list[Any] = [model.tenant_id == tenant_id, *conditions]
+    if created_after is not None:
+        filters.append(model.created_at > created_after)
+    return tuple(filters)
 
 
 MASTER_MODULE_STEPS: dict[str, list[dict[str, Any]]] = {
@@ -249,130 +263,179 @@ async def validate_step_completion(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     step_key: str,
+    created_after: datetime | None = None,
 ) -> bool:
-    """Queries underlying database tables to determine whether a step is fulfilled by real records."""
+    """Checks for customer-created records, excluding setup/demo records when baselined."""
     if step_key == "review_chart_of_accounts":
         count = await db.scalar(
-            select(func.count()).select_from(Account).where(Account.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Account)
+            .where(*_tenant_record_conditions(Account, tenant_id, created_after))
         )
         return (count or 0) >= 5
 
     if step_key == "create_first_journal":
         count = await db.scalar(
-            select(func.count()).select_from(GeneralLedgerEntry).where(GeneralLedgerEntry.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(GeneralLedgerEntry)
+            .where(*_tenant_record_conditions(GeneralLedgerEntry, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "review_fiscal_periods":
         count = await db.scalar(
-            select(func.count()).select_from(FiscalPeriod).where(FiscalPeriod.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(FiscalPeriod)
+            .where(*_tenant_record_conditions(FiscalPeriod, tenant_id, created_after))
         )
         return (count or 0) >= 12
 
     if step_key == "setup_warehouse":
         count = await db.scalar(
-            select(func.count()).select_from(Warehouse).where(Warehouse.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Warehouse)
+            .where(*_tenant_record_conditions(Warehouse, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_first_item":
         count = await db.scalar(
-            select(func.count()).select_from(Item).where(Item.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Item)
+            .where(*_tenant_record_conditions(Item, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "calculate_rop":
         # Complete if item exists with reorder level
         count = await db.scalar(
-            select(func.count()).select_from(Item).where(Item.tenant_id == tenant_id, Item.reorder_level > 0)
+            select(func.count())
+            .select_from(Item)
+            .where(
+                *_tenant_record_conditions(Item, tenant_id, created_after, Item.reorder_level > 0)
+            )
         )
         return (count or 0) > 0
 
     if step_key == "create_first_customer":
         count = await db.scalar(
-            select(func.count()).select_from(Customer).where(Customer.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Customer)
+            .where(*_tenant_record_conditions(Customer, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_first_quote":
         count = await db.scalar(
-            select(func.count()).select_from(SalesQuotation).where(SalesQuotation.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(SalesQuotation)
+            .where(*_tenant_record_conditions(SalesQuotation, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "test_dynamic_pricing":
         # If quote exists, dynamic pricing was exercised
         count = await db.scalar(
-            select(func.count()).select_from(SalesQuotation).where(SalesQuotation.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(SalesQuotation)
+            .where(*_tenant_record_conditions(SalesQuotation, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_supplier":
         count = await db.scalar(
-            select(func.count()).select_from(Supplier).where(Supplier.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Supplier)
+            .where(*_tenant_record_conditions(Supplier, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_purchase_order":
         count = await db.scalar(
-            select(func.count()).select_from(PurchaseOrder).where(PurchaseOrder.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(PurchaseOrder)
+            .where(*_tenant_record_conditions(PurchaseOrder, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_grn":
         count = await db.scalar(
-            select(func.count()).select_from(GoodsReceiptNote).where(GoodsReceiptNote.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(GoodsReceiptNote)
+            .where(*_tenant_record_conditions(GoodsReceiptNote, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "run_three_way_match":
         count = await db.scalar(
-            select(func.count()).select_from(SupplierInvoice).where(
-                SupplierInvoice.tenant_id == tenant_id,
-                SupplierInvoice.matching_status.in_(["MATCHED", "TOLERANCE_APPROVED"]),
+            select(func.count())
+            .select_from(SupplierInvoice)
+            .where(
+                *_tenant_record_conditions(
+                    SupplierInvoice,
+                    tenant_id,
+                    created_after,
+                    SupplierInvoice.matching_status.in_(["MATCHED", "TOLERANCE_APPROVED"]),
+                ),
             )
         )
         return (count or 0) > 0
 
     if step_key == "create_workstation":
         count = await db.scalar(
-            select(func.count()).select_from(Workstation).where(Workstation.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Workstation)
+            .where(*_tenant_record_conditions(Workstation, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_bom":
         count = await db.scalar(
-            select(func.count()).select_from(BOM).where(BOM.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(BOM)
+            .where(*_tenant_record_conditions(BOM, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_work_order":
         count = await db.scalar(
-            select(func.count()).select_from(WorkOrder).where(WorkOrder.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(WorkOrder)
+            .where(*_tenant_record_conditions(WorkOrder, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_employee":
         count = await db.scalar(
-            select(func.count()).select_from(Employee).where(Employee.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(Employee)
+            .where(*_tenant_record_conditions(Employee, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "add_certification":
         count = await db.scalar(
-            select(func.count()).select_from(OperatorCertificationRecord).where(OperatorCertificationRecord.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(OperatorCertificationRecord)
+            .where(
+                *_tenant_record_conditions(OperatorCertificationRecord, tenant_id, created_after)
+            )
         )
         return (count or 0) > 0
 
     if step_key == "create_shift":
         count = await db.scalar(
-            select(func.count()).select_from(ShiftSchedule).where(ShiftSchedule.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(ShiftSchedule)
+            .where(*_tenant_record_conditions(ShiftSchedule, tenant_id, created_after))
         )
         return (count or 0) > 0
 
     if step_key == "create_ticket":
         count = await db.scalar(
-            select(func.count()).select_from(MaintenanceTicket).where(MaintenanceTicket.tenant_id == tenant_id)
+            select(func.count())
+            .select_from(MaintenanceTicket)
+            .where(*_tenant_record_conditions(MaintenanceTicket, tenant_id, created_after))
         )
         return (count or 0) > 0
 

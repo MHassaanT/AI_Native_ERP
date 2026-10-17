@@ -15,10 +15,10 @@ import calendar
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.audit.hasher import GENESIS_HASH, compute_audit_record_hash
@@ -33,6 +33,7 @@ from erp.db.models.ledger import Account, CostCenter, FiscalPeriod
 from erp.db.models.onboarding import OnboardingProgress, OnboardingStep, TenantSettings
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class SetupConfig:
@@ -208,6 +209,7 @@ async def provision_tenant_blueprint(
     session.add(tenant_settings)
 
     # 6. Seed Onboarding Steps for Enabled Modules
+    onboarding_steps: list[OnboardingStep] = []
     for module_slug in config.enabled_modules:
         prog = OnboardingProgress(
             progress_id=uuid.uuid4(),
@@ -233,6 +235,7 @@ async def provision_tenant_blueprint(
                 is_complete=False,
             )
             session.add(st)
+            onboarding_steps.append(st)
 
     # 7. Demo Data (if requested)
     if config.generate_demo_data and primary_wh:
@@ -243,6 +246,14 @@ async def provision_tenant_blueprint(
             currency=config.currency,
             primary_warehouse=primary_wh,
         )
+
+    # The setup blueprint and optional demo data are intentionally not customer
+    # onboarding accomplishments. Capture the database clock after seeding so
+    # only records created by the customer from this point can auto-complete a step.
+    await session.flush()
+    validation_baseline_at = await session.scalar(select(func.clock_timestamp()))
+    for step in onboarding_steps:
+        step.validation_baseline_at = validation_baseline_at
 
     # 8. Cryptographic Audit Log (Chained to prior hash or GENESIS)
     last_audit_stmt = (

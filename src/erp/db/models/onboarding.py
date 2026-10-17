@@ -99,6 +99,11 @@ class OnboardingStep(Base, TenantMixin, TimestampMixin):
     target_route: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    validation_baseline_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+        doc="Records created at or before this timestamp are setup/demo data and do not complete the step.",
+    )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     __table_args__ = (
