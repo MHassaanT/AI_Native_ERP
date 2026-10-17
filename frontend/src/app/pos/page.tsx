@@ -37,6 +37,11 @@ interface POSProfile {
   currency: string;
 }
 
+interface POSWarehouse {
+  warehouse_id: string;
+  warehouse_name: string;
+}
+
 interface POSShift {
   has_open_shift: boolean;
   opening_id?: string;
@@ -61,6 +66,9 @@ const formatMoney = (val: any) => {
 
 export default function POSPage() {
   const [profiles, setProfiles] = useState<POSProfile[]>([]);
+  const [warehouses, setWarehouses] = useState<POSWarehouse[]>([]);
+  const [profileWarehouseId, setProfileWarehouseId] = useState("");
+  const [isCreatingProfile, setIsCreatingProfile] = useState(false);
   const [shift, setShift] = useState<POSShift | null>(null);
   const [items, setItems] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
@@ -110,13 +118,18 @@ export default function POSPage() {
     setError(null);
     try {
       const [profilesData, shiftData, itemsData, custsData, parkedData] = await Promise.all([
-        api.getPOSProfiles().catch(() => []),
+        api.getPOSProfiles(),
         api.getCurrentPOSShift(userId).catch(() => ({ has_open_shift: false })),
         api.getItems().catch(() => []),
         api.getCustomers().catch(() => []),
         api.getParkedPOSCarts().catch(() => []),
       ]);
+      const warehouseData = await api.getWarehouses();
       setProfiles(profilesData || []);
+      setWarehouses(warehouseData || []);
+      if (warehouseData?.length > 0 && !profileWarehouseId) {
+        setProfileWarehouseId(warehouseData[0].warehouse_id);
+      }
       setShift(shiftData);
       setItems(itemsData || []);
       setCustomers(custsData || []);
@@ -137,6 +150,30 @@ export default function POSPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  const handleCreateDefaultProfile = async () => {
+    if (!profileWarehouseId) {
+      setError("Create or activate a warehouse before configuring a POS profile.");
+      return;
+    }
+    setIsCreatingProfile(true);
+    setError(null);
+    try {
+      const accounts = await api.getAccounts().catch(() => []);
+      const tenantCurrency = accounts.find((account: any) => account.currency)?.currency || "USD";
+      await api.createPOSProfile({
+        profile_name: "Default POS",
+        warehouse_id: profileWarehouseId,
+        currency: tenantCurrency,
+      });
+      await loadData();
+      setSuccessMsg("Default POS profile created. You can now open a cashier shift.");
+    } catch (err: any) {
+      setError(err?.message || "Could not create a POS profile.");
+    } finally {
+      setIsCreatingProfile(false);
+    }
+  };
 
   const handleOpenShift = async () => {
     try {
@@ -560,7 +597,10 @@ export default function POSPage() {
             </div>
           ) : (
             <button
-              onClick={() => setShowOpenShiftModal(true)}
+              onClick={() => {
+                setError(null);
+                setShowOpenShiftModal(true);
+              }}
               className="flex items-center gap-1.5 rounded-md border border-cream-400 bg-cream-900 px-3 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 transition-colors"
             >
               <Plus className="h-3.5 w-3.5" />
@@ -1052,17 +1092,51 @@ export default function POSPage() {
             <div className="space-y-3 text-xs">
               <div>
                 <label className="text-cream-800 font-medium block mb-1">POS Profile</label>
-                <select
-                  value={selectedProfileId}
-                  onChange={(e) => setSelectedProfileId(e.target.value)}
-                  className="w-full rounded-md border border-cream-300 bg-white px-3 py-2 text-xs text-cream-900"
-                >
-                  {profiles.map((p) => (
-                    <option key={p.profile_id} value={p.profile_id}>
-                      {p.profile_name} ({p.currency})
-                    </option>
-                  ))}
-                </select>
+                {profiles.length > 0 ? (
+                  <select
+                    value={selectedProfileId}
+                    onChange={(e) => setSelectedProfileId(e.target.value)}
+                    className="w-full rounded-md border border-cream-300 bg-white px-3 py-2 text-xs text-cream-900"
+                  >
+                    {profiles.map((p) => (
+                      <option key={p.profile_id} value={p.profile_id}>
+                        {p.profile_name} ({p.currency})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="space-y-2 rounded-md border border-amberGold-300 bg-amberGold-50 p-3">
+                    {error && <p role="alert" className="rounded border border-terracotta-300 bg-white p-2 text-xs text-terracotta-800">{error}</p>}
+                    <p className="text-xs leading-5 text-amberGold-800">
+                      This workspace has no POS profile yet. Choose the stock warehouse for this terminal and create its default profile to continue.
+                    </p>
+                    {warehouses.length > 0 ? (
+                      <>
+                        <select
+                          value={profileWarehouseId}
+                          onChange={(event) => setProfileWarehouseId(event.target.value)}
+                          className="w-full rounded-md border border-cream-300 bg-white px-3 py-2 text-xs text-cream-900"
+                        >
+                          {warehouses.map((warehouse) => (
+                            <option key={warehouse.warehouse_id} value={warehouse.warehouse_id}>
+                              {warehouse.warehouse_name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => void handleCreateDefaultProfile()}
+                          disabled={isCreatingProfile}
+                          className="w-full rounded-md bg-cream-900 px-3 py-2 text-xs font-semibold text-white hover:bg-cream-800 disabled:opacity-50"
+                        >
+                          {isCreatingProfile ? "Creating profile…" : "Create default POS profile"}
+                        </button>
+                      </>
+                    ) : (
+                      <p className="text-xs font-medium text-amberGold-800">No active warehouses found. Configure one in Inventory before opening a POS shift.</p>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1092,7 +1166,8 @@ export default function POSPage() {
               <button
                 type="button"
                 onClick={handleOpenShift}
-                className="rounded-md border border-cream-400 bg-cream-900 px-4 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800"
+                disabled={profiles.length === 0 || !selectedProfileId || isCreatingProfile}
+                className="rounded-md border border-cream-400 bg-cream-900 px-4 py-1.5 text-xs font-medium text-cream-50 hover:bg-cream-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Confirm &amp; Start Shift
               </button>
