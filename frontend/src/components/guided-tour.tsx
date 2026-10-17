@@ -40,6 +40,10 @@ function storageKey(id: string) {
   return `ai_erp_tour_${id}_${user?.tenant_id || "workspace"}`;
 }
 
+function progressKey(id: string) {
+  return `${storageKey(id)}_step`;
+}
+
 function TourDialog({ steps, index, onPrevious, onNext, onDismiss, action }: {
   steps: TourStep[];
   index: number;
@@ -64,7 +68,7 @@ function TourDialog({ steps, index, onPrevious, onNext, onDismiss, action }: {
         {action && step.actionLabel && <button onClick={action} className="mt-5 w-full rounded-lg border border-sage-300 bg-sage-50 px-3 py-2.5 text-sm font-semibold text-sage-800 hover:bg-sage-100">{step.actionLabel} — then continue your setup</button>}
         <div className="mt-3 grid grid-cols-2 gap-2">
           <button onClick={onPrevious} disabled={index === 0} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-cream-300 px-3 py-2 text-sm font-medium text-cream-700 hover:bg-cream-100 disabled:cursor-not-allowed disabled:opacity-40"><ArrowLeft className="h-4 w-4" />Previous</button>
-          <button onClick={onNext} className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sage-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sage-700">{last ? "Finish" : "Next"}<ArrowRight className="h-4 w-4" /></button>
+          <button onClick={onNext} className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-sage-500 px-3 py-2 text-sm font-semibold text-white hover:bg-sage-700">{last ? "Finish" : "Next"}<ArrowRight className="h-4 w-4" /></button>
         </div>
         <button onClick={onDismiss} className="mt-4 text-xs text-cream-500 underline underline-offset-2 hover:text-cream-800">Skip tour</button>
       </section>
@@ -82,12 +86,23 @@ export function WorkspaceTour() {
     const user = getUser();
     if (!user?.setup_complete || pathname === "/setup" || pathname === "/billing/subscription") return;
     try {
-      if (localStorage.getItem(storageKey("workspace")) !== "done") setIndex(Math.max(0, steps.findIndex((step) => step.href === pathname)));
+      if (localStorage.getItem(storageKey("workspace")) !== "done") {
+        const savedStep = Number(localStorage.getItem(progressKey("workspace")));
+        setIndex(Number.isInteger(savedStep) && savedStep >= 0 && savedStep < steps.length
+          ? savedStep
+          : Math.max(0, steps.findIndex((step) => step.href === pathname)));
+      }
     } catch { /* Storage can be unavailable in restricted browser contexts. */ }
   }, [pathname, steps]);
 
+  useEffect(() => {
+    if (index !== null) {
+      try { localStorage.setItem(progressKey("workspace"), String(index)); } catch {}
+    }
+  }, [index]);
+
   if (index === null) return null;
-  const end = () => { try { localStorage.setItem(storageKey("workspace"), "done"); } catch {} setIndex(null); };
+  const end = () => { try { localStorage.setItem(storageKey("workspace"), "done"); localStorage.removeItem(progressKey("workspace")); } catch {} setIndex(null); };
   const move = (nextIndex: number) => { setIndex(nextIndex); const href = steps[nextIndex]?.href; if (href && href !== pathname) router.push(href); };
   return <TourDialog steps={steps} index={index} onPrevious={() => move(Math.max(0, index - 1))} onNext={() => index === steps.length - 1 ? end() : move(index + 1)} onDismiss={end} />;
 }
@@ -96,10 +111,20 @@ export function AgentSetupTour({ id, steps }: { id: string; steps: TourStep[] })
   const [index, setIndex] = useState<number | null>(null);
   const [minimized, setMinimized] = useState(false);
   useEffect(() => {
-    try { if (localStorage.getItem(storageKey(id)) !== "done") setIndex(0); } catch { setIndex(0); }
-  }, [id]);
+    try {
+      if (localStorage.getItem(storageKey(id)) !== "done") {
+        const savedStep = Number(localStorage.getItem(progressKey(id)));
+        setIndex(Number.isInteger(savedStep) && savedStep >= 0 && savedStep < steps.length ? savedStep : 0);
+      }
+    } catch { setIndex(0); }
+  }, [id, steps.length]);
+  useEffect(() => {
+    if (index !== null) {
+      try { localStorage.setItem(progressKey(id), String(index)); } catch {}
+    }
+  }, [id, index]);
   if (index === null) return null;
-  const end = () => { try { localStorage.setItem(storageKey(id), "done"); } catch {} setIndex(null); };
+  const end = () => { try { localStorage.setItem(storageKey(id), "done"); localStorage.removeItem(progressKey(id)); } catch {} setIndex(null); };
   const action = () => {
     const href = steps[index].href;
     setMinimized(true);
@@ -115,7 +140,7 @@ export function AgentSetupTour({ id, steps }: { id: string; steps: TourStep[] })
       <button
         type="button"
         onClick={() => setMinimized(false)}
-        className="fixed bottom-5 right-5 z-[90] inline-flex items-center gap-2 rounded-full border border-sage-700 bg-sage-600 px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-sage-700"
+        className="fixed bottom-5 right-5 z-[90] inline-flex items-center gap-2 rounded-full border border-sage-700 bg-sage-500 px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-sage-700"
       >
         <Compass className="h-4 w-4" /> Resume setup guide · {index + 1}/{steps.length}
       </button>
