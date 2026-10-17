@@ -25,6 +25,29 @@ const aiSteps = [
   { number: "03", title: "Keep people in control", detail: "Teams review actions, follow approvals, and retain a clear record of decisions." },
 ];
 
+const plans = [
+  {
+    name: "Monthly",
+    price: "$50",
+    cadence: "/ month",
+    detail: "Flexible monthly billing. Cancel any time.",
+    featured: false,
+  },
+  {
+    name: "Annual",
+    price: "$550",
+    cadence: "/ year",
+    detail: "Equivalent to $45.83 per month, billed annually.",
+    featured: true,
+  },
+];
+
+const planFeatures = [
+  "Full ERP workspace access",
+  "AI-assisted workflows and operational insights",
+  "Secure, recurring SafePay billing",
+];
+
 export default function LandingPage() {
   return (
     <main className="min-h-screen overflow-hidden bg-[#f8faf7] text-cream-900">
@@ -39,6 +62,7 @@ export default function LandingPage() {
         <nav className="flex items-center gap-2 sm:gap-3">
           <Link href="#features" className="hidden rounded-lg px-3 py-2 text-sm font-medium text-cream-700 transition hover:bg-white hover:text-cream-900 md:inline-flex">Features</Link>
           <Link href="#ai-capabilities" className="hidden rounded-lg px-3 py-2 text-sm font-medium text-cream-700 transition hover:bg-white hover:text-cream-900 md:inline-flex">AI capabilities</Link>
+          <Link href="#pricing" className="hidden rounded-lg px-3 py-2 text-sm font-medium text-cream-700 transition hover:bg-white hover:text-cream-900 md:inline-flex">Pricing</Link>
           <Link href="/login" className="rounded-lg px-3 py-2 text-sm font-medium text-cream-700 transition hover:bg-white hover:text-cream-900">Log in</Link>
           <Link href="/signup" className="inline-flex items-center gap-2 rounded-lg bg-cream-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-sage-700">
             Get started <ArrowRight className="h-4 w-4" />
@@ -162,6 +186,39 @@ export default function LandingPage() {
           <div className="mt-6 flex items-center gap-2 rounded-lg border border-sage-100 bg-sage-50/70 px-3 py-2.5 text-xs text-sage-700">
             <ShieldCheck className="h-4 w-4 shrink-0" /> Role-based access and approvals stay part of the process.
           </div>
+        </div>
+      </section>
+
+      <section id="pricing" className="border-t border-cream-200/80 bg-white/65">
+        <div className="mx-auto max-w-7xl px-5 py-16 sm:px-8 sm:py-20">
+          <div className="mx-auto max-w-2xl text-center">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-sage-700">Simple pricing</p>
+            <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">One workspace. Clear, predictable pricing.</h2>
+            <p className="mt-4 text-sm leading-6 text-cream-600 sm:text-base">Choose the billing rhythm that works for your team. Every plan includes the complete AI-Native ERP workspace.</p>
+          </div>
+
+          <div className="mx-auto mt-10 grid max-w-4xl gap-5 md:grid-cols-2">
+            {plans.map((plan) => (
+              <article key={plan.name} className={`relative flex flex-col rounded-2xl border bg-white p-6 shadow-sm sm:p-7 ${plan.featured ? "border-sage-500 ring-1 ring-sage-500" : "border-cream-200"}`}>
+                {plan.featured && <span className="absolute -top-3 right-5 rounded-full bg-sage-600 px-3 py-1 text-[11px] font-semibold text-white shadow-sm">One month free · Save $50</span>}
+                <p className="text-sm font-semibold text-cream-800">{plan.name}</p>
+                <div className="mt-4 flex items-baseline gap-2">
+                  <span className="text-4xl font-semibold tracking-tight text-cream-900">{plan.price}</span>
+                  <span className="text-sm text-cream-600">{plan.cadence}</span>
+                </div>
+                <p className="mt-2 min-h-5 text-xs text-cream-600">{plan.detail}</p>
+                <ul className="my-7 space-y-3 text-sm text-cream-700">
+                  {planFeatures.map((feature) => (
+                    <li key={feature} className="flex items-center gap-2"><Check className="h-4 w-4 shrink-0 text-sage-600" />{feature}</li>
+                  ))}
+                </ul>
+                <Link href="/signup" className={`mt-auto inline-flex h-11 items-center justify-center gap-2 rounded-lg border px-4 text-sm font-semibold transition ${plan.featured ? "border-sage-700 bg-sage-500 text-white hover:bg-sage-700" : "border-cream-300 bg-white text-cream-800 hover:border-sage-300 hover:bg-sage-50"}`}>
+                  Get started <ArrowRight className="h-4 w-4" />
+                </Link>
+              </article>
+            ))}
+          </div>
+          <p className="mt-6 text-center text-xs text-cream-500">Payments are securely processed by SafePay. Your workspace is activated once the first payment is confirmed.</p>
         </div>
       </section>
 
