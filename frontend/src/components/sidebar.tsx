@@ -119,7 +119,7 @@ export function Sidebar({
 }: SidebarProps) {
   const pathname = usePathname();
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
 
   useEffect(() => {
     const updateUser = () => setCurrentUser(getUser());
@@ -205,7 +205,7 @@ export function Sidebar({
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-2">
         {NAV_GROUPS.map((group) => {
           const hasActiveItem = group.items.some((item) => item.href === pathname);
-          const isExpanded = isRail || hasActiveItem || expandedGroups[group.title] === true;
+          const isExpanded = isRail || hasActiveItem || expandedGroup === group.title;
           const groupId = `sidebar-group-${group.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
           return (
@@ -213,7 +213,7 @@ export function Sidebar({
             {!isRail && (
               <button
                 type="button"
-                onClick={() => setExpandedGroups((groups) => ({ ...groups, [group.title]: !isExpanded }))}
+                onClick={() => setExpandedGroup((current) => current === group.title ? null : group.title)}
                 aria-expanded={isExpanded}
                 aria-controls={groupId}
                 className={`flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left transition-colors ${hasActiveItem ? "bg-sage-50 text-sage-800" : "text-cream-700 hover:bg-white"}`}
