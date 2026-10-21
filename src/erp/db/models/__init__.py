@@ -7,6 +7,9 @@ from erp.db.models.assets import (
     AssetLocation,
     AssetMovement,
     AssetRepair,
+    AssetMaintenanceTeam,
+    AssetMaintenanceTeamMember,
+    AssetValueAdjustment,
 )
 from erp.db.models.audit import AgentAuditLog
 from erp.db.models.base import Base, TenantMixin, TimestampMixin
@@ -73,6 +76,28 @@ from erp.db.models.hr import (
     ShiftSchedule,
     ShiftType,
 )
+from erp.db.models.hr_deep import (
+    CompensatoryLeaveRequest,
+    DailyWorkSummary,
+    DailyWorkSummaryReply,
+    EmployeeGrade,
+    EmployeeGrievance,
+    EmployeePromotion,
+    EmployeeTransfer,
+    FullAndFinalStatement,
+    FullAndFinalStatementItem,
+    GrievanceType,
+    Interview,
+    InterviewFeedback,
+    InterviewRound,
+    LeaveBlockList,
+    LeaveBlockListDate,
+    LeavePolicy,
+    LeavePolicyAssignment,
+    LeavePolicyDetail,
+    StaffingPlan,
+    StaffingPlanDetail,
+)
 from erp.db.models.inventory import (
     Batch,
     Item,
@@ -133,8 +158,13 @@ from erp.db.models.operator_cert import OperatorCertificationRecord
 from erp.db.models.orchestration import DAGExecutionRecord
 from erp.db.models.outbox import TransactionalOutbox
 from erp.db.models.payroll import (
+    AdditionalSalary,
     EmployeeAdvance,
+    IncomeTaxSlab,
+    IncomeTaxSlabRate,
+    PayrollPeriod,
     PayrollEntry,
+    RetentionBonus,
     SalaryComponent,
     SalarySlip,
     SalarySlipItem,
@@ -143,8 +173,12 @@ from erp.db.models.payroll import (
     SalaryStructureItem,
 )
 from erp.db.models.projects import (
+    ActivityCost,
+    ActivityType,
     Project,
     ProjectTask,
+    ProjectType,
+    ProjectUpdate,
     Timesheet,
 )
 from erp.db.models.purchasing import (
@@ -300,6 +334,11 @@ __all__ = [
     "LeaveApplication",
     "ShiftSchedule",
     "ExpenseClaim",
+    "StaffingPlan", "StaffingPlanDetail", "Interview", "InterviewRound", "InterviewFeedback",
+    "EmployeeGrade", "EmployeePromotion", "EmployeeTransfer", "GrievanceType", "EmployeeGrievance",
+    "FullAndFinalStatement", "FullAndFinalStatementItem", "DailyWorkSummary", "DailyWorkSummaryReply",
+    "LeavePolicy", "LeavePolicyDetail", "LeavePolicyAssignment", "LeaveBlockList", "LeaveBlockListDate",
+    "CompensatoryLeaveRequest",
     "SalaryComponent",
     "SalaryStructure",
     "SalaryStructureItem",
@@ -308,6 +347,11 @@ __all__ = [
     "SalarySlipItem",
     "PayrollEntry",
     "EmployeeAdvance",
+    "IncomeTaxSlab",
+    "IncomeTaxSlabRate",
+    "PayrollPeriod",
+    "AdditionalSalary",
+    "RetentionBonus",
     "CreditNote",
     "CreditNoteItem",
     "DebitNote",
@@ -366,6 +410,9 @@ __all__ = [
     "AssetDepreciationSchedule",
     "AssetMovement",
     "AssetRepair",
+    "AssetMaintenanceTeam",
+    "AssetMaintenanceTeamMember",
+    "AssetValueAdjustment",
     "QualityInspectionTemplate",
     "QualityInspectionParameter",
     "QualityInspection",
@@ -374,7 +421,11 @@ __all__ = [
     "MaintenanceSchedule",
     "MaintenanceVisit",
     "Project",
+    "ProjectType",
     "ProjectTask",
+    "ProjectUpdate",
+    "ActivityType",
+    "ActivityCost",
     "Timesheet",
     "RecruitmentRole",
     "CandidateApplication",
@@ -397,4 +448,35 @@ __all__ = [
     "WhatsAppSupportKnowledgeSource",
     "WhatsAppAirtableConnection",
     "WhatsAppOTPChallenge",
+]
+from erp.db.models.shared_master import (
+    Address,
+    Contact,
+    ItemGroup,
+    ItemPrice,
+    IssueType,
+    NamingSeries,
+    PriceList,
+    ProductBundle,
+    ProductBundleItem,
+    TermsAndConditionsTemplate,
+    UOM,
+    UOMConversion,
+)
+__all__ += [
+    "Address", "Contact", "ItemGroup", "ItemPrice", "IssueType", "NamingSeries",
+    "PriceList", "ProductBundle", "ProductBundleItem", "TermsAndConditionsTemplate",
+    "UOM", "UOMConversion",
+]
+
+from erp.db.models.phase_b import (
+    ItemManufacturer, LoyaltyPointEntry, LoyaltyProgram, PricingRule, PromotionalScheme,
+    PurchaseTaxesAndChargesTemplate, PurchaseTaxesAndChargesTemplateDetail, SalesPartner,
+    SalesTeam, ShippingRule, ShippingRuleCondition, SupplierGroup,
+)
+__all__ += [
+    "ItemManufacturer", "LoyaltyPointEntry", "LoyaltyProgram", "PricingRule",
+    "PromotionalScheme", "PurchaseTaxesAndChargesTemplate",
+    "PurchaseTaxesAndChargesTemplateDetail", "SalesPartner", "SalesTeam",
+    "ShippingRule", "ShippingRuleCondition", "SupplierGroup",
 ]

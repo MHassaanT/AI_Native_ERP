@@ -23,6 +23,8 @@ export default function AccountsPayablePage() {
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
   const [goodsReceipts, setGoodsReceipts] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [supplierGroups, setSupplierGroups] = useState<any[]>([]);
+  const [newSupplierGroupId, setNewSupplierGroupId] = useState("");
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"invoices" | "pos" | "grns" | "suppliers">("invoices");
@@ -66,18 +68,20 @@ export default function AccountsPayablePage() {
     setLoading(true);
     setError(null);
     try {
-      const [invs, pos, grns, sups, itms] = await Promise.all([
+      const [invs, pos, grns, sups, itms, groups] = await Promise.all([
         api.getInvoices().catch(() => []),
         api.getPurchaseOrders().catch(() => []),
         api.getGoodsReceipts().catch(() => []),
         api.getSuppliers().catch(() => []),
         api.getItems().catch(() => []),
+        api.getMasterData("supplier-groups").catch(() => []),
       ]);
       setInvoices(invs || []);
       setPurchaseOrders(pos || []);
       setGoodsReceipts(grns || []);
       setSuppliers(sups || []);
       setItems(itms || []);
+      setSupplierGroups((groups || []).filter((group: any) => group.is_active && !group.is_group));
 
       if (pos && pos.length > 0 && !selectedPoId) {
         setSelectedPoId(pos[0].po_id);
@@ -313,12 +317,14 @@ export default function AccountsPayablePage() {
         currency: newSupplierCurrency || "USD",
         payment_terms_days: parseInt(newSupplierTerms, 10) || 30,
         otif_score: 100.0,
+        supplier_group_id: newSupplierGroupId || undefined,
       });
 
       setShowCreateSupplierModal(false);
       setNewSupplierCode("");
       setNewSupplierName("");
       setNewSupplierTaxId("");
+      setNewSupplierGroupId("");
       setSuccessMsg(`Supplier "${created.supplier_name}" (${created.supplier_code}) registered successfully.`);
       setSelectedSupplierId(created.supplier_id);
       setActiveTab("suppliers");
@@ -1385,6 +1391,13 @@ export default function AccountsPayablePage() {
                 />
               </div>
 
+              <div>
+                <label className="block font-medium text-cream-900 mb-1">Supplier Group</label>
+                <select value={newSupplierGroupId} onChange={(e) => setNewSupplierGroupId(e.target.value)} className="w-full rounded border border-cream-300 bg-cream-50 px-3 py-1.5 text-cream-900">
+                  <option value="">Unassigned</option>
+                  {supplierGroups.map((group) => <option key={group.supplier_group_id} value={group.supplier_group_id}>{group.group_name}</option>)}
+                </select>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium text-cream-900 mb-1">Tax / VAT ID</label>

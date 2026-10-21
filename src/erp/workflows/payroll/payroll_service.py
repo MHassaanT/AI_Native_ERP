@@ -11,8 +11,14 @@ from sqlalchemy.orm import selectinload
 
 from erp.db.models.hr import Attendance, Employee, LeaveApplication, LeaveType
 from erp.db.models.ledger import GeneralLedgerEntry
+from erp.db.models.tenant import Tenant
+from erp.db.models.currency import CurrencyExchangeRate
 from erp.db.models.payroll import (
+    AdditionalSalary,
     EmployeeAdvance,
+    IncomeTaxSlab,
+    PayrollPeriod,
+    RetentionBonus,
     SalaryComponent,
     SalarySlip,
     SalarySlipItem,
@@ -221,7 +227,19 @@ class PayrollService:
             raise ValueError(f"No active SalaryStructureAssignment found for employee {employee_id}.")
 
         total_calendar_days = (end_date - start_date).days + 1
-        total_working_days = 30  # Standard monthly working days baseline
+        if total_calendar_days <= 0:
+            raise ValueError("Payroll period end date must be on or after its start date.")
+        total_working_days = total_calendar_days
+
+        duplicate_stmt = select(SalarySlip.slip_id).where(
+            SalarySlip.tenant_id == tenant_id,
+            SalarySlip.employee_id == employee_id,
+            SalarySlip.status != "CANCELLED",
+            SalarySlip.start_date <= end_date,
+            SalarySlip.end_date >= start_date,
+        ).limit(1)
+        if await db.scalar(duplicate_stmt):
+            raise ValueError("An active salary slip already covers part or all of this payroll period.")
 
         # Calculate Leave Without Pay (LWP) days from Attendance (ABSENT) and approved LWP applications
         absent_stmt = select(func.count(Attendance.attendance_id)).where(
@@ -235,18 +253,26 @@ class PayrollService:
 
         # Check approved LWP leaves
         lwp_stmt = (
-            select(func.coalesce(func.sum(LeaveApplication.total_leave_days), Decimal("0.00")))
+            select(LeaveApplication)
             .join(LeaveType, LeaveApplication.leave_type_id == LeaveType.leave_type_id)
             .where(
                 LeaveApplication.tenant_id == tenant_id,
                 LeaveApplication.employee_id == employee_id,
                 LeaveApplication.status == "APPROVED",
                 LeaveType.is_lwp.is_(True),
-                LeaveApplication.from_date >= start_date,
-                LeaveApplication.to_date <= end_date,
+                LeaveApplication.from_date <= end_date,
+                LeaveApplication.to_date >= start_date,
             )
         )
-        lwp_app_days = Decimal(str((await db.execute(lwp_stmt)).scalar() or "0.00"))
+        lwp_applications = list((await db.execute(lwp_stmt)).scalars().all())
+        lwp_app_days = Decimal("0.00")
+        for leave in lwp_applications:
+            overlap_start = max(start_date, leave.from_date)
+            overlap_end = min(end_date, leave.to_date)
+            overlap_days = Decimal((overlap_end - overlap_start).days + 1)
+            leave_days = Decimal((leave.to_date - leave.from_date).days + 1)
+            if leave_days > 0:
+                lwp_app_days += min(leave.total_leave_days, leave_days) * overlap_days / leave_days
 
         leave_without_pay_days = absent_days + lwp_app_days
         payment_days = max(Decimal("0.00"), Decimal(str(total_working_days)) - leave_without_pay_days)
@@ -254,6 +280,9 @@ class PayrollService:
 
         base_salary = assignment.base_salary
         gross_pay = Decimal("0.0000")
+        taxable_pay = Decimal("0.0000")
+        recurring_taxable_pay = Decimal("0.0000")
+        one_time_taxable_pay = Decimal("0.0000")
         total_deductions = Decimal("0.0000")
         slip_items_to_add: list[dict] = []
 
@@ -273,6 +302,9 @@ class PayrollService:
                 # Pro-rate by attendance/working days
                 earned_amt = Decimal(str(round(raw_amt * pay_factor, 4)))
                 gross_pay += earned_amt
+                if comp.is_taxable:
+                    taxable_pay += earned_amt
+                    recurring_taxable_pay += earned_amt
                 slip_items_to_add.append({
                     "component_id": comp.component_id,
                     "component_name": comp.component_name,
@@ -280,10 +312,90 @@ class PayrollService:
                     "amount": earned_amt,
                 })
 
+        # Apply pending one-time additions that are due in this pay period.
+        additions_stmt = select(AdditionalSalary).where(
+            AdditionalSalary.tenant_id == tenant_id,
+            AdditionalSalary.employee_id == employee_id,
+            AdditionalSalary.payroll_date >= start_date,
+            AdditionalSalary.payroll_date <= end_date,
+            AdditionalSalary.status == "PENDING",
+        )
+        additions = list((await db.execute(additions_stmt)).scalars().all())
+        for addition in additions:
+            if addition.component_type == "DEDUCTION":
+                total_deductions += addition.amount
+                line_type = "DEDUCTION"
+            else:
+                gross_pay += addition.amount
+                line_type = "EARNING"
+                if addition.is_taxable:
+                    taxable_pay += addition.amount
+                    one_time_taxable_pay += addition.amount
+            slip_items_to_add.append({"component_id": addition.salary_component_id, "component_name": addition.component_name, "component_type": line_type, "amount": addition.amount, "source": addition})
+
+        bonuses_stmt = select(RetentionBonus).where(
+            RetentionBonus.tenant_id == tenant_id,
+            RetentionBonus.employee_id == employee_id,
+            RetentionBonus.vesting_date >= start_date,
+            RetentionBonus.vesting_date <= end_date,
+            RetentionBonus.status == "PENDING",
+        )
+        bonuses = list((await db.execute(bonuses_stmt)).scalars().all())
+        for bonus in bonuses:
+            gross_pay += bonus.amount
+            if bonus.is_taxable:
+                taxable_pay += bonus.amount
+                one_time_taxable_pay += bonus.amount
+            slip_items_to_add.append({"component_id": None, "component_name": bonus.bonus_name, "component_type": "EARNING", "amount": bonus.amount, "source": bonus})
+
+        # Tax slabs are annual progressive brackets. Annualize recurring pay based on
+        # the actual payroll period and withhold one period's liability. Tax one-time
+        # taxable additions as the incremental annual liability they cause.
+        tax_stmt = (
+            select(IncomeTaxSlab)
+            .options(selectinload(IncomeTaxSlab.rates))
+            .where(IncomeTaxSlab.tenant_id == tenant_id, IncomeTaxSlab.is_active.is_(True),
+                   IncomeTaxSlab.currency == assignment.structure.currency.upper(),
+                   IncomeTaxSlab.effective_from <= posting_date, IncomeTaxSlab.effective_to >= posting_date)
+            .order_by(IncomeTaxSlab.effective_from.desc())
+        )
+        tax_slab = (await db.execute(tax_stmt)).scalars().first()
+        income_tax = Decimal("0.0000")
+        if tax_slab and taxable_pay > 0:
+            periods_per_year = Decimal("365.2425") / Decimal(total_calendar_days)
+            recurring_annual_income = recurring_taxable_pay * periods_per_year
+
+            def annual_tax_for(annual_income: Decimal) -> Decimal:
+                band = max(
+                    (rate for rate in tax_slab.rates if annual_income > rate.lower_bound),
+                    key=lambda rate: rate.lower_bound,
+                    default=None,
+                )
+                if band is None:
+                    return Decimal("0")
+                return band.fixed_amount + (annual_income - band.lower_bound) * band.tax_rate
+
+            recurring_tax = annual_tax_for(recurring_annual_income) / periods_per_year
+            one_time_tax = annual_tax_for(recurring_annual_income + one_time_taxable_pay) - annual_tax_for(recurring_annual_income)
+            income_tax = (recurring_tax + one_time_tax).quantize(Decimal("0.0001"))
+            total_deductions += income_tax
+            slip_items_to_add.append({"component_id": None, "component_name": f"Income Tax Withholding ({tax_slab.tax_year})", "component_type": "DEDUCTION", "amount": income_tax})
+
+        period_stmt = select(PayrollPeriod).where(
+            PayrollPeriod.tenant_id == tenant_id,
+            PayrollPeriod.start_date == start_date,
+            PayrollPeriod.end_date == end_date,
+        )
+        payroll_period = (await db.execute(period_stmt)).scalars().first()
+        if payroll_period and payroll_period.status != "OPEN":
+            raise ValueError(f"Payroll period '{payroll_period.period_name}' is closed.")
+
         # Process Deductions
         for item in assignment.structure.items:
             comp = item.component
             if comp.component_type == "DEDUCTION":
+                if tax_slab and comp.component_code.upper() in {"TAX", "INCOME-TAX", "INCOME_TAX"}:
+                    continue
                 ded_amt = Decimal("0.0000")
                 if comp.calculation_type == "FORMULA" and (item.formula_expression or comp.formula_expression):
                     formula = item.formula_expression or comp.formula_expression
@@ -333,12 +445,15 @@ class PayrollService:
             posting_date=posting_date,
             start_date=start_date,
             end_date=end_date,
+            currency=assignment.structure.currency.upper(),
             total_working_days=total_working_days,
             payment_days=payment_days,
             leave_without_pay_days=leave_without_pay_days,
             gross_pay=gross_pay,
             total_deductions=total_deductions,
             net_pay=net_pay,
+            income_tax=income_tax,
+            payroll_period_id=payroll_period.payroll_period_id if payroll_period else None,
             status="DRAFT",
         )
         db.add(slip)
@@ -354,6 +469,10 @@ class PayrollService:
                 amount=s_item["amount"],
             )
             db.add(line)
+            source = s_item.get("source")
+            if source:
+                source.status = "EARNED" if isinstance(source, RetentionBonus) else "INCLUDED"
+                source.slip_id = slip.slip_id
         await db.flush()
         return slip
 
@@ -399,6 +518,43 @@ class PayrollService:
         txn_id = uuid.uuid4()
         fiscal_year = slip.posting_date.year
         fiscal_period = slip.posting_date.month
+        tenant_currency = await db.scalar(select(Tenant.currency).where(Tenant.tenant_id == tenant_id))
+        if not tenant_currency:
+            raise ValueError("Tenant base currency is not configured.")
+        tenant_currency = tenant_currency.upper()
+        slip_currency = slip.currency.upper()
+        exchange_rate = Decimal("1.000000")
+        if slip_currency != tenant_currency:
+            configured_rate = await db.scalar(select(CurrencyExchangeRate.exchange_rate).where(
+                CurrencyExchangeRate.tenant_id == tenant_id,
+                CurrencyExchangeRate.from_currency == slip_currency,
+                CurrencyExchangeRate.to_currency == tenant_currency,
+                CurrencyExchangeRate.effective_date <= slip.posting_date,
+            ).order_by(CurrencyExchangeRate.effective_date.desc()).limit(1))
+            if configured_rate is None:
+                reciprocal = await db.scalar(select(CurrencyExchangeRate.exchange_rate).where(
+                    CurrencyExchangeRate.tenant_id == tenant_id,
+                    CurrencyExchangeRate.from_currency == tenant_currency,
+                    CurrencyExchangeRate.to_currency == slip_currency,
+                    CurrencyExchangeRate.effective_date <= slip.posting_date,
+                ).order_by(CurrencyExchangeRate.effective_date.desc()).limit(1))
+                if reciprocal is None or reciprocal <= 0:
+                    raise ValueError(f"No exchange rate is configured for {slip_currency}/{tenant_currency} on {slip.posting_date}.")
+                exchange_rate = Decimal("1") / reciprocal
+            else:
+                exchange_rate = configured_rate
+
+        def base_amount(amount: Decimal) -> Decimal:
+            return (amount * exchange_rate).quantize(Decimal("0.0001"))
+
+        base_gross_pay = base_amount(slip.gross_pay)
+        base_deductions = sum(
+            (base_amount(item.amount) for item in slip.items if item.component_type == "DEDUCTION"),
+            Decimal("0.0000"),
+        )
+        base_net_pay = base_gross_pay - base_deductions
+        if base_net_pay < 0:
+            raise ValueError("Rounded base-currency payroll deductions exceed gross pay.")
 
         # 1. Debit Salary Expense for Gross Pay (only if > 0)
         if slip.gross_pay > Decimal("0.0000"):
@@ -410,9 +566,9 @@ class PayrollService:
                 fiscal_period=fiscal_period,
                 account_code="6100-SALARY-EXPENSE",
                 cost_center="DEFAULT",
-                debit_amount=slip.gross_pay,
+                debit_amount=base_gross_pay,
                 credit_amount=Decimal("0.0000"),
-                currency="USD",
+                currency=tenant_currency,
                 exchange_rate=Decimal("1.000000"),
                 source_document_type="SALARY_SLIP",
                 source_document_id=slip.slip_id,
@@ -430,8 +586,8 @@ class PayrollService:
                 account_code="2100-PAYROLL-PAYABLE",
                 cost_center="DEFAULT",
                 debit_amount=Decimal("0.0000"),
-                credit_amount=slip.net_pay,
-                currency="USD",
+                credit_amount=base_net_pay,
+                currency=tenant_currency,
                 exchange_rate=Decimal("1.000000"),
                 source_document_type="SALARY_SLIP",
                 source_document_id=slip.slip_id,
@@ -472,8 +628,8 @@ class PayrollService:
                     account_code=acc,
                     cost_center="DEFAULT",
                     debit_amount=Decimal("0.0000"),
-                    credit_amount=itm.amount,
-                    currency="USD",
+                    credit_amount=base_amount(itm.amount),
+                    currency=tenant_currency,
                     exchange_rate=Decimal("1.000000"),
                     source_document_type="SALARY_SLIP",
                     source_document_id=slip.slip_id,
@@ -483,6 +639,10 @@ class PayrollService:
         slip.status = "SUBMITTED"
         slip.journal_entry_id = txn_id
         await db.flush()
+        for model in (AdditionalSalary, RetentionBonus):
+            stmt = select(model).where(model.tenant_id == tenant_id, model.slip_id == slip.slip_id)
+            for source in (await db.execute(stmt)).scalars().all():
+                source.status = "PAID"
         return slip
 
     async def list_salary_slips(

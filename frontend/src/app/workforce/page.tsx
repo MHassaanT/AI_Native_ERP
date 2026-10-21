@@ -32,8 +32,9 @@ import {
   Check,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { HRDeepWorkbench } from "@/components/hr-deep-workbench";
 
-type TabType = "employees" | "attendance" | "leaves" | "structures" | "payroll" | "expenses";
+type TabType = "employees" | "attendance" | "leaves" | "structures" | "payroll" | "expenses" | "deep";
 type EmpSubTabType = "directory" | "org" | "checklists";
 
 export default function WorkforcePage() {
@@ -55,6 +56,10 @@ export default function WorkforcePage() {
   const [structures, setStructures] = useState<any[]>([]);
   const [salarySlips, setSalarySlips] = useState<any[]>([]);
   const [batchPayrolls, setBatchPayrolls] = useState<any[]>([]);
+  const [taxSlabs, setTaxSlabs] = useState<any[]>([]);
+  const [payrollPeriods, setPayrollPeriods] = useState<any[]>([]);
+  const [additionalSalaries, setAdditionalSalaries] = useState<any[]>([]);
+  const [retentionBonuses, setRetentionBonuses] = useState<any[]>([]);
   const [advances, setAdvances] = useState<any[]>([]);
   const [expenses, setExpenses] = useState<any[]>([]);
   const [onboardings, setOnboardings] = useState<any[]>([]);
@@ -146,6 +151,12 @@ export default function WorkforcePage() {
   const [batchPostingDate, setBatchPostingDate] = useState(new Date().toISOString().split("T")[0]);
   const [batchStartDate, setBatchStartDate] = useState("2026-09-01");
   const [batchEndDate, setBatchEndDate] = useState("2026-09-30");
+  const [periodName, setPeriodName] = useState("");
+  const [taxSlabName, setTaxSlabName] = useState("");
+  const [taxYear, setTaxYear] = useState(String(new Date().getFullYear()));
+  const [taxRatesJson, setTaxRatesJson] = useState('[{"lower_bound":"0","upper_bound":null,"tax_rate":"0","fixed_amount":"0"}]');
+  const [extraPay, setExtraPay] = useState({ employee_id: "", payroll_date: new Date().toISOString().slice(0, 10), amount: "", component_name: "One-time earning", component_type: "EARNING", is_taxable: true });
+  const [retentionBonus, setRetentionBonus] = useState({ employee_id: "", bonus_name: "Retention bonus", vesting_date: new Date().toISOString().slice(0, 10), amount: "", is_taxable: true });
 
   // Advance State
   const [advEmpId, setAdvEmpId] = useState("");
@@ -169,6 +180,10 @@ export default function WorkforcePage() {
         structs,
         slips,
         batches,
+        slabs,
+        periods,
+        extras,
+        bonuses,
         advs,
         exps,
         onbs,
@@ -185,6 +200,10 @@ export default function WorkforcePage() {
         api.getSalaryStructures().catch(() => []),
         api.getSalarySlips().catch(() => []),
         api.getBatchPayrolls().catch(() => []),
+        api.getPayrollTaxSlabs().catch(() => []),
+        api.getPayrollPeriods().catch(() => []),
+        api.getAdditionalSalaries().catch(() => []),
+        api.getRetentionBonuses().catch(() => []),
         api.getAdvances().catch(() => []),
         api.getExpenses().catch(() => []),
         api.getOnboardings().catch(() => []),
@@ -202,12 +221,18 @@ export default function WorkforcePage() {
       setStructures(structs || []);
       setSalarySlips(slips || []);
       setBatchPayrolls(batches || []);
+      setTaxSlabs(slabs || []);
+      setPayrollPeriods(periods || []);
+      setAdditionalSalaries(extras || []);
+      setRetentionBonuses(bonuses || []);
       setAdvances(advs || []);
       setExpenses(exps || []);
       setOnboardings(onbs || []);
       setSeparations(seps || []);
 
       if (emps && emps.length > 0) {
+        if (!extraPay.employee_id) setExtraPay((prev) => ({ ...prev, employee_id: emps[0].employee_id }));
+        if (!retentionBonus.employee_id) setRetentionBonus((prev) => ({ ...prev, employee_id: emps[0].employee_id }));
         if (!punchEmpId) setPunchEmpId(emps[0].employee_id);
         if (!leaveEmpId) setLeaveEmpId(emps[0].employee_id);
         if (!assignEmpId) setAssignEmpId(emps[0].employee_id);
@@ -610,6 +635,40 @@ export default function WorkforcePage() {
     }
   };
 
+  const handleCreatePayrollPeriod = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createPayrollPeriod({ period_name: periodName, start_date: batchStartDate, end_date: batchEndDate });
+      setPeriodName(""); setSuccess("Payroll period opened."); await loadAll();
+    } catch (err: any) { setError(err.message || "Failed to create payroll period."); }
+  };
+
+  const handleCreateTaxSlab = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const rates = JSON.parse(taxRatesJson);
+      await api.createPayrollTaxSlab({ slab_name: taxSlabName, tax_year: taxYear, currency: "USD",
+        effective_from: `${taxYear}-01-01`, effective_to: `${taxYear}-12-31`, rates });
+      setTaxSlabName(""); setSuccess("Income tax slab saved."); await loadAll();
+    } catch (err: any) { setError(err.message || "Check the tax band JSON and try again."); }
+  };
+
+  const handleCreateAdditionalSalary = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createAdditionalSalary({ ...extraPay, salary_component_id: null });
+      setSuccess("Additional salary queued for its payroll date."); await loadAll();
+    } catch (err: any) { setError(err.message || "Failed to create additional salary."); }
+  };
+
+  const handleCreateRetentionBonus = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createRetentionBonus(retentionBonus);
+      setSuccess("Retention bonus recorded for its vesting date."); await loadAll();
+    } catch (err: any) { setError(err.message || "Failed to create retention bonus."); }
+  };
+
   const handleSubmitSlip = async (slipId: string) => {
     setError(null);
     setSuccess(null);
@@ -725,6 +784,7 @@ export default function WorkforcePage() {
             { id: "structures", label: "Salary Structures", icon: Layers },
             { id: "payroll", label: "Payroll & Slips", icon: DollarSign },
             { id: "expenses", label: "Expenses & Advances", icon: Receipt },
+            { id: "deep", label: "HR Workflows & Reports", icon: FileText },
           ].map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
@@ -2176,6 +2236,51 @@ export default function WorkforcePage() {
         {/* ============================================================== */}
         {activeTab === "payroll" && (
           <div className="space-y-6">
+            <div className="grid gap-4 xl:grid-cols-2">
+              <section className="bg-white p-5 rounded-xl border border-stone-200 shadow-sm space-y-3">
+                <div><h2 className="text-sm font-semibold text-stone-900">Tax Slabs & Payroll Periods</h2>
+                  <p className="text-xs text-stone-500">Tax bands use annual thresholds and marginal rates; tax is annualized from taxable monthly earnings.</p></div>
+                <form onSubmit={handleCreatePayrollPeriod} className="flex flex-wrap gap-2">
+                  <input required value={periodName} onChange={(e) => setPeriodName(e.target.value)} placeholder="Period name" className="min-w-32 flex-1 px-3 py-2 text-xs border rounded-lg" />
+                  <span className="self-center text-xs text-stone-500">{batchStartDate} – {batchEndDate}</span>
+                  <button className="px-3 py-2 text-xs bg-stone-900 text-white rounded-lg">Open period</button>
+                </form>
+                <form onSubmit={handleCreateTaxSlab} className="space-y-2 border-t pt-3">
+                  <div className="flex gap-2">
+                    <input required value={taxSlabName} onChange={(e) => setTaxSlabName(e.target.value)} placeholder="Tax slab name" className="flex-1 px-3 py-2 text-xs border rounded-lg" />
+                    <input required value={taxYear} onChange={(e) => setTaxYear(e.target.value)} placeholder="Tax year" className="w-28 px-3 py-2 text-xs border rounded-lg" />
+                    <button className="px-3 py-2 text-xs bg-stone-900 text-white rounded-lg">Save slab</button>
+                  </div>
+                  <textarea required value={taxRatesJson} onChange={(e) => setTaxRatesJson(e.target.value)} rows={3} aria-label="Tax rate bands JSON" className="w-full px-3 py-2 text-xs font-mono border rounded-lg" />
+                  <p className="text-[11px] text-stone-500">Bands: lower_bound, upper_bound (last is null), tax_rate (0–1), fixed_amount. Fixed amount is cumulative tax at the band threshold.</p>
+                </form>
+                <div className="flex flex-wrap gap-2 text-[11px]">{payrollPeriods.map((period) => <span key={period.payroll_period_id} className="rounded-full bg-blue-50 px-2 py-1 text-blue-800">{period.period_name}: {period.status}{period.status === "OPEN" && <button type="button" onClick={async () => { await api.closePayrollPeriod(period.payroll_period_id); await loadAll(); }} className="ml-2 underline">Close</button>}</span>)}{taxSlabs.map((slab) => <span key={slab.slab_id} className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-800">{slab.slab_name} · {slab.tax_year}</span>)}</div>
+              </section>
+
+              <section className="bg-white p-5 rounded-xl border border-stone-200 shadow-sm space-y-3">
+                <div><h2 className="text-sm font-semibold text-stone-900">Additional Pay & Retention</h2>
+                  <p className="text-xs text-stone-500">Due items are included once in the matching generated salary slip.</p></div>
+                <form onSubmit={handleCreateAdditionalSalary} className="grid grid-cols-2 gap-2">
+                  <select required value={extraPay.employee_id} onChange={(e) => setExtraPay({ ...extraPay, employee_id: e.target.value })} className="col-span-2 px-3 py-2 text-xs border rounded-lg">{employees.map((employee) => <option key={employee.employee_id} value={employee.employee_id}>{employee.first_name} {employee.last_name}</option>)}</select>
+                  <input required value={extraPay.component_name} onChange={(e) => setExtraPay({ ...extraPay, component_name: e.target.value })} placeholder="Pay item" className="px-3 py-2 text-xs border rounded-lg" />
+                  <input required type="number" min="0.01" step="0.01" value={extraPay.amount} onChange={(e) => setExtraPay({ ...extraPay, amount: e.target.value })} placeholder="Amount" className="px-3 py-2 text-xs border rounded-lg" />
+                  <input required type="date" value={extraPay.payroll_date} onChange={(e) => setExtraPay({ ...extraPay, payroll_date: e.target.value })} className="px-3 py-2 text-xs border rounded-lg" />
+                  <select value={extraPay.component_type} onChange={(e) => setExtraPay({ ...extraPay, component_type: e.target.value })} className="px-3 py-2 text-xs border rounded-lg"><option value="EARNING">Earning</option><option value="DEDUCTION">Deduction</option></select>
+                  <label className="col-span-2 flex items-center gap-2 text-xs text-stone-600"><input type="checkbox" checked={extraPay.is_taxable} onChange={(e) => setExtraPay({ ...extraPay, is_taxable: e.target.checked })} /> Taxable</label>
+                  <button className="col-span-2 px-3 py-2 text-xs bg-stone-900 text-white rounded-lg">Queue additional salary</button>
+                </form>
+                <form onSubmit={handleCreateRetentionBonus} className="grid grid-cols-2 gap-2 border-t pt-3">
+                  <select required value={retentionBonus.employee_id} onChange={(e) => setRetentionBonus({ ...retentionBonus, employee_id: e.target.value })} className="col-span-2 px-3 py-2 text-xs border rounded-lg">{employees.map((employee) => <option key={employee.employee_id} value={employee.employee_id}>{employee.first_name} {employee.last_name}</option>)}</select>
+                  <input required value={retentionBonus.bonus_name} onChange={(e) => setRetentionBonus({ ...retentionBonus, bonus_name: e.target.value })} placeholder="Bonus name" className="px-3 py-2 text-xs border rounded-lg" />
+                  <input required type="number" min="0.01" step="0.01" value={retentionBonus.amount} onChange={(e) => setRetentionBonus({ ...retentionBonus, amount: e.target.value })} placeholder="Amount" className="px-3 py-2 text-xs border rounded-lg" />
+                  <input required type="date" value={retentionBonus.vesting_date} onChange={(e) => setRetentionBonus({ ...retentionBonus, vesting_date: e.target.value })} className="px-3 py-2 text-xs border rounded-lg" />
+                  <label className="flex items-center gap-2 text-xs text-stone-600"><input type="checkbox" checked={retentionBonus.is_taxable} onChange={(e) => setRetentionBonus({ ...retentionBonus, is_taxable: e.target.checked })} /> Taxable</label>
+                  <button className="col-span-2 px-3 py-2 text-xs bg-stone-900 text-white rounded-lg">Record retention bonus</button>
+                </form>
+                <div className="text-[11px] text-stone-500">Queued: {additionalSalaries.filter((row) => row.status === "PENDING").length} additional pay · {retentionBonuses.filter((row) => row.status === "PENDING").length} retention bonuses</div>
+              </section>
+            </div>
+
             {/* Batch Monthly Payroll Runner */}
             <div className="bg-white p-5 rounded-xl border border-stone-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
@@ -2294,6 +2399,7 @@ export default function WorkforcePage() {
                       <th className="px-4 py-3 font-medium">LWP Days</th>
                       <th className="px-4 py-3 font-medium">Payment Days</th>
                       <th className="px-4 py-3 font-medium">Gross Pay</th>
+                      <th className="px-4 py-3 font-medium">Income Tax</th>
                       <th className="px-4 py-3 font-medium">Deductions</th>
                       <th className="px-4 py-3 font-medium">Net Pay</th>
                       <th className="px-4 py-3 font-medium">Status</th>
@@ -2310,6 +2416,7 @@ export default function WorkforcePage() {
                         <td className="px-4 py-3 text-rose-600 font-medium">{slip.leave_without_pay_days}d</td>
                         <td className="px-4 py-3 text-stone-700">{slip.payment_days}d</td>
                         <td className="px-4 py-3 font-mono text-stone-800">${parseFloat(slip.gross_pay || 0).toFixed(2)}</td>
+                        <td className="px-4 py-3 font-mono text-amber-700">${parseFloat(slip.income_tax || 0).toFixed(2)}</td>
                         <td className="px-4 py-3 font-mono text-rose-700">-${parseFloat(slip.total_deductions || 0).toFixed(2)}</td>
                         <td className="px-4 py-3 font-mono font-semibold text-emerald-700">${parseFloat(slip.net_pay || 0).toFixed(2)}</td>
                         <td className="px-4 py-3">
@@ -2577,6 +2684,8 @@ export default function WorkforcePage() {
             </div>
           </div>
         )}
+
+        {activeTab === "deep" && <HRDeepWorkbench />}
       </main>
 
       {/* Modal: New Employee */}

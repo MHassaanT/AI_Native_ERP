@@ -1,0 +1,21 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { FileText, RefreshCw, Truck } from "lucide-react";
+
+type DeliveryNote = { delivery_note_id: string; delivery_note_number: string; customer_name: string; delivery_date: string; status: string; item_count: number; invoice_id?: string | null; invoice_number?: string | null };
+export default function DeliveryNotesPage() {
+  const [rows, setRows] = useState<DeliveryNote[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const load = useCallback(async () => { setLoading(true); setError(""); try { setRows(await api.getDeliveryNotes()); } catch (e: any) { setError(e.message || "Could not load delivery notes."); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); }, [load]);
+  async function invoice(row: DeliveryNote) { setBusy(row.delivery_note_id); setError(""); try { const year = new Date().getFullYear(); const result = await api.createDeliveryInvoice(row.delivery_note_id, { invoice_number: `INV-${year}-${Date.now().toString().slice(-6)}` }); setMessage(`Invoice ${result.invoice_number || "created"} posted for ${row.delivery_note_number}.`); await load(); } catch (e: any) { setError(e.message || "Could not create invoice."); } finally { setBusy(""); } }
+  return <div className="mx-auto max-w-6xl space-y-6"><header className="flex flex-wrap items-start justify-between gap-4"><div><div className="flex items-center gap-2 text-sage-700"><Truck className="h-5 w-5"/><span className="text-xs font-semibold uppercase tracking-[0.16em]">Selling · Stock Fulfillment</span></div><h1 className="mt-2 text-3xl font-semibold">Delivery Notes</h1><p className="mt-1 text-sm text-cream-600">Review fulfilled sales orders and create their linked sales invoices.</p></div><button onClick={() => void load()} className="inline-flex items-center gap-2 rounded-lg border border-cream-300 bg-white px-3 py-2 text-sm"><RefreshCw className="h-4 w-4"/>Refresh</button></header>
+    {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>}{message && <div className="rounded-lg border border-sage-200 bg-sage-50 p-3 text-sm text-sage-800">{message}</div>}
+    <section className="overflow-hidden rounded-xl border border-cream-200 bg-white shadow-sm"><div className="border-b border-cream-200 px-5 py-4"><h2 className="font-semibold">Fulfilled Orders</h2><p className="mt-1 text-xs text-cream-500">{rows.length} delivery notes</p></div>{loading ? <div className="p-12 text-center text-sm text-cream-500">Loading…</div> : rows.length === 0 ? <div className="p-12 text-center"><Truck className="mx-auto h-8 w-8 text-cream-400"/><p className="mt-3 text-sm text-cream-600">No delivery notes yet. Fulfill a confirmed sales order from Commercial to create one.</p></div> : <div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-sm"><thead className="bg-cream-50 text-xs uppercase text-cream-500"><tr><th className="px-5 py-3">Delivery note</th><th className="px-4 py-3">Customer</th><th className="px-4 py-3">Date</th><th className="px-4 py-3">Items</th><th className="px-4 py-3">Invoice</th><th className="px-5 py-3 text-right">Action</th></tr></thead><tbody className="divide-y divide-cream-100">{rows.map((row) => <tr key={row.delivery_note_id}><td className="px-5 py-3 font-medium">{row.delivery_note_number}</td><td className="px-4 py-3">{row.customer_name}</td><td className="px-4 py-3">{String(row.delivery_date).slice(0, 10)}</td><td className="px-4 py-3">{row.item_count}</td><td className="px-4 py-3">{row.invoice_number || <span className="text-amber-700">Not invoiced</span>}</td><td className="px-5 py-3 text-right">{row.invoice_id ? <span className="text-xs font-medium text-sage-700">Posted</span> : <button disabled={busy === row.delivery_note_id} onClick={() => void invoice(row)} className="inline-flex items-center gap-2 rounded-lg bg-sage-700 px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><FileText className="h-3.5 w-3.5"/>{busy === row.delivery_note_id ? "Posting…" : "Create invoice"}</button>}</td></tr>)}</tbody></table></div>}</section>
+  </div>;
+}

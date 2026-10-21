@@ -35,6 +35,9 @@ class Project(Base, TenantMixin, TimestampMixin):
     )
     project_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     project_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    project_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("project_types.project_type_id"), nullable=True
+    )
     customer_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     customer_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     start_date: Mapped[date] = mapped_column(Date, nullable=False, default=date.today)
@@ -69,6 +72,7 @@ class Project(Base, TenantMixin, TimestampMixin):
     updates: Mapped[List["ProjectUpdate"]] = relationship(
         "ProjectUpdate", back_populates="project", cascade="all, delete-orphan"
     )
+    project_type = relationship("ProjectType")
 
     __table_args__ = (
         Index("idx_proj_tenant_code", "tenant_id", "project_code", unique=True),
@@ -138,6 +142,9 @@ class Timesheet(Base, TenantMixin, TimestampMixin):
     activity_type: Mapped[str] = mapped_column(
         String(64), nullable=False, default="ENGINEERING"  # CONSULTING, ENGINEERING, FABRICATION, SUPPORT
     )
+    activity_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("activity_types.activity_type_id"), nullable=True
+    )
     work_date: Mapped[date] = mapped_column(Date, nullable=False, default=date.today)
     hours: Mapped[Decimal] = mapped_column(
         Numeric(8, 2), nullable=False, default=Decimal("1.00")
@@ -190,4 +197,36 @@ class ProjectUpdate(Base, TenantMixin, TimestampMixin):
     __table_args__ = (
         Index("idx_proj_updates_tenant_proj", "tenant_id", "project_id", "created_at"),
     )
+
+
+class ProjectType(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "project_types"
+    project_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    type_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    __table_args__ = (Index("uq_project_type_tenant_name", "tenant_id", "type_name", unique=True),)
+
+
+class ActivityType(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "activity_types"
+    activity_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    activity_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    __table_args__ = (Index("uq_activity_type_tenant_name", "tenant_id", "activity_name", unique=True),)
+
+
+class ActivityCost(Base, TenantMixin, TimestampMixin):
+    """Effective-dated activity rates optionally scoped to one employee."""
+    __tablename__ = "activity_costs"
+    activity_cost_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    activity_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("activity_types.activity_type_id", ondelete="CASCADE"), nullable=False)
+    employee_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.employee_id"), nullable=True)
+    billing_rate: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    costing_rate: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    activity_type = relationship("ActivityType")
+    __table_args__ = (Index("idx_activity_cost_tenant_type_employee", "tenant_id", "activity_type_id", "employee_id", "valid_from"),)
 

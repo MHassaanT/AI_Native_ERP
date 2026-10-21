@@ -39,6 +39,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseBShortcuts } from "@/components/phase-b-shortcuts";
 
 const formatMoney = (val: any) => {
   const num = Number(val);
@@ -868,6 +869,8 @@ export default function ProcurementPage() {
           )}
         </div>
       </div>
+
+      <PhaseBShortcuts area="buying" />
 
       {/* Navigation Tabs */}
       <div className="border-b border-cream-200">

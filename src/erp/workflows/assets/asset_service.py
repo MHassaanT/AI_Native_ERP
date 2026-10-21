@@ -19,6 +19,9 @@ from erp.db.models.assets import (
     AssetLocation,
     AssetMovement,
     AssetRepair,
+    AssetMaintenanceTeam,
+    AssetMaintenanceTeamMember,
+    AssetValueAdjustment,
 )
 from erp.db.models.ledger import GeneralLedgerEntry
 
@@ -536,6 +539,88 @@ class AssetService:
         stmt = stmt.order_by(Asset.created_at.desc())
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def create_maintenance_team(self, session: AsyncSession, tenant_id: uuid.UUID, team_name: str, description: str | None, members: list[dict]) -> AssetMaintenanceTeam:
+        if not team_name.strip():
+            raise ValueError("Maintenance team name is required.")
+        employee_ids = [uuid.UUID(str(item["employee_id"])) for item in members]
+        if len(employee_ids) != len(set(employee_ids)):
+            raise ValueError("A team cannot contain the same employee more than once.")
+        team = AssetMaintenanceTeam(tenant_id=tenant_id, team_name=team_name.strip(), description=description, is_active=True)
+        session.add(team)
+        await session.flush()
+        for member in members:
+            session.add(AssetMaintenanceTeamMember(tenant_id=tenant_id, team_id=team.team_id,
+                employee_id=uuid.UUID(str(member["employee_id"])), role=member.get("role")))
+        await session.flush()
+        return team
+
+    async def list_maintenance_teams(self, session: AsyncSession, tenant_id: uuid.UUID) -> list[AssetMaintenanceTeam]:
+        stmt = select(AssetMaintenanceTeam).options(selectinload(AssetMaintenanceTeam.members)).where(
+            AssetMaintenanceTeam.tenant_id == tenant_id).order_by(AssetMaintenanceTeam.team_name)
+        return list((await session.execute(stmt)).scalars().all())
+
+    async def adjust_asset_value(self, session: AsyncSession, tenant_id: uuid.UUID, asset_id: uuid.UUID,
+                                 new_book_value: Decimal, adjustment_date: date, reason: str) -> AssetValueAdjustment:
+        asset = await self.get_asset(session, tenant_id, asset_id)
+        if not asset:
+            raise ValueError(f"Asset {asset_id} not found.")
+        if asset.status in {"SCRAPPED", "SOLD"}:
+            raise ValueError("A disposed asset cannot be revalued.")
+        if new_book_value < 0 or new_book_value < asset.accumulated_depreciation:
+            raise ValueError("New book value must be non-negative and cannot be below accumulated depreciation.")
+        delta = new_book_value - asset.current_book_value
+        if delta == 0:
+            raise ValueError("New book value must differ from the current book value.")
+        if not reason.strip():
+            raise ValueError("An adjustment reason is required.")
+        row = AssetValueAdjustment(tenant_id=tenant_id, asset_id=asset_id, adjustment_date=adjustment_date,
+            previous_book_value=asset.current_book_value, new_book_value=new_book_value,
+            adjustment_amount=delta, reason=reason.strip(), status="POSTED")
+        session.add(row)
+        await session.flush()
+        category = await self.get_category(session, tenant_id, asset.asset_category_id)
+        tx_id = uuid.uuid4()
+        amount = abs(delta)
+        fixed_account = category.fixed_asset_account if category else "1500-FIXED-ASSETS"
+        counterpart_account = "4200-ASSET-REVALUATION-GAIN" if delta > 0 else "5300-ASSET-REVALUATION-LOSS"
+        debit_account, credit_account = (fixed_account, counterpart_account) if delta > 0 else (counterpart_account, fixed_account)
+        for account_code, debit, credit in ((debit_account, amount, Decimal("0")), (credit_account, Decimal("0"), amount)):
+            session.add(GeneralLedgerEntry(tenant_id=tenant_id, transaction_id=tx_id, posting_date=adjustment_date,
+                fiscal_year=adjustment_date.year, fiscal_period=adjustment_date.month, account_code=account_code,
+                cost_center="OPERATIONS", debit_amount=debit, credit_amount=credit, currency="USD",
+                exchange_rate=Decimal("1.000000"), source_document_type="ASSET_VALUE_ADJUSTMENT", source_document_id=row.adjustment_id))
+        row.journal_entry_id = tx_id
+        asset.current_book_value = new_book_value
+        asset.gross_purchase_amount += delta
+        schedule_stmt = select(AssetDepreciationSchedule).where(
+            AssetDepreciationSchedule.tenant_id == tenant_id,
+            AssetDepreciationSchedule.asset_id == asset_id,
+            AssetDepreciationSchedule.is_posted.is_(False),
+        ).order_by(AssetDepreciationSchedule.schedule_date)
+        future_schedules = list((await session.execute(schedule_stmt)).scalars().all())
+        if future_schedules:
+            method = category.depreciation_method.upper() if category else "STRAIGHT_LINE"
+            running_book = new_book_value
+            running_accumulated = asset.accumulated_depreciation
+            remaining_base = max(Decimal("0"), new_book_value - asset.salvage_value)
+            straight_line_period = (remaining_base / Decimal(str(len(future_schedules)))).quantize(Decimal("0.0001"))
+            period_rate = Decimal("2") / Decimal(str(category.total_number_of_depreciations)) if category and category.total_number_of_depreciations else Decimal("0")
+            for index, schedule in enumerate(future_schedules):
+                if method == "STRAIGHT_LINE":
+                    amount = remaining_base - straight_line_period * Decimal(str(index)) if index == len(future_schedules) - 1 else straight_line_period
+                else:
+                    amount = min(max(Decimal("0"), running_book - asset.salvage_value),
+                                 (running_book * period_rate).quantize(Decimal("0.0001")))
+                    if index == len(future_schedules) - 1:
+                        amount = max(Decimal("0"), running_book - asset.salvage_value)
+                running_accumulated += amount
+                running_book -= amount
+                schedule.depreciation_amount = amount
+                schedule.accumulated_depreciation = running_accumulated
+                schedule.book_value_after_depreciation = running_book
+        await session.flush()
+        return row
 
 
 asset_service = AssetService()

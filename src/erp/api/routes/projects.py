@@ -24,6 +24,7 @@ class CreateProjectSchema(BaseModel):
     end_date: Optional[date] = None
     estimated_cost: Decimal = Decimal("0.0000")
     notes: Optional[str] = None
+    project_type_id: uuid.UUID | None = None
 
 
 class CreateTaskSchema(BaseModel):
@@ -46,31 +47,62 @@ class CreateTimesheetSchema(BaseModel):
     timesheet_number: str
     employee_id: uuid.UUID
     hours: Decimal
-    billing_rate: Decimal = Decimal("100.0000")
-    costing_rate: Decimal = Decimal("50.0000")
+    billing_rate: Decimal | None = None
+    costing_rate: Decimal | None = None
     task_id: Optional[uuid.UUID] = None
     employee_name: Optional[str] = None
     activity_type: str = "ENGINEERING"
     work_date: Optional[date] = None
     is_billable: bool = True
     notes: Optional[str] = None
+    activity_type_id: uuid.UUID | None = None
+
+
+class CreateProjectTypeSchema(BaseModel):
+    type_name: str = Field(..., min_length=2, max_length=128)
+    description: str | None = None
+
+
+class CreateActivityTypeSchema(BaseModel):
+    activity_name: str = Field(..., min_length=2, max_length=128)
+    description: str | None = None
+
+
+class CreateActivityCostSchema(BaseModel):
+    activity_type_id: uuid.UUID
+    employee_id: uuid.UUID | None = None
+    billing_rate: Decimal = Field(..., ge=0)
+    costing_rate: Decimal = Field(..., ge=0)
+    valid_from: date
+    valid_to: date | None = None
+
+
+class CreateProjectUpdateSchema(BaseModel):
+    sender_email: str = Field(..., min_length=3, max_length=320)
+    notes: str = Field(..., min_length=1)
+    progress_pct: int | None = Field(None, ge=0, le=100)
+    blockers: str | None = None
 
 
 # Endpoints
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Project")
 async def create_project(req: CreateProjectSchema, tenant_id: TenantIdDep, db: DbSessionDep):
-    proj = await project_service.create_project(
-        session=db,
-        tenant_id=tenant_id,
-        project_code=req.project_code,
-        project_name=req.project_name,
-        customer_id=req.customer_id,
-        customer_name=req.customer_name,
-        start_date=req.start_date,
-        end_date=req.end_date,
-        estimated_cost=req.estimated_cost,
-        notes=req.notes,
-    )
+    try:
+        proj = await project_service.create_project(
+            session=db,
+            tenant_id=tenant_id,
+            project_code=req.project_code,
+            project_name=req.project_name,
+            customer_id=req.customer_id,
+            customer_name=req.customer_name,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            estimated_cost=req.estimated_cost,
+            notes=req.notes,
+            project_type_id=req.project_type_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {
         "project_id": proj.project_id,
         "project_code": proj.project_code,
@@ -90,6 +122,8 @@ async def list_projects(tenant_id: TenantIdDep, db: DbSessionDep, status: Option
             "project_id": p.project_id,
             "project_code": p.project_code,
             "project_name": p.project_name,
+            "project_type_id": p.project_type_id,
+            "project_type_name": p.project_type.type_name if p.project_type else None,
             "customer_name": p.customer_name,
             "start_date": str(p.start_date),
             "estimated_cost": float(p.estimated_cost),
@@ -131,6 +165,49 @@ async def list_timesheets(
     ]
 
 
+@router.post("/types", status_code=status.HTTP_201_CREATED)
+async def create_project_type(req: CreateProjectTypeSchema, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        return await project_service.create_project_type(db, tenant_id, req.type_name, req.description)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/types")
+async def list_project_types(tenant_id: TenantIdDep, db: DbSessionDep):
+    return await project_service.list_project_types(db, tenant_id)
+
+
+@router.post("/activity-types", status_code=status.HTTP_201_CREATED)
+async def create_activity_type(req: CreateActivityTypeSchema, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        return await project_service.create_activity_type(db, tenant_id, req.activity_name, req.description)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/activity-types")
+async def list_activity_types(tenant_id: TenantIdDep, db: DbSessionDep):
+    return await project_service.list_activity_types(db, tenant_id)
+
+
+@router.post("/activity-costs", status_code=status.HTTP_201_CREATED)
+async def create_activity_cost(req: CreateActivityCostSchema, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        return await project_service.create_activity_cost(db, tenant_id, **req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/activity-costs")
+async def list_activity_costs(tenant_id: TenantIdDep, db: DbSessionDep):
+    rows = await project_service.list_activity_costs(db, tenant_id)
+    return [{"activity_cost_id": row.activity_cost_id, "activity_type_id": row.activity_type_id,
+             "activity_name": row.activity_type.activity_name if row.activity_type else None,
+             "employee_id": row.employee_id, "billing_rate": row.billing_rate, "costing_rate": row.costing_rate,
+             "valid_from": row.valid_from, "valid_to": row.valid_to} for row in rows]
+
+
 @router.get("/{project_id}", summary="Get Project Details with Tasks and Timesheets")
 async def get_project(project_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep):
     proj = await project_service.get_project(db, tenant_id, project_id)
@@ -148,6 +225,8 @@ async def get_project(project_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessi
         "total_billed_amount": float(proj.total_billed_amount),
         "percent_complete": float(proj.percent_complete),
         "status": proj.status,
+        "project_type_id": proj.project_type_id,
+        "project_type_name": proj.project_type.type_name if proj.project_type else None,
         "tasks": [
             {
                 "task_id": t.task_id,
@@ -175,7 +254,20 @@ async def get_project(project_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessi
             }
             for ts in proj.timesheets
         ],
+        "updates": [{"update_id": u.update_id, "sender_email": u.sender_email,
+                     "progress_pct": u.progress_pct, "notes": u.notes, "blockers": u.blockers,
+                     "created_at": u.created_at} for u in sorted(proj.updates, key=lambda row: row.created_at, reverse=True)],
     }
+
+
+@router.post("/{project_id}/updates", status_code=status.HTTP_201_CREATED)
+async def create_project_update(project_id: uuid.UUID, req: CreateProjectUpdateSchema, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        row = await project_service.record_project_update(db, tenant_id, project_id, **req.model_dump())
+        return {"update_id": row.update_id, "project_id": row.project_id, "progress_pct": row.progress_pct,
+                "notes": row.notes, "blockers": row.blockers, "created_at": row.created_at}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/{project_id}/tasks", status_code=status.HTTP_201_CREATED, summary="Create Task for Project")
@@ -233,6 +325,7 @@ async def log_timesheet(project_id: uuid.UUID, req: CreateTimesheetSchema, tenan
         work_date=req.work_date,
         is_billable=req.is_billable,
         notes=req.notes,
+        activity_type_id=req.activity_type_id,
     )
     return {
         "timesheet_id": ts.timesheet_id,

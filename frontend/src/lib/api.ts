@@ -103,6 +103,26 @@ export const api = {
   skipOnboardingModule: (moduleSlug: string) =>
     fetchWithTenant(`/onboarding/modules/${encodeURIComponent(moduleSlug)}/skip`, { method: "POST" }),
 
+  // --- Shared ERP master data ---
+  listMasterDataResources: () => fetchWithTenant("/master-data"),
+  getMasterData: (resource: string) => fetchWithTenant(`/master-data/${encodeURIComponent(resource)}`),
+  createMasterData: (resource: string, data: Record<string, unknown>) =>
+    fetchWithTenant(`/master-data/${encodeURIComponent(resource)}`, { method: "POST", body: JSON.stringify({ data }) }),
+  updateMasterData: (resource: string, id: string, data: Record<string, unknown>) =>
+    fetchWithTenant(`/master-data/${encodeURIComponent(resource)}/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ data }) }),
+  deleteMasterData: (resource: string, id: string) =>
+    fetchWithTenant(`/master-data/${encodeURIComponent(resource)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  seedMasterDataDefaults: () => fetchWithTenant("/master-data/defaults", { method: "POST" }),
+  nextNamingSeriesNumber: (id: string) =>
+    fetchWithTenant(`/master-data/naming-series/${encodeURIComponent(id)}/next-number`, { method: "POST" }),
+  getOperationalSettings: () => fetchWithTenant("/master-data/settings/operational/current"),
+  updateOperationalSettings: (data: Record<string, unknown>) => fetchWithTenant("/master-data/settings/operational/current", { method: "PATCH", body: JSON.stringify(data) }),
+  quoteShipping: (data: Record<string, unknown>) => fetchWithTenant("/master-data/shipping/quote", { method: "POST", body: JSON.stringify(data) }),
+  evaluatePricing: (data: Record<string, unknown>) => fetchWithTenant("/master-data/pricing/evaluate", { method: "POST", body: JSON.stringify(data) }),
+  getLoyaltyBalance: (programId: string, customerId: string) => fetchWithTenant(`/master-data/loyalty/balance/current?loyalty_program_id=${encodeURIComponent(programId)}&customer_id=${encodeURIComponent(customerId)}`),
+  earnLoyaltyPoints: (data: Record<string, unknown>) => fetchWithTenant("/master-data/loyalty/earn", { method: "POST", body: JSON.stringify(data) }),
+  redeemLoyaltyPoints: (data: Record<string, unknown>) => fetchWithTenant("/master-data/loyalty/redeem", { method: "POST", body: JSON.stringify(data) }),
+
   getHealth: () => fetchWithTenant("/health"),
   getReadiness: () => fetchWithTenant("/ready"),
   listWorkflows: () => fetchWithTenant("/workflows"),
@@ -172,6 +192,9 @@ export const api = {
 
   // --- Inventory & Stock ---
   getItems: () => fetchWithTenant("/inventory/items"),
+  getDeliveryNotes: () => fetchWithTenant("/commercial/delivery-notes"),
+  createDeliveryInvoice: (deliveryNoteId: string, data: { invoice_number?: string }) =>
+    fetchWithTenant(`/commercial/delivery-notes/${encodeURIComponent(deliveryNoteId)}/create-invoice`, { method: "POST", body: JSON.stringify(data) }),
   createItem: (data: any) =>
     fetchWithTenant("/inventory/items", { method: "POST", body: JSON.stringify(data) }),
   importItems: (file: File) => {
@@ -811,6 +834,24 @@ export const api = {
     ),
   getHRAgentStatus: () => fetchWithTenant("/hr/recruitment/agent-status"),
   triggerHRCycle: () => fetchWithTenant("/hr/recruitment/autonomous-cycle", { method: "POST" }),
+  getRecruitmentAnalytics: () => fetchWithTenant("/hr/recruitment/analytics"),
+  listHRDeepRecords: (resource: string) => fetchWithTenant(`/hr/deep/${encodeURIComponent(resource)}`),
+  createHRDeepRecord: (resource: string, data: Record<string, unknown>) => fetchWithTenant(`/hr/deep/${encodeURIComponent(resource)}`, { method: "POST", body: JSON.stringify({ data }) }),
+  updateHRDeepRecord: (resource: string, id: string, data: Record<string, unknown>) => fetchWithTenant(`/hr/deep/${encodeURIComponent(resource)}/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ data }) }),
+  deleteHRDeepRecord: (resource: string, id: string) => fetchWithTenant(`/hr/deep/${encodeURIComponent(resource)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  approveEmployeePromotion: (id: string, approvedById: string) => fetchWithTenant(`/hr/deep/employee-promotions/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ approved_by_id: approvedById }) }),
+  approveEmployeeTransfer: (id: string, approvedById: string) => fetchWithTenant(`/hr/deep/employee-transfers/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ approved_by_id: approvedById }) }),
+  approveCompensatoryLeave: (id: string, approvedById: string) => fetchWithTenant(`/hr/deep/compensatory-leave-requests/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ approved_by_id: approvedById }) }),
+  recalculateFullAndFinal: (id: string) => fetchWithTenant(`/hr/deep/full-and-final-statements/${encodeURIComponent(id)}/recalculate`, { method: "POST" }),
+  submitFullAndFinal: (id: string) => fetchWithTenant(`/hr/deep/full-and-final-statements/${encodeURIComponent(id)}/submit`, { method: "POST" }),
+  approveFullAndFinal: (id: string, approvedById: string) => fetchWithTenant(`/hr/deep/full-and-final-statements/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ approved_by_id: approvedById }) }),
+  markFullAndFinalPaid: (id: string) => fetchWithTenant(`/hr/deep/full-and-final-statements/${encodeURIComponent(id)}/mark-paid`, { method: "POST" }),
+  applyLeavePolicy: (data: { leave_policy_id: string; employee_ids: string[]; fiscal_year: number }) => fetchWithTenant("/hr/deep/leave-policy-assignments/apply", { method: "POST", body: JSON.stringify(data) }),
+  getHRReport: (report: string, params?: Record<string, string | number>) => {
+    const query = new URLSearchParams();
+    Object.entries(params || {}).forEach(([key, value]) => query.set(key, String(value)));
+    return fetchWithTenant(`/hr/reports/${encodeURIComponent(report)}${query.size ? `?${query.toString()}` : ""}`);
+  },
 
   // Onboarding & Separation
   getOnboardings: (employeeId?: string) =>
@@ -870,6 +911,15 @@ export const api = {
 
   // Payroll Components & Structures
   getSalaryComponents: () => fetchWithTenant("/payroll/components"),
+  getPayrollTaxSlabs: () => fetchWithTenant("/payroll/tax-slabs"),
+  createPayrollTaxSlab: (data: any) => fetchWithTenant("/payroll/tax-slabs", { method: "POST", body: JSON.stringify(data) }),
+  getPayrollPeriods: () => fetchWithTenant("/payroll/periods"),
+  createPayrollPeriod: (data: any) => fetchWithTenant("/payroll/periods", { method: "POST", body: JSON.stringify(data) }),
+  closePayrollPeriod: (periodId: string) => fetchWithTenant(`/payroll/periods/${periodId}/close`, { method: "POST" }),
+  getAdditionalSalaries: () => fetchWithTenant("/payroll/additional-salaries"),
+  createAdditionalSalary: (data: any) => fetchWithTenant("/payroll/additional-salaries", { method: "POST", body: JSON.stringify(data) }),
+  getRetentionBonuses: () => fetchWithTenant("/payroll/retention-bonuses"),
+  createRetentionBonus: (data: any) => fetchWithTenant("/payroll/retention-bonuses", { method: "POST", body: JSON.stringify(data) }),
   createSalaryComponent: (data: any) => fetchWithTenant("/payroll/components", { method: "POST", body: JSON.stringify(data) }),
   getSalaryStructures: () => fetchWithTenant("/payroll/structures"),
   createSalaryStructure: (data: any) => fetchWithTenant("/payroll/structures", { method: "POST", body: JSON.stringify(data) }),
@@ -965,6 +1015,18 @@ export const api = {
     const qs = q.toString();
     return fetchWithTenant(`/support/issues${qs ? `?${qs}` : ""}`);
   },
+  getSupportReportOverview: (params?: { from_date?: string; to_date?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.from_date) q.append("from_date", params.from_date);
+    if (params?.to_date) q.append("to_date", params.to_date);
+    return fetchWithTenant(`/support/reports/overview${q.toString() ? `?${q.toString()}` : ""}`);
+  },
+  getSupportSlaReport: (params?: { from_date?: string; to_date?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.from_date) q.append("from_date", params.from_date);
+    if (params?.to_date) q.append("to_date", params.to_date);
+    return fetchWithTenant(`/support/reports/sla${q.toString() ? `?${q.toString()}` : ""}`);
+  },
   createIssue: (data: any) =>
     fetchWithTenant("/support/issues", { method: "POST", body: JSON.stringify(data) }),
   getIssue: (issueId: string) => fetchWithTenant(`/support/issues/${issueId}`),
@@ -1048,6 +1110,10 @@ export const api = {
   createAssetCategory: (data: any) =>
     fetchWithTenant("/assets/categories", { method: "POST", body: JSON.stringify(data) }),
   getAssetLocations: () => fetchWithTenant("/assets/locations"),
+  getAssetMaintenanceTeams: () => fetchWithTenant("/assets/maintenance-teams"),
+  createAssetMaintenanceTeam: (data: any) => fetchWithTenant("/assets/maintenance-teams", { method: "POST", body: JSON.stringify(data) }),
+  getAssetValueAdjustments: () => fetchWithTenant("/assets/value-adjustments"),
+  adjustAssetValue: (assetId: string, data: any) => fetchWithTenant(`/assets/${assetId}/value-adjustments`, { method: "POST", body: JSON.stringify(data) }),
   createAssetLocation: (data: any) =>
     fetchWithTenant("/assets/locations", { method: "POST", body: JSON.stringify(data) }),
   getAssets: (params?: { status?: string; category_id?: string }) => {
@@ -1115,6 +1181,13 @@ export const api = {
   getProjects: (status?: string) =>
     fetchWithTenant(`/projects${status ? `?status=${status}` : ""}`),
   getProject: (projectId: string) => fetchWithTenant(`/projects/${projectId}`),
+  getProjectTypes: () => fetchWithTenant("/projects/types"),
+  createProjectType: (data: any) => fetchWithTenant("/projects/types", { method: "POST", body: JSON.stringify(data) }),
+  getActivityTypes: () => fetchWithTenant("/projects/activity-types"),
+  createActivityType: (data: any) => fetchWithTenant("/projects/activity-types", { method: "POST", body: JSON.stringify(data) }),
+  getActivityCosts: () => fetchWithTenant("/projects/activity-costs"),
+  createActivityCost: (data: any) => fetchWithTenant("/projects/activity-costs", { method: "POST", body: JSON.stringify(data) }),
+  createProjectUpdate: (projectId: string, data: any) => fetchWithTenant(`/projects/${projectId}/updates`, { method: "POST", body: JSON.stringify(data) }),
   createProject: (data: any) =>
     fetchWithTenant("/projects", { method: "POST", body: JSON.stringify(data) }),
   createProjectTask: (projectId: string, data: any) =>

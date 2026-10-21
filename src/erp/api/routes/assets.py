@@ -63,7 +63,66 @@ class AssetScrapSchema(BaseModel):
     notes: Optional[str] = None
 
 
+class MaintenanceTeamMemberPayload(BaseModel):
+    employee_id: uuid.UUID
+    role: Optional[str] = None
+
+
+class CreateMaintenanceTeamSchema(BaseModel):
+    team_name: str = Field(..., min_length=2, max_length=128)
+    description: Optional[str] = None
+    members: list[MaintenanceTeamMemberPayload] = Field(default_factory=list)
+
+
+class AssetValueAdjustmentSchema(BaseModel):
+    new_book_value: Decimal = Field(..., ge=0)
+    adjustment_date: date
+    reason: str = Field(..., min_length=3)
+
+
 # Endpoints
+@router.post("/maintenance-teams", status_code=status.HTTP_201_CREATED)
+async def create_maintenance_team(req: CreateMaintenanceTeamSchema, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        team = await asset_service.create_maintenance_team(db, tenant_id, req.team_name, req.description,
+                                                           [member.model_dump() for member in req.members])
+        return {"team_id": team.team_id, "team_name": team.team_name}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/maintenance-teams")
+async def list_maintenance_teams(tenant_id: TenantIdDep, db: DbSessionDep):
+    teams = await asset_service.list_maintenance_teams(db, tenant_id)
+    return [{"team_id": team.team_id, "team_name": team.team_name, "description": team.description,
+             "is_active": team.is_active, "members": [{"member_id": member.member_id,
+             "employee_id": member.employee_id, "role": member.role} for member in team.members]} for team in teams]
+
+
+@router.post("/{asset_id}/value-adjustments", status_code=status.HTTP_201_CREATED)
+async def adjust_asset_value(asset_id: uuid.UUID, req: AssetValueAdjustmentSchema, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        row = await asset_service.adjust_asset_value(db, tenant_id, asset_id, req.new_book_value, req.adjustment_date, req.reason)
+        return {"adjustment_id": row.adjustment_id, "asset_id": row.asset_id,
+                "previous_book_value": str(row.previous_book_value), "new_book_value": str(row.new_book_value),
+                "adjustment_amount": str(row.adjustment_amount), "status": row.status,
+                "journal_entry_id": row.journal_entry_id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/value-adjustments")
+async def list_asset_value_adjustments(tenant_id: TenantIdDep, db: DbSessionDep):
+    from sqlalchemy import select
+    from erp.db.models.assets import AssetValueAdjustment
+    rows = (await db.execute(select(AssetValueAdjustment).where(AssetValueAdjustment.tenant_id == tenant_id)
+                             .order_by(AssetValueAdjustment.adjustment_date.desc()))).scalars().all()
+    return [{"adjustment_id": row.adjustment_id, "asset_id": row.asset_id,
+             "adjustment_date": row.adjustment_date, "previous_book_value": row.previous_book_value,
+             "new_book_value": row.new_book_value, "adjustment_amount": row.adjustment_amount,
+             "reason": row.reason, "status": row.status, "journal_entry_id": row.journal_entry_id} for row in rows]
+
+
 @router.post("/categories", status_code=status.HTTP_201_CREATED, summary="Create Asset Category")
 async def create_category(req: CreateCategorySchema, tenant_id: TenantIdDep, db: DbSessionDep):
     cat = await asset_service.create_category(

@@ -26,6 +26,7 @@ from erp.api.routes import (
     iot_telemetry_router,
     ledger_router,
     maintenance_router,
+    master_data_router,
     mcp_router,
     onboarding_router,
     payroll_router,
@@ -153,6 +154,7 @@ def create_app() -> FastAPI:
     app.include_router(assets_router, prefix=settings.API_V1_STR)
     app.include_router(projects_router, prefix=settings.API_V1_STR)
     app.include_router(maintenance_router, prefix=settings.API_V1_STR)
+    app.include_router(master_data_router, prefix=settings.API_V1_STR)
     app.include_router(reports_router, prefix=settings.API_V1_STR)
     app.include_router(subcontracting_router, prefix=settings.API_V1_STR)
     app.include_router(companies_router, prefix=settings.API_V1_STR)

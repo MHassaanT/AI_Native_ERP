@@ -6,11 +6,13 @@ from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.db.models.inventory import StockLedgerEntry, StockLevel, Warehouse
+from erp.db.models.phase_b import SupplierGroup
+from erp.db.models.onboarding import TenantSettings
 from erp.db.models.purchasing import (
     GoodsReceiptNote,
     GoodsReceiptNoteItem,
@@ -35,6 +37,7 @@ class CreateSupplierRequest(BaseModel):
     currency: str = "USD"
     payment_terms_days: int = 30
     otif_score: Decimal = Decimal("100.00")
+    supplier_group_id: uuid.UUID | None = None
 
 
 class CreatePOItemRequest(BaseModel):
@@ -100,8 +103,17 @@ async def list_suppliers(tenant_id: TenantIdDep, db: DbSessionDep):
 @router.post("/suppliers", status_code=status.HTTP_201_CREATED, summary="Create supplier")
 async def create_supplier(req: CreateSupplierRequest, tenant_id: TenantIdDep, db: DbSessionDep):
     """Creates a new vendor supplier in PostgreSQL."""
+    if req.supplier_group_id:
+        group_id = await db.scalar(select(SupplierGroup.supplier_group_id).where(
+            SupplierGroup.supplier_group_id == req.supplier_group_id,
+            SupplierGroup.tenant_id == tenant_id,
+            SupplierGroup.is_active.is_(True),
+        ))
+        if not group_id:
+            raise HTTPException(status_code=422, detail="Supplier group must belong to this workspace and be active.")
     supplier = Supplier(
         tenant_id=tenant_id,
+        supplier_group_id=req.supplier_group_id,
         supplier_code=req.supplier_code,
         supplier_name=req.supplier_name,
         tax_id=req.tax_id,
@@ -230,6 +242,26 @@ async def create_goods_receipt(req: CreateGRNRequest, tenant_id: TenantIdDep, db
                 )
             )
 
+    if req.po_id:
+        po = await db.scalar(select(PurchaseOrder).where(PurchaseOrder.po_id == req.po_id, PurchaseOrder.tenant_id == tenant_id, PurchaseOrder.supplier_id == req.supplier_id))
+        if po is None:
+            raise HTTPException(status_code=404, detail="Purchase order not found for this supplier and workspace.")
+        settings = await db.scalar(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id))
+        tolerance = settings.over_receipt_percentage if settings else Decimal("0")
+        po_lines = (await db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.tenant_id == tenant_id, PurchaseOrderItem.po_id == req.po_id))).all()
+        pending_by_po_item: dict[uuid.UUID, Decimal] = {}
+        for receipt_line in items_to_process:
+            po_line = next((line for line in po_lines if (receipt_line.po_item_id and line.item_line_id == receipt_line.po_item_id) or (not receipt_line.po_item_id and line.item_id == receipt_line.item_id)), None)
+            if po_line is None:
+                raise HTTPException(status_code=422, detail="Every purchase receipt line must match a line on its purchase order.")
+            receipt_line.po_item_id = po_line.item_line_id
+            received_before = await db.scalar(select(func.coalesce(func.sum(GoodsReceiptNoteItem.quantity_received), 0)).join(GoodsReceiptNote, GoodsReceiptNote.grn_id == GoodsReceiptNoteItem.grn_id).where(GoodsReceiptNote.tenant_id == tenant_id, GoodsReceiptNote.po_id == req.po_id, GoodsReceiptNoteItem.tenant_id == tenant_id, GoodsReceiptNoteItem.po_item_id == po_line.item_line_id))
+            allowed = po_line.quantity * (Decimal("1") + tolerance / Decimal("100"))
+            pending = pending_by_po_item.get(po_line.item_line_id, Decimal("0"))
+            if Decimal(str(received_before or 0)) + pending + receipt_line.quantity_received > allowed:
+                raise HTTPException(status_code=409, detail=f"Receipt quantity for item {po_line.item_id} exceeds the {tolerance}% over-receipt tolerance.")
+            pending_by_po_item[po_line.item_line_id] = pending + receipt_line.quantity_received
+
     for itm in items_to_process:
         grn_item = GoodsReceiptNoteItem(
             tenant_id=tenant_id,
@@ -349,6 +381,15 @@ async def create_supplier_invoice(
         if po_grn:
             grn_id = po_grn.grn_id
 
+    if req.po_id:
+        po = await db.scalar(select(PurchaseOrder).where(PurchaseOrder.po_id == req.po_id, PurchaseOrder.tenant_id == tenant_id))
+        if po is None or po.supplier_id != req.supplier_id:
+            raise HTTPException(status_code=404, detail="Purchase order not found for this supplier and workspace.")
+        settings = await db.scalar(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id))
+        tolerance = settings.over_billing_percentage if settings else Decimal("0")
+        allowed_subtotal = po.subtotal * (Decimal("1") + tolerance / Decimal("100"))
+        if req.subtotal > allowed_subtotal:
+            raise HTTPException(status_code=409, detail=f"Invoice subtotal exceeds the purchase-order over-billing tolerance ({tolerance}%).")
     total_amount = req.subtotal + req.tax_amount
     inv = SupplierInvoice(
         tenant_id=tenant_id,

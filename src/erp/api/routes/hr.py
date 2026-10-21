@@ -2,13 +2,17 @@
 
 import asyncio
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from email.utils import parseaddr
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
+from sqlalchemy import Date as SADate, DateTime as SADateTime, Numeric, extract, func, select
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.inspection import inspect
 
 from erp.ai.hr_screening import (
     ScreeningConfigurationError,
@@ -19,8 +23,17 @@ from erp.ai.hr_screening import (
     evaluate_candidate,
     match_talent_pool_candidate,
 )
-from erp.api.deps import DbSessionDep, TenantIdDep
+from erp.api.deps import CurrentUserDep, DbSessionDep, TenantIdDep
 from erp.db.models.recruitment import CandidateTalentPoolProspect, RecruitmentEmailReview
+from erp.db.models.hr import Attendance, Department, Designation, Employee, EmployeeSeparation, LeaveAllocation, LeaveApplication, LeaveType, SeparationTask
+from erp.db.models.hr_deep import (
+    CompensatoryLeaveRequest, DailyWorkSummary, DailyWorkSummaryReply, EmployeeGrade,
+    EmployeeGrievance, EmployeePromotion, EmployeeTransfer, FullAndFinalStatement,
+    FullAndFinalStatementItem, GrievanceType, Interview, InterviewFeedback,
+    InterviewRound, LeaveBlockList, LeaveBlockListDate, LeavePolicy,
+    LeavePolicyAssignment, LeavePolicyDetail, StaffingPlan, StaffingPlanDetail,
+)
+from erp.db.models.recruitment import CandidateApplication, RecruitmentRole
 from erp.workflows.hr import (
     attendance_service,
     employee_service,
@@ -469,6 +482,20 @@ async def get_leave_balance(
 async def submit_leave_application(
     req: SubmitLeaveApplicationRequest, tenant_id: TenantIdDep, db: DbSessionDep
 ):
+    employee = await db.scalar(select(Employee).where(Employee.employee_id == req.employee_id, Employee.tenant_id == tenant_id, Employee.is_active.is_(True)))
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Active employee not found.")
+    blocked = await db.scalar(select(LeaveBlockListDate.leave_block_date_id).join(LeaveBlockList, LeaveBlockList.leave_block_list_id == LeaveBlockListDate.leave_block_list_id).where(
+        LeaveBlockListDate.tenant_id == tenant_id,
+        LeaveBlockList.tenant_id == tenant_id,
+        LeaveBlockList.is_active.is_(True),
+        LeaveBlockListDate.blocked_date >= req.from_date,
+        LeaveBlockListDate.blocked_date <= req.to_date,
+        (LeaveBlockList.leave_type_id.is_(None) | (LeaveBlockList.leave_type_id == req.leave_type_id)),
+        (LeaveBlockList.department_id.is_(None) | (LeaveBlockList.department_id == employee.department_id)),
+    ).limit(1))
+    if blocked:
+        raise HTTPException(status_code=409, detail="Leave overlaps a date blocked by an active leave block list.")
     try:
         return await leave_service.submit_leave_application(
             db,
@@ -1185,3 +1212,440 @@ async def stop_hr_agent():
 async def get_engine_status():
     """Get the background engine status."""
     return hr_agent_engine.get_status()
+
+
+# Phase C deep-workflow records. All reads and writes are scoped to the current tenant.
+HR_DEEP_RESOURCES = {
+    "staffing-plans": (StaffingPlan, "staffing_plan_id"),
+    "staffing-plan-details": (StaffingPlanDetail, "staffing_plan_detail_id"),
+    "interview-rounds": (InterviewRound, "interview_round_id"),
+    "interviews": (Interview, "interview_id"),
+    "interview-feedback": (InterviewFeedback, "interview_feedback_id"),
+    "employee-grades": (EmployeeGrade, "employee_grade_id"),
+    "employee-promotions": (EmployeePromotion, "promotion_id"),
+    "employee-transfers": (EmployeeTransfer, "transfer_id"),
+    "grievance-types": (GrievanceType, "grievance_type_id"),
+    "employee-grievances": (EmployeeGrievance, "grievance_id"),
+    "full-and-final-statements": (FullAndFinalStatement, "statement_id"),
+    "full-and-final-items": (FullAndFinalStatementItem, "statement_item_id"),
+    "daily-work-summaries": (DailyWorkSummary, "summary_id"),
+    "daily-work-replies": (DailyWorkSummaryReply, "reply_id"),
+    "leave-policies": (LeavePolicy, "leave_policy_id"),
+    "leave-policy-details": (LeavePolicyDetail, "leave_policy_detail_id"),
+    "leave-policy-assignments": (LeavePolicyAssignment, "assignment_id"),
+    "leave-block-lists": (LeaveBlockList, "leave_block_list_id"),
+    "leave-block-dates": (LeaveBlockListDate, "leave_block_date_id"),
+    "compensatory-leave-requests": (CompensatoryLeaveRequest, "compensatory_request_id"),
+}
+
+HR_DEEP_REFERENCES = {
+    StaffingPlanDetail: {"staffing_plan_id": StaffingPlan, "department_id": Department, "designation_id": Designation},
+    Interview: {"application_id": CandidateApplication, "interview_round_id": InterviewRound, "interviewer_employee_id": Employee},
+    InterviewFeedback: {"interview_id": Interview, "interviewer_employee_id": Employee},
+    EmployeePromotion: {"employee_id": Employee, "from_designation_id": Designation, "to_designation_id": Designation, "from_grade_id": EmployeeGrade, "to_grade_id": EmployeeGrade, "approved_by_id": Employee},
+    EmployeeTransfer: {"employee_id": Employee, "from_department_id": Department, "to_department_id": Department, "from_reports_to_id": Employee, "to_reports_to_id": Employee, "approved_by_id": Employee},
+    EmployeeGrievance: {"employee_id": Employee, "grievance_type_id": GrievanceType, "assigned_to_id": Employee},
+    FullAndFinalStatement: {"separation_id": EmployeeSeparation, "employee_id": Employee},
+    FullAndFinalStatementItem: {"statement_id": FullAndFinalStatement},
+    DailyWorkSummary: {"employee_id": Employee},
+    DailyWorkSummaryReply: {"summary_id": DailyWorkSummary, "employee_id": Employee},
+    LeavePolicyDetail: {"leave_policy_id": LeavePolicy, "leave_type_id": LeaveType},
+    LeavePolicyAssignment: {"leave_policy_id": LeavePolicy, "employee_id": Employee},
+    LeaveBlockList: {"leave_type_id": LeaveType, "department_id": Department},
+    LeaveBlockListDate: {"leave_block_list_id": LeaveBlockList},
+    CompensatoryLeaveRequest: {"employee_id": Employee, "approved_by_id": Employee},
+}
+
+
+class HRDeepRecordPayload(BaseModel):
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+async def _hr_deep_resource(resource: str):
+    if resource not in HR_DEEP_RESOURCES:
+        raise HTTPException(status_code=404, detail="Unknown HR workflow resource.")
+    return HR_DEEP_RESOURCES[resource]
+
+
+def _check_hr_confidential_access(resource: str, user):
+    if resource == "employee-grievances" and user.role not in {"TENANT_ADMIN", "HR_MANAGER"}:
+        raise HTTPException(status_code=403, detail="Confidential grievance records require HR Manager access.")
+
+
+def _check_hr_manager(user):
+    if user.role not in {"TENANT_ADMIN", "HR_MANAGER"}:
+        raise HTTPException(status_code=403, detail="This HR approval action requires HR Manager access.")
+
+
+def _coerce_hr_deep(model: type, data: dict[str, Any]) -> dict[str, Any]:
+    protected_workflows = {EmployeePromotion, EmployeeTransfer, FullAndFinalStatement, CompensatoryLeaveRequest}
+    if model in protected_workflows and "status" in data:
+        raise HTTPException(status_code=422, detail="Use the workflow action endpoint to change this record's status.")
+    if model in protected_workflows and "approved_by_id" in data:
+        raise HTTPException(status_code=422, detail="Approval attribution is written by the approval workflow.")
+    if model is FullAndFinalStatement and {"total_earnings", "total_deductions", "net_payable"}.intersection(data):
+        raise HTTPException(status_code=422, detail="Settlement totals are calculated from statement items.")
+    columns = {column.key: column for column in inspect(model).columns}
+    result = {}
+    for key, value in data.items():
+        if key not in columns or key in {"tenant_id", "created_at", "updated_at"} or columns[key].primary_key:
+            raise HTTPException(status_code=422, detail=f"Field '{key}' cannot be set.")
+        if value is not None and isinstance(columns[key].type, PGUUID) and not isinstance(value, uuid.UUID):
+            try:
+                value = uuid.UUID(str(value))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"Field '{key}' must be a UUID.") from exc
+        if value is not None and isinstance(columns[key].type, SADateTime) and isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"Field '{key}' must be an ISO datetime.") from exc
+        if value is not None and isinstance(columns[key].type, SADate) and not isinstance(columns[key].type, SADateTime) and isinstance(value, str):
+            try:
+                value = date.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"Field '{key}' must be an ISO date.") from exc
+        if value is not None and isinstance(columns[key].type, Numeric):
+            try:
+                value = Decimal(str(value))
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Field '{key}' must be numeric.") from exc
+        result[key] = value
+    return result
+
+
+async def _check_hr_deep_refs(db, tenant_id, model, values):
+    for field, target in HR_DEEP_REFERENCES.get(model, {}).items():
+        ref_id = values.get(field)
+        if ref_id is None:
+            continue
+        target_pk = inspect(target).primary_key[0]
+        found = await db.scalar(select(target_pk).where(target_pk == ref_id, target.tenant_id == tenant_id).limit(1))
+        if found is None:
+            raise HTTPException(status_code=422, detail=f"{field} must reference a record in this workspace.")
+
+
+@router.get("/deep/{resource}")
+async def list_hr_deep_records(resource: str, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep, limit: int = Query(200, ge=1, le=1000)):
+    _check_hr_confidential_access(resource, user)
+    model, _ = await _hr_deep_resource(resource)
+    return (await db.scalars(select(model).where(model.tenant_id == tenant_id).order_by(model.created_at.desc()).limit(limit))).all()
+
+
+@router.post("/deep/{resource}", status_code=status.HTTP_201_CREATED)
+async def create_hr_deep_record(resource: str, payload: HRDeepRecordPayload, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_confidential_access(resource, user)
+    model, _ = await _hr_deep_resource(resource)
+    values = _coerce_hr_deep(model, payload.data)
+    await _check_hr_deep_refs(db, tenant_id, model, values)
+    if model is FullAndFinalStatement and values.get("separation_id") and values.get("employee_id"):
+        separation = await db.scalar(select(EmployeeSeparation).where(EmployeeSeparation.separation_id == values["separation_id"], EmployeeSeparation.employee_id == values["employee_id"], EmployeeSeparation.tenant_id == tenant_id))
+        if separation is None:
+            raise HTTPException(status_code=422, detail="The settlement employee must match the employee on the separation record.")
+    record = model(tenant_id=tenant_id, **values)
+    db.add(record)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="The HR record conflicts with an existing record or violates a workflow constraint.") from exc
+    return record
+
+
+@router.patch("/deep/{resource}/{record_id}")
+async def update_hr_deep_record(resource: str, record_id: uuid.UUID, payload: HRDeepRecordPayload, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_confidential_access(resource, user)
+    model, pk_name = await _hr_deep_resource(resource)
+    pk = getattr(model, pk_name)
+    record = await db.scalar(select(model).where(model.tenant_id == tenant_id, pk == record_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="HR record not found.")
+    values = _coerce_hr_deep(model, payload.data)
+    await _check_hr_deep_refs(db, tenant_id, model, values)
+    if model is FullAndFinalStatement:
+        separation_id = values.get("separation_id", record.separation_id)
+        employee_id = values.get("employee_id", record.employee_id)
+        separation = await db.scalar(select(EmployeeSeparation).where(EmployeeSeparation.separation_id == separation_id, EmployeeSeparation.employee_id == employee_id, EmployeeSeparation.tenant_id == tenant_id))
+        if separation is None:
+            raise HTTPException(status_code=422, detail="The settlement employee must match the employee on the separation record.")
+    for key, value in values.items():
+        setattr(record, key, value)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="The update conflicts with an existing record or violates a workflow constraint.") from exc
+    return record
+
+
+@router.delete("/deep/{resource}/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_hr_deep_record(resource: str, record_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_confidential_access(resource, user)
+    model, pk_name = await _hr_deep_resource(resource)
+    record = await db.scalar(select(model).where(model.tenant_id == tenant_id, getattr(model, pk_name) == record_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="HR record not found.")
+    protected_workflows = {EmployeePromotion, EmployeeTransfer, FullAndFinalStatement, CompensatoryLeaveRequest}
+    if model in protected_workflows:
+        _check_hr_manager(user)
+        if getattr(record, "status", None) != "DRAFT":
+            raise HTTPException(status_code=409, detail="Only draft HR workflow records can be deleted; submitted or paid records must remain auditable.")
+    await db.delete(record)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="This record is referenced by other HR data and cannot be deleted.") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/deep/full-and-final-statements/{statement_id}/recalculate")
+async def recalculate_full_and_final(statement_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep):
+    statement = await db.scalar(select(FullAndFinalStatement).where(FullAndFinalStatement.statement_id == statement_id, FullAndFinalStatement.tenant_id == tenant_id).with_for_update())
+    if statement is None:
+        raise HTTPException(status_code=404, detail="Full and final statement not found.")
+    if statement.status not in {"DRAFT", "PENDING_APPROVAL"}:
+        raise HTTPException(status_code=409, detail="Only draft or pending statements can be recalculated.")
+    items = (await db.scalars(select(FullAndFinalStatementItem).where(FullAndFinalStatementItem.statement_id == statement_id, FullAndFinalStatementItem.tenant_id == tenant_id))).all()
+    statement.total_earnings = sum((item.amount for item in items if item.component_type == "EARNING"), Decimal("0"))
+    statement.total_deductions = sum((item.amount for item in items if item.component_type == "DEDUCTION"), Decimal("0"))
+    statement.net_payable = statement.total_earnings - statement.total_deductions
+    await db.flush()
+    return statement
+
+
+class HRApprovalPayload(BaseModel):
+    approved_by_id: uuid.UUID
+
+
+async def _active_hr_approver(db, tenant_id, approver_id):
+    approver = await db.scalar(select(Employee).where(Employee.employee_id == approver_id, Employee.tenant_id == tenant_id, Employee.is_active.is_(True)))
+    if approver is None:
+        raise HTTPException(status_code=422, detail="Approver must be an active employee in this workspace.")
+    return approver
+
+
+@router.post("/deep/employee-promotions/{promotion_id}/approve")
+async def approve_employee_promotion(promotion_id: uuid.UUID, payload: HRApprovalPayload, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_manager(user)
+    record = await db.scalar(select(EmployeePromotion).where(EmployeePromotion.promotion_id == promotion_id, EmployeePromotion.tenant_id == tenant_id).with_for_update())
+    if record is None:
+        raise HTTPException(status_code=404, detail="Promotion request not found.")
+    if record.status != "PENDING":
+        raise HTTPException(status_code=409, detail="Only pending promotions can be approved.")
+    await _active_hr_approver(db, tenant_id, payload.approved_by_id)
+    employee = await db.scalar(select(Employee).where(Employee.employee_id == record.employee_id, Employee.tenant_id == tenant_id).with_for_update())
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    if record.from_designation_id and employee.designation_id != record.from_designation_id:
+        raise HTTPException(status_code=409, detail="Employee designation changed since this promotion was drafted.")
+    if record.from_grade_id and employee.employee_grade_id != record.from_grade_id:
+        raise HTTPException(status_code=409, detail="Employee grade changed since this promotion was drafted.")
+    record.status = "APPROVED"
+    record.approved_by_id = payload.approved_by_id
+    if record.effective_date <= date.today():
+        if record.to_designation_id:
+            employee.designation_id = record.to_designation_id
+        if record.to_grade_id:
+            employee.employee_grade_id = record.to_grade_id
+    await db.flush()
+    return {"promotion": record, "employee_updated": record.effective_date <= date.today()}
+
+
+@router.post("/deep/employee-transfers/{transfer_id}/approve")
+async def approve_employee_transfer(transfer_id: uuid.UUID, payload: HRApprovalPayload, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_manager(user)
+    record = await db.scalar(select(EmployeeTransfer).where(EmployeeTransfer.transfer_id == transfer_id, EmployeeTransfer.tenant_id == tenant_id).with_for_update())
+    if record is None:
+        raise HTTPException(status_code=404, detail="Transfer request not found.")
+    if record.status != "PENDING":
+        raise HTTPException(status_code=409, detail="Only pending transfers can be approved.")
+    await _active_hr_approver(db, tenant_id, payload.approved_by_id)
+    employee = await db.scalar(select(Employee).where(Employee.employee_id == record.employee_id, Employee.tenant_id == tenant_id).with_for_update())
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    if record.from_department_id and employee.department_id != record.from_department_id:
+        raise HTTPException(status_code=409, detail="Employee department changed since this transfer was drafted.")
+    if record.effective_date <= date.today():
+        if record.to_department_id:
+            employee.department_id = record.to_department_id
+            department = await db.scalar(select(Department).where(Department.department_id == record.to_department_id, Department.tenant_id == tenant_id))
+            if department:
+                employee.department = department.department_name
+        if record.to_reports_to_id is not None:
+            employee.reports_to_id = record.to_reports_to_id
+    record.status = "APPROVED"
+    record.approved_by_id = payload.approved_by_id
+    await db.flush()
+    return {"transfer": record, "employee_updated": record.effective_date <= date.today()}
+
+
+@router.post("/deep/compensatory-leave-requests/{request_id}/approve")
+async def approve_compensatory_leave(request_id: uuid.UUID, payload: HRApprovalPayload, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_manager(user)
+    request = await db.scalar(select(CompensatoryLeaveRequest).where(CompensatoryLeaveRequest.compensatory_request_id == request_id, CompensatoryLeaveRequest.tenant_id == tenant_id).with_for_update())
+    if request is None:
+        raise HTTPException(status_code=404, detail="Compensatory leave request not found.")
+    if request.status != "PENDING":
+        raise HTTPException(status_code=409, detail="Only pending compensatory leave can be approved.")
+    await _active_hr_approver(db, tenant_id, payload.approved_by_id)
+    worked = await db.scalar(select(Attendance.attendance_id).where(Attendance.tenant_id == tenant_id, Attendance.employee_id == request.employee_id, Attendance.attendance_date == request.work_date, Attendance.status.in_(["PRESENT", "HALF_DAY"])))
+    if worked is None:
+        raise HTTPException(status_code=409, detail="Compensatory leave requires a present or half-day attendance record for the work date.")
+    request.status = "APPROVED"
+    request.approved_by_id = payload.approved_by_id
+    await db.flush()
+    return request
+
+
+@router.post("/deep/full-and-final-statements/{statement_id}/submit")
+async def submit_full_and_final(statement_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep):
+    statement = await db.scalar(select(FullAndFinalStatement).where(FullAndFinalStatement.statement_id == statement_id, FullAndFinalStatement.tenant_id == tenant_id).with_for_update())
+    if statement is None:
+        raise HTTPException(status_code=404, detail="Full and final statement not found.")
+    if statement.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="Only draft statements can be submitted.")
+    items = (await db.scalars(select(FullAndFinalStatementItem).where(FullAndFinalStatementItem.statement_id == statement_id, FullAndFinalStatementItem.tenant_id == tenant_id))).all()
+    if not items:
+        raise HTTPException(status_code=422, detail="Add settlement earnings or deductions before submitting.")
+    statement.total_earnings = sum((item.amount for item in items if item.component_type == "EARNING"), Decimal("0"))
+    statement.total_deductions = sum((item.amount for item in items if item.component_type == "DEDUCTION"), Decimal("0"))
+    statement.net_payable = statement.total_earnings - statement.total_deductions
+    statement.status = "PENDING_APPROVAL"
+    await db.flush()
+    return statement
+
+
+@router.post("/deep/full-and-final-statements/{statement_id}/approve")
+async def approve_full_and_final(statement_id: uuid.UUID, payload: HRApprovalPayload, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_manager(user)
+    statement = await db.scalar(select(FullAndFinalStatement).where(FullAndFinalStatement.statement_id == statement_id, FullAndFinalStatement.tenant_id == tenant_id).with_for_update())
+    if statement is None:
+        raise HTTPException(status_code=404, detail="Full and final statement not found.")
+    if statement.status != "PENDING_APPROVAL":
+        raise HTTPException(status_code=409, detail="Only submitted statements can be approved.")
+    await _active_hr_approver(db, tenant_id, payload.approved_by_id)
+    statement.status = "APPROVED"
+    await db.flush()
+    return statement
+
+
+@router.post("/deep/full-and-final-statements/{statement_id}/mark-paid")
+async def mark_full_and_final_paid(statement_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep, user: CurrentUserDep):
+    _check_hr_manager(user)
+    statement = await db.scalar(select(FullAndFinalStatement).where(FullAndFinalStatement.statement_id == statement_id, FullAndFinalStatement.tenant_id == tenant_id).with_for_update())
+    if statement is None:
+        raise HTTPException(status_code=404, detail="Full and final statement not found.")
+    if statement.status != "APPROVED":
+        raise HTTPException(status_code=409, detail="Only approved statements can be marked paid.")
+    incomplete_task = await db.scalar(select(SeparationTask.task_id).join(EmployeeSeparation, EmployeeSeparation.separation_id == SeparationTask.separation_id).where(EmployeeSeparation.tenant_id == tenant_id, EmployeeSeparation.separation_id == statement.separation_id, SeparationTask.tenant_id == tenant_id, SeparationTask.is_completed.is_(False)).limit(1))
+    if incomplete_task:
+        raise HTTPException(status_code=409, detail="Complete all separation checklist tasks before closing the settlement.")
+    separation = await db.scalar(select(EmployeeSeparation).where(EmployeeSeparation.separation_id == statement.separation_id, EmployeeSeparation.tenant_id == tenant_id))
+    employee = await db.scalar(select(Employee).where(Employee.employee_id == statement.employee_id, Employee.tenant_id == tenant_id).with_for_update())
+    if separation is None or employee is None:
+        raise HTTPException(status_code=409, detail="The settlement's separation or employee record is no longer available.")
+    statement.status = "PAID"
+    separation.status = "COMPLETED"
+    employee.status = "LEFT"
+    employee.is_active = False
+    await db.flush()
+    return statement
+
+
+class LeavePolicyApplyPayload(BaseModel):
+    leave_policy_id: uuid.UUID
+    employee_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    fiscal_year: int = Field(ge=2000, le=2200)
+
+
+@router.post("/deep/leave-policy-assignments/apply", status_code=status.HTTP_201_CREATED)
+async def apply_leave_policy(payload: LeavePolicyApplyPayload, tenant_id: TenantIdDep, db: DbSessionDep):
+    policy = await db.scalar(select(LeavePolicy).where(LeavePolicy.leave_policy_id == payload.leave_policy_id, LeavePolicy.tenant_id == tenant_id, LeavePolicy.is_active.is_(True)))
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Active leave policy not found.")
+    employee_ids = set(payload.employee_ids)
+    employees = (await db.scalars(select(Employee).where(Employee.tenant_id == tenant_id, Employee.employee_id.in_(employee_ids), Employee.is_active.is_(True)))).all()
+    if len(employees) != len(employee_ids):
+        raise HTTPException(status_code=422, detail="Every employee must be active and belong to this workspace.")
+    existing_assignment = await db.scalar(select(LeavePolicyAssignment.assignment_id).where(LeavePolicyAssignment.tenant_id == tenant_id, LeavePolicyAssignment.employee_id.in_(employee_ids), LeavePolicyAssignment.fiscal_year == payload.fiscal_year).limit(1))
+    if existing_assignment:
+        raise HTTPException(status_code=409, detail="At least one selected employee already has a leave policy assignment for this fiscal year.")
+    details = (await db.scalars(select(LeavePolicyDetail).where(LeavePolicyDetail.tenant_id == tenant_id, LeavePolicyDetail.leave_policy_id == policy.leave_policy_id))).all()
+    if not details:
+        raise HTTPException(status_code=422, detail="The leave policy has no leave types configured.")
+    allocations = []
+    for employee in employees:
+        for detail in details:
+            exists = await db.scalar(select(LeaveAllocation.allocation_id).where(LeaveAllocation.tenant_id == tenant_id, LeaveAllocation.employee_id == employee.employee_id, LeaveAllocation.leave_type_id == detail.leave_type_id, LeaveAllocation.fiscal_year == payload.fiscal_year))
+            if exists:
+                raise HTTPException(status_code=409, detail=f"An allocation already exists for employee {employee.employee_code} and one of this policy's leave types.")
+            allocations.append(LeaveAllocation(tenant_id=tenant_id, employee_id=employee.employee_id, leave_type_id=detail.leave_type_id, fiscal_year=payload.fiscal_year, total_leaves_allocated=detail.annual_allocation, carry_forward_leaves=Decimal("0"), from_date=date(payload.fiscal_year, 1, 1), to_date=date(payload.fiscal_year, 12, 31)))
+        db.add(LeavePolicyAssignment(tenant_id=tenant_id, leave_policy_id=policy.leave_policy_id, employee_id=employee.employee_id, fiscal_year=payload.fiscal_year))
+    db.add_all(allocations)
+    await db.flush()
+    return {"assigned_employees": len(employees), "created_allocations": len(allocations), "fiscal_year": payload.fiscal_year}
+
+
+@router.get("/recruitment/analytics")
+async def recruitment_analytics(tenant_id: TenantIdDep, db: DbSessionDep):
+    roles = await db.scalar(select(func.count()).select_from(RecruitmentRole).where(RecruitmentRole.tenant_id == tenant_id))
+    applications = (await db.execute(select(CandidateApplication.status, func.count()).where(CandidateApplication.tenant_id == tenant_id).group_by(CandidateApplication.status))).all()
+    interviews = (await db.execute(select(Interview.status, Interview.outcome, func.count()).where(Interview.tenant_id == tenant_id).group_by(Interview.status, Interview.outcome))).all()
+    app_counts = {key: count for key, count in applications}
+    return {"open_roles": await db.scalar(select(func.count()).select_from(RecruitmentRole).where(RecruitmentRole.tenant_id == tenant_id, RecruitmentRole.status == "OPEN")), "total_roles": roles or 0, "applications": {"total": sum(app_counts.values()), "ready": app_counts.get("READY", 0), "evaluated": app_counts.get("EVALUATED", 0)}, "interviews": [{"status": s, "outcome": o, "count": count} for s, o, count in interviews], "selected_interview_count": sum(count for _, outcome, count in interviews if outcome == "SELECTED")}
+
+
+@router.get("/reports/exits")
+async def hr_exit_report(tenant_id: TenantIdDep, db: DbSessionDep, from_date: date | None = None, to_date: date | None = None):
+    query = select(EmployeeSeparation, Employee).join(Employee, Employee.employee_id == EmployeeSeparation.employee_id).where(EmployeeSeparation.tenant_id == tenant_id, Employee.tenant_id == tenant_id)
+    if from_date:
+        query = query.where(EmployeeSeparation.resignation_date >= from_date)
+    if to_date:
+        query = query.where(EmployeeSeparation.resignation_date <= to_date)
+    rows = (await db.execute(query.order_by(EmployeeSeparation.resignation_date.desc()))).all()
+    return [{"separation_id": s.separation_id, "separation_number": s.separation_number, "employee_id": e.employee_id, "employee_code": e.employee_code, "employee_name": f"{e.first_name} {e.last_name}", "resignation_date": s.resignation_date, "status": s.status} for s, e in rows]
+
+
+@router.get("/reports/birthdays")
+async def hr_birthday_report(tenant_id: TenantIdDep, db: DbSessionDep, month: int = Query(date.today().month, ge=1, le=12)):
+    rows = (await db.scalars(select(Employee).where(Employee.tenant_id == tenant_id, Employee.is_active.is_(True), Employee.date_of_birth.is_not(None), extract("month", Employee.date_of_birth) == month).order_by(extract("day", Employee.date_of_birth)))).all()
+    return [{"employee_id": e.employee_id, "employee_code": e.employee_code, "employee_name": f"{e.first_name} {e.last_name}", "date_of_birth": e.date_of_birth, "department_id": e.department_id} for e in rows]
+
+
+@router.get("/reports/employee-information")
+async def hr_employee_information(tenant_id: TenantIdDep, db: DbSessionDep, status_filter: str | None = None):
+    query = select(Employee, Department, Designation, EmployeeGrade).outerjoin(Department, (Department.department_id == Employee.department_id) & (Department.tenant_id == tenant_id)).outerjoin(Designation, (Designation.designation_id == Employee.designation_id) & (Designation.tenant_id == tenant_id)).outerjoin(EmployeeGrade, (EmployeeGrade.employee_grade_id == Employee.employee_grade_id) & (EmployeeGrade.tenant_id == tenant_id)).where(Employee.tenant_id == tenant_id)
+    if status_filter:
+        query = query.where(Employee.status == status_filter)
+    rows = (await db.execute(query.order_by(Employee.employee_code))).all()
+    return [{"employee_id": e.employee_id, "employee_code": e.employee_code, "name": f"{e.first_name} {e.last_name}", "email": e.email, "status": e.status, "department": d.department_name if d else e.department, "designation": g.designation_name if g else None, "grade": grade.grade_name if grade else None, "date_of_joining": e.date_of_joining} for e, d, g, grade in rows]
+
+
+@router.get("/reports/analytics")
+async def hr_analytics(tenant_id: TenantIdDep, db: DbSessionDep):
+    statuses = (await db.execute(select(Employee.status, func.count()).where(Employee.tenant_id == tenant_id).group_by(Employee.status))).all()
+    departments = (await db.execute(select(Employee.department_id, Department.department_name, func.count()).outerjoin(Department, (Department.department_id == Employee.department_id) & (Department.tenant_id == tenant_id)).where(Employee.tenant_id == tenant_id).group_by(Employee.department_id, Department.department_name))).all()
+    headcount = sum(n for _, n in statuses)
+    since = date.today() - timedelta(days=365)
+    exits = await db.scalar(select(func.count()).select_from(EmployeeSeparation).where(EmployeeSeparation.tenant_id == tenant_id, EmployeeSeparation.resignation_date >= since)) or 0
+    return {"headcount": headcount, "by_status": {s: n for s, n in statuses}, "by_department": [{"department_id": d, "department_name": name or "Unassigned", "headcount": n} for d, name, n in departments], "separations_last_12_months": exits, "attrition_rate_pct": (Decimal(exits) * Decimal("100") / Decimal(headcount)).quantize(Decimal("0.01")) if headcount else Decimal("0.00"), "open_grievances": await db.scalar(select(func.count()).select_from(EmployeeGrievance).where(EmployeeGrievance.tenant_id == tenant_id, EmployeeGrievance.status.in_(["OPEN", "UNDER_REVIEW"]))) or 0, "pending_promotions": await db.scalar(select(func.count()).select_from(EmployeePromotion).where(EmployeePromotion.tenant_id == tenant_id, EmployeePromotion.status == "PENDING")) or 0}
+
+
+@router.get("/reports/leave-balance-summary")
+async def hr_leave_balance_summary(tenant_id: TenantIdDep, db: DbSessionDep, fiscal_year: int = Query(date.today().year, ge=2000, le=2200)):
+    allocations = (await db.execute(select(LeaveAllocation, Employee, LeaveType).join(Employee, (Employee.employee_id == LeaveAllocation.employee_id) & (Employee.tenant_id == tenant_id)).join(LeaveType, (LeaveType.leave_type_id == LeaveAllocation.leave_type_id) & (LeaveType.tenant_id == tenant_id)).where(LeaveAllocation.tenant_id == tenant_id, LeaveAllocation.fiscal_year == fiscal_year))).all()
+    results = []
+    for allocation, employee, leave_type in allocations:
+        used = await db.scalar(select(func.coalesce(func.sum(LeaveApplication.total_leave_days), 0)).where(LeaveApplication.tenant_id == tenant_id, LeaveApplication.employee_id == employee.employee_id, LeaveApplication.leave_type_id == leave_type.leave_type_id, LeaveApplication.status == "APPROVED", LeaveApplication.from_date >= allocation.from_date, LeaveApplication.from_date <= allocation.to_date))
+        allocated = Decimal(str(allocation.total_leaves_allocated or 0)) + Decimal(str(allocation.carry_forward_leaves or 0))
+        results.append({"employee_id": employee.employee_id, "employee_code": employee.employee_code, "employee_name": f"{employee.first_name} {employee.last_name}", "leave_type_id": leave_type.leave_type_id, "leave_type": leave_type.type_name, "allocated": allocated, "used": Decimal(str(used or 0)), "balance": allocated - Decimal(str(used or 0))})
+    return results
+
+
+@router.get("/reports/holiday-workers")
+async def hr_holiday_workers(tenant_id: TenantIdDep, db: DbSessionDep, holiday_date: date):
+    rows = (await db.execute(select(Attendance, Employee).join(Employee, Employee.employee_id == Attendance.employee_id).where(Attendance.tenant_id == tenant_id, Employee.tenant_id == tenant_id, Attendance.attendance_date == holiday_date, Attendance.status.in_(["PRESENT", "HALF_DAY"])).order_by(Employee.employee_code))).all()
+    return [{"attendance_id": a.attendance_id, "employee_id": e.employee_id, "employee_code": e.employee_code, "employee_name": f"{e.first_name} {e.last_name}", "attendance_date": a.attendance_date, "status": a.status, "working_hours": a.working_hours} for a, e in rows]

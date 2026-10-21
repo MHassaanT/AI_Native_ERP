@@ -26,6 +26,7 @@ import {
   Columns3,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseBShortcuts } from "@/components/phase-b-shortcuts";
 
 export default function InventoryPage() {
   const [activeTab, setActiveTab] = useState<
@@ -43,6 +44,7 @@ export default function InventoryPage() {
 
   // Core Data
   const [items, setItems] = useState<any[]>([]);
+  const [itemGroups, setItemGroups] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [stockEntries, setStockEntries] = useState<any[]>([]);
   const [reconciliations, setReconciliations] = useState<any[]>([]);
@@ -66,6 +68,7 @@ export default function InventoryPage() {
   // Item Form
   const [itemCode, setItemCode] = useState("");
   const [itemName, setItemName] = useState("");
+  const [itemGroupId, setItemGroupId] = useState("");
   const [stockUom, setStockUom] = useState("Nos");
   const [standardRate, setStandardRate] = useState("0.00");
   const [initialQty, setInitialQty] = useState("0");
@@ -147,6 +150,7 @@ export default function InventoryPage() {
         ]);
 
       if (itData.status === "fulfilled") setItems(itData.value || []);
+      try { setItemGroups(await api.getMasterData("item-groups")); } catch { setItemGroups([]); }
       if (whData.status === "fulfilled") setWarehouses(whData.value || []);
       if (seData.status === "fulfilled") setStockEntries(seData.value || []);
       if (recData.status === "fulfilled") setReconciliations(recData.value || []);
@@ -172,6 +176,7 @@ export default function InventoryPage() {
   const resetItemForm = () => {
     setItemCode("");
     setItemName("");
+    setItemGroupId("");
     setStockUom("Nos");
     setStandardRate("0.00");
     setInitialQty("0");
@@ -190,6 +195,7 @@ export default function InventoryPage() {
       await api.createItem({
         item_code: itemCode.trim().toUpperCase(),
         item_name: itemName.trim(),
+        item_group_id: itemGroupId || undefined,
         stock_uom: stockUom,
         standard_rate: parseFloat(standardRate),
         initial_qty: parseFloat(initialQty),
@@ -536,6 +542,8 @@ export default function InventoryPage() {
           <span>{error}</span>
         </div>
       )}
+
+      <PhaseBShortcuts area="stock" />
 
       {/* Workspace Navigation Tabs */}
       <div className="flex border-b border-cream-300 gap-1 overflow-x-auto text-xs font-medium">
@@ -1510,6 +1518,13 @@ export default function InventoryPage() {
                   placeholder="e.g. 500W Brushless DC Motor"
                   className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs"
                 />
+              </div>
+              <div>
+                <label className="block text-cream-700 mb-1">Item Group</label>
+                <select value={itemGroupId} onChange={(e) => setItemGroupId(e.target.value)} className="w-full rounded border border-cream-300 bg-white px-2.5 py-1.5 text-xs">
+                  <option value="">Unassigned</option>
+                  {itemGroups.filter((group) => group.is_active && !group.is_group).map((group) => <option key={group.item_group_id} value={group.item_group_id}>{group.group_name}</option>)}
+                </select>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

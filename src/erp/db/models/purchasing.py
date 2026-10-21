@@ -37,6 +37,8 @@ class Supplier(Base, TenantMixin, TimestampMixin):
         Numeric(5, 2), nullable=False, default=Decimal("100.00"), doc="On-time in-full score %"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supplier_group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("supplier_groups.supplier_group_id", ondelete="SET NULL"), nullable=True, index=True)
+    supplier_group = relationship("SupplierGroup")
 
     __table_args__ = (Index("idx_sup_tenant_code", "tenant_id", "supplier_code", unique=True),)
 

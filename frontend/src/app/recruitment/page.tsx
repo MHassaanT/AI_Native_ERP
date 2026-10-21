@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Bot, Briefcase, FileText, Mail, Plus, RefreshCw, Send, Sparkles, UserRound, Zap } from "lucide-react";
 import { api } from "@/lib/api";
 import { AgentSetupTour } from "@/components/guided-tour";
+import { HRDeepWorkbench } from "@/components/hr-deep-workbench";
 
 interface RecruitmentRole {
   role_id: string;
@@ -86,6 +87,7 @@ interface TalentPoolProspect {
 }
 
 export default function RecruitmentPage() {
+  const [hrTab, setHrTab] = useState<"candidates" | "staffing" | "analytics">("candidates");
   const [roles, setRoles] = useState<RecruitmentRole[]>([]);
   const [applications, setApplications] = useState<CandidateApplication[]>([]);
   const [emailInbox, setEmailInbox] = useState<RecruitmentEmail[]>([]);
@@ -420,8 +422,12 @@ export default function RecruitmentPage() {
     (application) => application.application_id === selectedApplicationId,
   );
 
+  if (hrTab === "analytics") return <RecruitmentAnalytics onChange={setHrTab} />;
+  if (hrTab === "staffing") return <main className="space-y-4"><RecruitmentTabs value={hrTab} onChange={setHrTab}/><HRDeepWorkbench onlyResources={["staffing-plans", "staffing-plan-details", "interview-rounds", "interviews", "interview-feedback"]}/></main>;
+
   return (
     <main className="space-y-6 pb-12">
+      <RecruitmentTabs value={hrTab} onChange={setHrTab}/>
       <AgentSetupTour id="recruitment" steps={[
         { title: "Set up your recruitment agent", description: "Start by creating a job opening with clear, job-related requirements. The agent uses this context to organize candidate evidence; recruiters retain every hiring decision.", href: "#recruitment-job-opening", actionLabel: "Create an opening" },
         { title: "Connect your hiring inbox", description: "Connect and sync the tenant Gmail account in the Email / RFQ Hub. Recruitment then stages likely applications for recruiter review; it does not read attachments automatically.", href: "/inbox", actionLabel: "Open Email / RFQ Hub" },
@@ -873,4 +879,16 @@ export default function RecruitmentPage() {
       </section>
     </main>
   );
+}
+
+function RecruitmentTabs({ value, onChange }: { value: "candidates" | "staffing" | "analytics"; onChange: (tab: "candidates" | "staffing" | "analytics") => void }) {
+  return <nav aria-label="Recruitment sections" className="flex flex-wrap gap-2 border-b border-cream-300 pb-2">{[{ id: "candidates", label: "Candidates & Screening" }, { id: "staffing", label: "Staffing & Interviews" }, { id: "analytics", label: "Recruitment Analytics" }].map((tab) => <button key={tab.id} onClick={() => onChange(tab.id as typeof value)} className={`rounded-lg px-3 py-2 text-xs font-medium ${value === tab.id ? "bg-cream-900 text-white" : "border border-cream-300 bg-cream-50 text-cream-800"}`}>{tab.label}</button>)}</nav>;
+}
+
+function RecruitmentAnalytics({ onChange }: { onChange: (tab: "candidates" | "staffing" | "analytics") => void }) {
+  const [data, setData] = useState<any>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { api.getRecruitmentAnalytics().then(setData).catch((e: any) => setError(e.message || "Could not load analytics.")).finally(() => setLoading(false)); }, []);
+  return <main className="space-y-5"><RecruitmentTabs value="analytics" onChange={onChange}/><header><h1 className="text-2xl font-semibold text-cream-900">Recruitment Funnel Analytics</h1><p className="mt-1 text-sm text-cream-700">Tenant-scoped opening, screening, and interview counts.</p></header>{error && <p className="rounded bg-rose-50 p-3 text-sm text-rose-800">{error}</p>}{loading ? <p className="rounded border border-cream-200 bg-white p-6 text-sm">Loading metrics…</p> : data && <><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[["Open roles", data.open_roles], ["Total applications", data.applications?.total], ["Screened", data.applications?.evaluated], ["Selected interview outcomes", data.selected_interview_count]].map(([label, value]) => <article key={String(label)} className="rounded-xl border border-cream-200 bg-white p-4"><p className="text-xs text-cream-600">{label}</p><p className="mt-1 text-2xl font-semibold">{value ?? 0}</p></article>)}</div><section className="rounded-xl border border-cream-200 bg-white p-4"><h2 className="font-semibold">Interview status and outcome</h2><div className="mt-3 grid gap-2 md:grid-cols-3">{(data.interviews || []).map((row: any, index: number) => <div key={index} className="rounded-lg bg-cream-50 p-3 text-sm"><span className="font-medium">{row.status}</span><span className="mx-2 text-cream-500">/</span>{row.outcome}: <b>{row.count}</b></div>)}</div></section></>}</main>;
 }

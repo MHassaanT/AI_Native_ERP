@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.workflows.reports import financial_reports_service, stock_reports_service
+from erp.workflows.reports.enterprise_reports_service import enterprise_reports_service
 
 router = APIRouter(prefix="/reports", tags=["Enterprise Reports & Analytics"])
 
@@ -175,3 +176,65 @@ async def get_production_analytics(
     tenant_id: TenantIdDep,
 ) -> Dict[str, Any]:
     return await stock_reports_service.get_production_analytics(session, tenant_id)
+
+
+# Phase F report catalog. Each report has a stable endpoint, while sharing the
+# same bounded date/filter contract and SQL-backed tenant-scoped implementation.
+_ENTERPRISE_REPORTS = {
+    "customer-ledger-summary": "Customer Ledger Summary",
+    "supplier-ledger-summary": "Supplier Ledger Summary",
+    "gross-profit-analysis": "Gross Profit Analysis by Item and Customer",
+    "sales-invoice-trends": "Sales Invoice Trends",
+    "purchase-invoice-trends": "Purchase Invoice Trends",
+    "purchase-analytics": "Purchase Analytics by Supplier and Item",
+    "purchase-order-analytics": "Purchase Order Status and Overdue Analysis",
+    "supplier-wise-sales-analytics": "Supplier-Wise Sales Analytics",
+    "procurement-tracker": "Material Request to Purchase Order to Receipt Tracker",
+    "items-to-be-requested": "Items Below Reorder Level",
+    "sales-analytics": "Sales Analytics by Item, Customer, and Territory",
+    "sales-order-analysis": "Pending Delivery and Billing Analysis",
+    "quotation-trends": "Quotation Trends",
+    "sales-order-trends": "Sales Order Trends",
+    "inactive-customers": "Inactive Customers",
+    "stock-projected-quantity": "Stock Projected Quantity Summary",
+    "stock-ageing": "FIFO Stock Ageing",
+    "stock-analytics": "Stock Analytics",
+    "delivery-note-trends": "Delivery Note Trends",
+    "item-shortage-report": "Item Shortage Report",
+    "hr-analytics": "Headcount and Attrition Analytics",
+    "leave-balance-summary": "Leave Balance Summary",
+    "employee-birthdays": "Employee Birthday Report",
+    "recruitment-funnel": "Recruitment Funnel Analytics",
+    "support-sla-compliance": "Support SLA Compliance",
+    "support-agent-performance": "Support Agent Performance",
+}
+
+
+def _make_enterprise_report(report_name: str, summary: str):
+    async def endpoint(
+        session: DbSessionDep,
+        tenant_id: TenantIdDep,
+        from_date: Optional[date] = Query(None),
+        to_date: Optional[date] = Query(None),
+        as_of_date: Optional[date] = Query(None),
+        month: Optional[int] = Query(None, ge=1, le=12),
+        fiscal_year: Optional[int] = Query(None, ge=2000, le=2200),
+    ) -> Any:
+        return await enterprise_reports_service.run(
+            report_name, session, tenant_id, from_date=from_date, to_date=to_date,
+            as_of_date=as_of_date, month=month, fiscal_year=fiscal_year,
+        )
+
+    endpoint.__name__ = f"get_{report_name.replace('-', '_')}"
+    endpoint.__doc__ = summary
+    return endpoint
+
+
+for _report_name, _summary in _ENTERPRISE_REPORTS.items():
+    router.add_api_route(
+        f"/enterprise/{_report_name}",
+        _make_enterprise_report(_report_name, _summary),
+        methods=["GET"],
+        summary=_summary,
+        tags=["Enterprise Reports & Analytics"],
+    )

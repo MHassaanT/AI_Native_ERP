@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -137,6 +138,7 @@ class SalarySlip(Base, TenantMixin, TimestampMixin):
     posting_date: Mapped[date] = mapped_column(Date, nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     total_working_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     payment_days: Mapped[Decimal] = mapped_column(
         Numeric(6, 2), nullable=False, default=Decimal("30.00")
@@ -153,6 +155,12 @@ class SalarySlip(Base, TenantMixin, TimestampMixin):
     net_pay: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
+    income_tax: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0.0000")
+    )
+    payroll_period_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("payroll_periods.payroll_period_id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="DRAFT"  # DRAFT, SUBMITTED, PAID, CANCELLED
     )
@@ -165,6 +173,12 @@ class SalarySlip(Base, TenantMixin, TimestampMixin):
     __table_args__ = (
         Index("idx_sal_slip_num", "tenant_id", "slip_number", unique=True),
         Index("idx_sal_slip_emp_period", "tenant_id", "employee_id", "start_date", "end_date"),
+        Index(
+            "uq_sal_slip_active_employee_period",
+            "tenant_id", "employee_id", "start_date", "end_date",
+            unique=True,
+            postgresql_where=text("status <> 'CANCELLED'"),
+        ),
     )
 
 
@@ -254,3 +268,70 @@ class EmployeeAdvance(Base, TenantMixin, TimestampMixin):
         Index("idx_emp_adv_num", "tenant_id", "advance_number", unique=True),
         Index("idx_emp_adv_emp_status", "tenant_id", "employee_id", "status"),
     )
+
+
+class IncomeTaxSlab(Base, TenantMixin, TimestampMixin):
+    """Tax schedule for an annual tax year and currency; rates are progressive bands."""
+
+    __tablename__ = "income_tax_slabs"
+    slab_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slab_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    tax_year: Mapped[str] = mapped_column(String(16), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_to: Mapped[date] = mapped_column(Date, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    rates = relationship("IncomeTaxSlabRate", back_populates="slab", cascade="all, delete-orphan")
+    __table_args__ = (Index("uq_income_tax_slab_tenant_year", "tenant_id", "tax_year", unique=True),)
+
+
+class IncomeTaxSlabRate(Base, TenantMixin, TimestampMixin):
+    """One progressive annual income band (upper bound NULL means uncapped)."""
+
+    __tablename__ = "income_tax_slab_rates"
+    rate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    slab_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("income_tax_slabs.slab_id", ondelete="CASCADE"), nullable=False)
+    lower_bound: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    upper_bound: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    tax_rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    fixed_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    slab = relationship("IncomeTaxSlab", back_populates="rates")
+    __table_args__ = (Index("idx_tax_rate_slab_lower", "tenant_id", "slab_id", "lower_bound", unique=True),)
+
+
+class PayrollPeriod(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "payroll_periods"
+    payroll_period_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    period_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="OPEN")
+    __table_args__ = (Index("uq_payroll_period_tenant_dates", "tenant_id", "start_date", "end_date", unique=True),)
+
+
+class AdditionalSalary(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "additional_salaries"
+    additional_salary_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.employee_id"), nullable=False)
+    salary_component_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("salary_components.component_id"), nullable=True)
+    payroll_date: Mapped[date] = mapped_column(Date, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    component_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    component_type: Mapped[str] = mapped_column(String(24), nullable=False, default="EARNING")
+    is_taxable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    slip_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("salary_slips.slip_id"), nullable=True)
+    __table_args__ = (Index("idx_additional_salary_employee_date", "tenant_id", "employee_id", "payroll_date", "status"),)
+
+
+class RetentionBonus(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "retention_bonuses"
+    retention_bonus_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.employee_id"), nullable=False)
+    bonus_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    vesting_date: Mapped[date] = mapped_column(Date, nullable=False)
+    is_taxable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    slip_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("salary_slips.slip_id"), nullable=True)
+    __table_args__ = (Index("idx_retention_employee_date", "tenant_id", "employee_id", "vesting_date", "status"),)

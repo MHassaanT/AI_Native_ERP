@@ -223,3 +223,42 @@ class AssetRepair(Base, TenantMixin, TimestampMixin):
     )
 
     asset: Mapped["Asset"] = relationship("Asset", back_populates="repairs")
+
+
+class AssetMaintenanceTeam(Base, TenantMixin, TimestampMixin):
+    """Team responsible for preventive and corrective asset maintenance."""
+
+    __tablename__ = "asset_maintenance_teams"
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    members: Mapped[List["AssetMaintenanceTeamMember"]] = relationship(back_populates="team", cascade="all, delete-orphan")
+    __table_args__ = (Index("uq_asset_maintenance_team_tenant_name", "tenant_id", "team_name", unique=True),)
+
+
+class AssetMaintenanceTeamMember(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "asset_maintenance_team_members"
+    member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("asset_maintenance_teams.team_id", ondelete="CASCADE"), nullable=False)
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.employee_id"), nullable=False)
+    role: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    team: Mapped["AssetMaintenanceTeam"] = relationship(back_populates="members")
+    __table_args__ = (Index("uq_asset_maintenance_team_member", "tenant_id", "team_id", "employee_id", unique=True),)
+
+
+class AssetValueAdjustment(Base, TenantMixin, TimestampMixin):
+    """Approved carrying-value change with an immutable before/after audit record."""
+
+    __tablename__ = "asset_value_adjustments"
+    adjustment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("assets.asset_id"), nullable=False)
+    adjustment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    previous_book_value: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    new_book_value: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    adjustment_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="DRAFT")
+    journal_entry_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    asset: Mapped["Asset"] = relationship()
+    __table_args__ = (Index("idx_asset_value_adjustment", "tenant_id", "asset_id", "adjustment_date"),)

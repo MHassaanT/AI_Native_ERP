@@ -20,12 +20,18 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 
-type TabType = "projects" | "timesheets";
+type TabType = "projects" | "timesheets" | "activities";
 
 export default function ProjectsPage() {
   const [activeTab, setActiveTab] = useState<TabType>("projects");
   const [projects, setProjects] = useState<any[]>([]);
   const [timesheets, setTimesheets] = useState<any[]>([]);
+  const [projectTypes, setProjectTypes] = useState<any[]>([]);
+  const [activityTypes, setActivityTypes] = useState<any[]>([]);
+  const [activityCosts, setActivityCosts] = useState<any[]>([]);
+  const [projectTypeName, setProjectTypeName] = useState("");
+  const [activityName, setActivityName] = useState("");
+  const [costForm, setCostForm] = useState({ activity_type_id: "", billing_rate: "150.00", costing_rate: "75.00", valid_from: new Date().toISOString().slice(0, 10) });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -47,6 +53,7 @@ export default function ProjectsPage() {
     start_date: new Date().toISOString().split("T")[0],
     estimated_cost: "50000.00",
     notes: "",
+    project_type_id: "",
   });
 
   const [formTask, setFormTask] = useState({
@@ -61,6 +68,7 @@ export default function ProjectsPage() {
     timesheet_number: "",
     employee_name: "Sarah Chen",
     activity_type: "ENGINEERING",
+    activity_type_id: "",
     work_date: new Date().toISOString().split("T")[0],
     hours: "8.00",
     billing_rate: "150.00",
@@ -69,17 +77,27 @@ export default function ProjectsPage() {
     task_id: "",
     notes: "",
   });
+  const [updateForm, setUpdateForm] = useState({ sender_email: "", progress_pct: "", notes: "", blockers: "" });
 
   const loadData = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [pData, tData] = await Promise.all([
+      const [pData, tData, pTypes, aTypes, aCosts] = await Promise.all([
         api.getProjects(),
         api.getProjectTimesheets(),
+        api.getProjectTypes(),
+        api.getActivityTypes(),
+        api.getActivityCosts(),
       ]);
       setProjects(pData);
       setTimesheets(tData);
+      setProjectTypes(pTypes || []);
+      setActivityTypes(aTypes || []);
+      setActivityCosts(aCosts || []);
+      if (pTypes?.length && !formProj.project_type_id) setFormProj((prev) => ({ ...prev, project_type_id: pTypes[0].project_type_id }));
+      if (aTypes?.length && !costForm.activity_type_id) setCostForm((prev) => ({ ...prev, activity_type_id: aTypes[0].activity_type_id }));
+      if (aTypes?.length && !formTimesheet.activity_type_id) setFormTimesheet((prev) => ({ ...prev, activity_type: aTypes[0].activity_name, activity_type_id: aTypes[0].activity_type_id }));
     } catch (err: any) {
       setError(err.message || "Failed to load projects data.");
     } finally {
@@ -108,6 +126,7 @@ export default function ProjectsPage() {
     try {
       await api.createProject({
         ...formProj,
+        project_type_id: formProj.project_type_id || undefined,
         estimated_cost: parseFloat(formProj.estimated_cost),
       });
       setShowProjectModal(false);
@@ -118,6 +137,7 @@ export default function ProjectsPage() {
         start_date: new Date().toISOString().split("T")[0],
         estimated_cost: "50000.00",
         notes: "",
+        project_type_id: projectTypes[0]?.project_type_id || "",
       });
       await loadData();
     } catch (err: any) {
@@ -172,10 +192,11 @@ export default function ProjectsPage() {
         employee_id: empId,
         employee_name: formTimesheet.employee_name,
         activity_type: formTimesheet.activity_type,
+        activity_type_id: formTimesheet.activity_type_id || undefined,
         work_date: formTimesheet.work_date,
         hours: parseFloat(formTimesheet.hours),
-        billing_rate: parseFloat(formTimesheet.billing_rate),
-        costing_rate: parseFloat(formTimesheet.costing_rate),
+        billing_rate: formTimesheet.activity_type_id ? undefined : parseFloat(formTimesheet.billing_rate),
+        costing_rate: formTimesheet.activity_type_id ? undefined : parseFloat(formTimesheet.costing_rate),
         is_billable: formTimesheet.is_billable,
         task_id: formTimesheet.task_id || undefined,
         notes: formTimesheet.notes,
@@ -186,6 +207,35 @@ export default function ProjectsPage() {
     } catch (err: any) {
       alert("Error logging timesheet: " + err.message);
     }
+  };
+
+  const handleProjectUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedProject) return;
+    try {
+      await api.createProjectUpdate(selectedProject.project_id, { ...updateForm,
+        progress_pct: updateForm.progress_pct === "" ? null : Number(updateForm.progress_pct) });
+      setUpdateForm((prev) => ({ ...prev, progress_pct: "", notes: "", blockers: "" }));
+      await openProjectDetail(selectedProject.project_id); await loadData();
+    } catch (err: any) { setError(err.message || "Failed to record project update."); }
+  };
+
+  const handleCreateProjectType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try { await api.createProjectType({ type_name: projectTypeName }); setProjectTypeName(""); await loadData(); }
+    catch (err: any) { setError(err.message || "Failed to create project type."); }
+  };
+
+  const handleCreateActivityType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try { await api.createActivityType({ activity_name: activityName }); setActivityName(""); await loadData(); }
+    catch (err: any) { setError(err.message || "Failed to create activity type."); }
+  };
+
+  const handleCreateActivityCost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try { await api.createActivityCost({ ...costForm, billing_rate: costForm.billing_rate, costing_rate: costForm.costing_rate, employee_id: null }); await loadData(); }
+    catch (err: any) { setError(err.message || "Failed to save activity rates."); }
   };
 
   // Metrics
@@ -289,6 +339,9 @@ export default function ProjectsPage() {
           }`}
         >
           Timesheets ({timesheets.length})
+        </button>
+        <button onClick={() => setActiveTab("activities")} className={`pb-3 text-sm font-medium border-b-2 transition-colors ${activeTab === "activities" ? "border-stone-900 text-stone-900" : "border-transparent text-stone-500 hover:text-stone-800"}`}>
+          Project Types & Activities
         </button>
       </div>
 
@@ -448,6 +501,23 @@ export default function ProjectsPage() {
         </div>
       )}
 
+      {activeTab === "activities" && <div className="grid gap-5 lg:grid-cols-3">
+        <section className="rounded-xl border bg-white p-5 space-y-3"><h2 className="font-semibold text-stone-900">Project Types</h2>
+          <form onSubmit={handleCreateProjectType} className="flex gap-2"><input required minLength={2} value={projectTypeName} onChange={(e) => setProjectTypeName(e.target.value)} placeholder="New project type" className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm"/><button className="rounded-lg bg-stone-900 px-3 text-white"><Plus className="h-4 w-4"/></button></form>
+          <ul className="divide-y">{projectTypes.map((row) => <li key={row.project_type_id} className="py-2 text-sm">{row.type_name}</li>)}</ul>
+        </section>
+        <section className="rounded-xl border bg-white p-5 space-y-3"><h2 className="font-semibold text-stone-900">Activity Types</h2>
+          <form onSubmit={handleCreateActivityType} className="flex gap-2"><input required minLength={2} value={activityName} onChange={(e) => setActivityName(e.target.value)} placeholder="New activity type" className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm"/><button className="rounded-lg bg-stone-900 px-3 text-white"><Plus className="h-4 w-4"/></button></form>
+          <ul className="divide-y">{activityTypes.map((row) => <li key={row.activity_type_id} className="py-2 text-sm">{row.activity_name}</li>)}</ul>
+        </section>
+        <section className="rounded-xl border bg-white p-5 space-y-3"><h2 className="font-semibold text-stone-900">Activity Rates</h2>
+          <form onSubmit={handleCreateActivityCost} className="space-y-2"><select required value={costForm.activity_type_id} onChange={(e) => setCostForm({ ...costForm, activity_type_id: e.target.value })} className="w-full rounded-lg border px-3 py-2 text-sm">{activityTypes.map((row) => <option key={row.activity_type_id} value={row.activity_type_id}>{row.activity_name}</option>)}</select>
+            <div className="grid grid-cols-2 gap-2"><input required type="number" min="0" step="0.0001" value={costForm.billing_rate} onChange={(e) => setCostForm({ ...costForm, billing_rate: e.target.value })} placeholder="Billing rate" className="rounded-lg border px-3 py-2 text-sm"/><input required type="number" min="0" step="0.0001" value={costForm.costing_rate} onChange={(e) => setCostForm({ ...costForm, costing_rate: e.target.value })} placeholder="Costing rate" className="rounded-lg border px-3 py-2 text-sm"/></div>
+            <input required type="date" value={costForm.valid_from} onChange={(e) => setCostForm({ ...costForm, valid_from: e.target.value })} className="w-full rounded-lg border px-3 py-2 text-sm"/><button disabled={!activityTypes.length} className="w-full rounded-lg bg-stone-900 px-3 py-2 text-sm text-white">Save default rates</button></form>
+          <div className="space-y-2">{activityCosts.map((row) => <div key={row.activity_cost_id} className="rounded-lg bg-stone-50 p-2 text-xs">{row.activity_name}: bill {row.billing_rate} / cost {row.costing_rate} from {row.valid_from}</div>)}</div>
+        </section>
+      </div>}
+
       {/* Project Details Drawer */}
       {selectedProject && (
         <div className="fixed inset-0 z-50 bg-stone-900/40 backdrop-blur-sm flex justify-end">
@@ -524,6 +594,16 @@ export default function ProjectsPage() {
                 </div>
               </div>
             </div>
+
+            <section className="space-y-3 rounded-xl border border-stone-200 p-4">
+              <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-stone-900">Project Updates & Activity Timeline</h3><span className="text-xs text-stone-500">{selectedProject.updates?.length || 0} updates</span></div>
+              <form onSubmit={handleProjectUpdate} className="space-y-2">
+                <div className="grid grid-cols-2 gap-2"><input required type="email" value={updateForm.sender_email} onChange={(e) => setUpdateForm({ ...updateForm, sender_email: e.target.value })} placeholder="Reporter email" className="rounded-lg border px-3 py-2 text-xs"/><input type="number" min="0" max="100" value={updateForm.progress_pct} onChange={(e) => setUpdateForm({ ...updateForm, progress_pct: e.target.value })} placeholder="Progress % (optional)" className="rounded-lg border px-3 py-2 text-xs"/></div>
+                <textarea required value={updateForm.notes} onChange={(e) => setUpdateForm({ ...updateForm, notes: e.target.value })} placeholder="Progress update" rows={2} className="w-full rounded-lg border px-3 py-2 text-xs"/>
+                <input value={updateForm.blockers} onChange={(e) => setUpdateForm({ ...updateForm, blockers: e.target.value })} placeholder="Blockers (optional)" className="w-full rounded-lg border px-3 py-2 text-xs"/><button className="rounded-lg bg-stone-900 px-3 py-2 text-xs text-white">Record update</button>
+              </form>
+              <div className="space-y-2 border-l-2 border-stone-200 pl-3">{(selectedProject.updates || []).map((update: any) => <article key={update.update_id} className="relative rounded-lg bg-stone-50 p-3"><div className="text-xs font-semibold text-stone-800">{update.sender_email} {update.progress_pct !== null && update.progress_pct !== undefined ? `· ${update.progress_pct}%` : ""}</div><time className="text-[10px] text-stone-400">{new Date(update.created_at).toLocaleString()}</time><p className="mt-1 whitespace-pre-wrap text-xs text-stone-700">{update.notes}</p>{update.blockers && <p className="mt-1 text-xs text-amber-800">Blocker: {update.blockers}</p>}</article>)}{!selectedProject.updates?.length && <p className="py-2 text-xs text-stone-500">No updates recorded yet.</p>}</div>
+            </section>
 
             {/* Tasks Work Items */}
             <div className="space-y-3">
@@ -653,6 +733,12 @@ export default function ProjectsPage() {
                   className="w-full px-3 py-2 text-sm border border-stone-300 rounded-lg"
                 />
               </div>
+      <div>
+        <label className="block text-xs font-medium text-stone-700 mb-1">Project Type</label>
+        <select value={formProj.project_type_id} onChange={(e) => setFormProj({ ...formProj, project_type_id: e.target.value })} className="w-full px-3 py-2 text-sm border border-stone-300 rounded-lg">
+          <option value="">No type</option>{projectTypes.map((row) => <option key={row.project_type_id} value={row.project_type_id}>{row.type_name}</option>)}
+        </select>
+      </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-stone-700 mb-1">Estimated Cost ($)</label>
@@ -792,14 +878,15 @@ export default function ProjectsPage() {
                 <div>
                   <label className="block text-xs font-medium text-stone-700 mb-1">Activity Type</label>
                   <select
-                    value={formTimesheet.activity_type}
-                    onChange={(e) => setFormTimesheet({ ...formTimesheet, activity_type: e.target.value })}
+                    value={formTimesheet.activity_type_id || formTimesheet.activity_type}
+                    onChange={(e) => {
+                      const chosen = activityTypes.find((row) => row.activity_type_id === e.target.value);
+                      setFormTimesheet({ ...formTimesheet, activity_type: chosen?.activity_name || e.target.value,
+                        activity_type_id: chosen?.activity_type_id || "" });
+                    }}
                     className="w-full px-3 py-2 text-sm border border-stone-300 rounded-lg"
                   >
-                    <option value="ENGINEERING">Engineering</option>
-                    <option value="FABRICATION">Fabrication</option>
-                    <option value="CONSULTING">Consulting</option>
-                    <option value="SUPPORT">Support</option>
+                    {activityTypes.length ? activityTypes.map((row) => <option key={row.activity_type_id} value={row.activity_type_id}>{row.activity_name}</option>) : <><option value="ENGINEERING">Engineering</option><option value="FABRICATION">Fabrication</option><option value="CONSULTING">Consulting</option><option value="SUPPORT">Support</option></>}
                   </select>
                 </div>
                 <div>
@@ -820,7 +907,8 @@ export default function ProjectsPage() {
                   <input
                     type="number"
                     step="0.01"
-                    required
+                    required={!formTimesheet.activity_type_id}
+                    disabled={!!formTimesheet.activity_type_id}
                     value={formTimesheet.billing_rate}
                     onChange={(e) => setFormTimesheet({ ...formTimesheet, billing_rate: e.target.value })}
                     className="w-full px-3 py-2 text-sm border border-stone-300 rounded-lg"
@@ -831,7 +919,8 @@ export default function ProjectsPage() {
                   <input
                     type="number"
                     step="0.01"
-                    required
+                    required={!formTimesheet.activity_type_id}
+                    disabled={!!formTimesheet.activity_type_id}
                     value={formTimesheet.costing_rate}
                     onChange={(e) => setFormTimesheet({ ...formTimesheet, costing_rate: e.target.value })}
                     className="w-full px-3 py-2 text-sm border border-stone-300 rounded-lg"

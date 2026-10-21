@@ -44,7 +44,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 
-type TabType = "leads" | "pipeline" | "campaigns" | "tickets" | "appointments" | "slas" | "warranty";
+type TabType = "leads" | "pipeline" | "campaigns" | "tickets" | "appointments" | "slas" | "warranty" | "support-reports";
 
 const STAGES = [
   { id: "PROSPECTING", label: "Prospecting", prob: 10, color: "bg-stone-100 text-stone-700 border-stone-300" },
@@ -158,6 +158,8 @@ export default function CRMSupportPage() {
   const [verificationResult, setVerificationResult] = useState<any | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [claims, setClaims] = useState<any[]>([]);
+  const [supportReport, setSupportReport] = useState<any | null>(null);
+  const [supportSlaReport, setSupportSlaReport] = useState<any | null>(null);
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [claimSerial, setClaimSerial] = useState("");
   const [claimCustomerId, setClaimCustomerId] = useState("");
@@ -193,6 +195,8 @@ export default function CRMSupportPage() {
         custData,
         itemData,
         appData,
+        supportOverview,
+        supportSla,
       ] = await Promise.all([
         api.getLeads({ search: leadSearch || undefined, status: leadStatusFilter || undefined }).catch(() => []),
         api.getOpportunities({ search: oppSearch || undefined }).catch(() => []),
@@ -205,6 +209,8 @@ export default function CRMSupportPage() {
         api.getCustomers().catch(() => []),
         api.getItems().catch(() => []),
         api.getAppointments({ status: appointmentStatusFilter || undefined }).catch(() => []),
+        api.getSupportReportOverview().catch(() => null),
+        api.getSupportSlaReport().catch(() => null),
       ]);
 
       setLeads(leadData);
@@ -218,6 +224,8 @@ export default function CRMSupportPage() {
       setCustomers(custData);
       setCatalogItems(itemData);
       setAppointments(appData);
+      setSupportReport(supportOverview);
+      setSupportSlaReport(supportSla);
 
       if (selectedAppointment) {
         const foundApp = appData.find((a: any) => a.appointment_id === selectedAppointment.appointment_id);
@@ -814,6 +822,7 @@ export default function CRMSupportPage() {
           { id: "appointments", label: "Appointments & Meetings", icon: Calendar, count: appointments.filter((a) => a.status === "SCHEDULED" || a.status === "CONFIRMED").length },
           { id: "slas", label: "SLA Matrices", icon: Sliders, count: slas.length },
           { id: "warranty", label: "Warranty Claims & RMA", icon: Award, count: claims.length },
+          { id: "support-reports", label: "Support Reports", icon: TrendingUp },
         ].map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.id;
@@ -2113,6 +2122,24 @@ export default function CRMSupportPage() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "support-reports" && (
+        <div className="space-y-5">
+          <div><h2 className="text-lg font-semibold text-stone-900">Support Performance</h2><p className="text-sm text-stone-500">Ticket workload, SLA response and resolution, and warranty claim outcomes.</p></div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              ["Tickets", supportReport?.issue_count ?? 0],
+              ["Open", supportReport?.open_count ?? 0],
+              ["Open SLA Breaches", supportReport?.sla_breached_open_count ?? 0],
+              ["Warranty Claims", supportReport?.warranty_claim_count ?? 0],
+            ].map(([label, value]) => <div key={label} className="rounded-xl border border-stone-200 bg-white p-5"><div className="text-xs uppercase tracking-wide text-stone-500">{label}</div><div className="mt-2 text-2xl font-bold text-stone-900">{value}</div></div>)}
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <section className="rounded-xl border border-stone-200 bg-white p-5"><h3 className="font-semibold text-stone-900">Ticket & Warranty Breakdown</h3><div className="mt-4 grid grid-cols-2 gap-4 text-sm"><div><h4 className="mb-2 text-xs font-semibold uppercase text-stone-500">By status</h4>{Object.entries(supportReport?.by_status || {}).map(([key, value]) => <div key={key} className="flex justify-between border-b py-1"><span>{key}</span><b>{value as any}</b></div>)}</div><div><h4 className="mb-2 text-xs font-semibold uppercase text-stone-500">By priority</h4>{Object.entries(supportReport?.by_priority || {}).map(([key, value]) => <div key={key} className="flex justify-between border-b py-1"><span>{key}</span><b>{value as any}</b></div>)}<h4 className="mb-2 mt-4 text-xs font-semibold uppercase text-stone-500">Warranty status</h4>{Object.entries(supportReport?.warranty_claims_by_status || {}).map(([key, value]) => <div key={key} className="flex justify-between border-b py-1"><span>{key}</span><b>{value as any}</b></div>)}</div></div></section>
+            <section className="rounded-xl border border-stone-200 bg-white p-5"><h3 className="font-semibold text-stone-900">SLA Performance by Priority</h3><div className="mt-4 overflow-x-auto"><table className="w-full text-left text-xs"><thead className="text-stone-500"><tr><th className="py-2">Priority</th><th className="py-2">Tickets</th><th className="py-2">Response Breaches</th><th className="py-2">Resolution Breaches</th><th className="py-2">Avg Response</th><th className="py-2">Avg Resolution</th></tr></thead><tbody className="divide-y">{supportSlaReport?.by_priority?.map((row: any) => <tr key={row.priority}><td className="py-2 font-semibold">{row.priority}</td><td>{row.ticket_count}</td><td className="text-rose-700">{row.response_breaches}</td><td className="text-rose-700">{row.resolution_breaches}</td><td>{row.average_response_hours == null ? "—" : `${row.average_response_hours}h`}</td><td>{row.average_resolution_hours == null ? "—" : `${row.average_resolution_hours}h`}</td></tr>)}</tbody></table>{!supportSlaReport?.by_priority?.length && <p className="py-6 text-center text-sm text-stone-500">No support tickets in the reporting period.</p>}</div><div className="mt-3 text-xs text-stone-500">Avg open age: {supportReport?.average_open_age_hours == null ? "—" : `${supportReport.average_open_age_hours} hours`}</div></section>
           </div>
         </div>
       )}

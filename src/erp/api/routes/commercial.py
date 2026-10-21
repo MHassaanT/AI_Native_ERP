@@ -866,3 +866,32 @@ async def generate_quote_pdf(quote: QuotationData):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"PDF generation failed: {e!s}",
         ) from e
+
+
+@router.get("/delivery-notes", summary="List tenant delivery notes and invoice status")
+async def list_delivery_notes(tenant_id: TenantIdDep, db: DbSessionDep):
+    notes = (await db.scalars(
+        select(DeliveryNote)
+        .options(selectinload(DeliveryNote.items), selectinload(DeliveryNote.customer))
+        .where(DeliveryNote.tenant_id == tenant_id)
+        .order_by(DeliveryNote.delivery_date.desc(), DeliveryNote.delivery_note_number.desc())
+        .limit(500)
+    )).all()
+    invoice_ids = [note.delivery_note_id for note in notes]
+    invoices = (await db.scalars(select(SalesInvoice).where(
+        SalesInvoice.tenant_id == tenant_id,
+        SalesInvoice.delivery_note_id.in_(invoice_ids) if invoice_ids else SalesInvoice.delivery_note_id.is_(None),
+    ))).all()
+    invoice_by_note = {invoice.delivery_note_id: invoice for invoice in invoices if invoice.delivery_note_id}
+    return [{
+        "delivery_note_id": note.delivery_note_id,
+        "delivery_note_number": note.delivery_note_number,
+        "order_id": note.order_id,
+        "customer_id": note.customer_id,
+        "customer_name": note.customer.customer_name if note.customer else "",
+        "delivery_date": note.delivery_date,
+        "status": note.status,
+        "item_count": len(note.items),
+        "invoice_id": invoice_by_note[note.delivery_note_id].invoice_id if note.delivery_note_id in invoice_by_note else None,
+        "invoice_number": invoice_by_note[note.delivery_note_id].invoice_number if note.delivery_note_id in invoice_by_note else None,
+    } for note in notes]

@@ -51,6 +51,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Workspace & AI",
     items: [
       { href: "/overview", label: "Overview", icon: LayoutDashboard },
+      { href: "/operational-settings", label: "Stock & Buying Settings", icon: Wrench },
+      { href: "/master-data", label: "Master Data", icon: Layers },
       { href: "/inbox", label: "Email / RFQ Hub", icon: Mail },
       { href: "/workflows", label: "Workflow Runs", icon: Activity },
     ],
@@ -60,6 +62,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/workforce", label: "Workforce & Shifts", icon: Users },
       { href: "/recruitment", label: "Recruitment & Screening", icon: Briefcase },
+      { href: "/full-and-final", label: "Full & Final Settlement", icon: FileCheck },
       { href: "/projects", label: "Projects & Timesheets", icon: Briefcase },
     ],
   },
@@ -67,7 +70,10 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Commercial & Support",
     items: [
       { href: "/commercial", label: "Commercial & Sales", icon: DollarSign },
+      { href: "/delivery-notes", label: "Delivery Notes", icon: Truck },
+      { href: "/loyalty", label: "Customer Loyalty", icon: Store },
       { href: "/crm", label: "CRM & Support Desk", icon: Headset },
+      { href: "/reports/enterprise", label: "Enterprise Reports", icon: BarChart3 },
       { href: "/whatsapp", label: "WhatsApp Support", icon: MessageCircle },
     ],
   },

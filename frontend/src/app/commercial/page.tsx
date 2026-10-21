@@ -15,6 +15,7 @@ import {
   Building,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseBShortcuts } from "@/components/phase-b-shortcuts";
 
 interface Customer {
   customer_id: string;
@@ -366,6 +367,8 @@ export default function CommercialPage() {
           </p>
         </div>
       </div>
+
+      <PhaseBShortcuts area="selling" />
 
       {/* Grid: Dynamic Pricing Engine + Quote Invalidator */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

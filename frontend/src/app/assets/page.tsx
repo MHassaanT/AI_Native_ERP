@@ -23,13 +23,20 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 
-type TabType = "registry" | "categories" | "locations";
+type TabType = "registry" | "categories" | "locations" | "maintenance";
 
 export default function AssetsPage() {
   const [activeTab, setActiveTab] = useState<TabType>("registry");
   const [assets, setAssets] = useState<any[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
+  const [maintenanceTeams, setMaintenanceTeams] = useState<any[]>([]);
+  const [valueAdjustments, setValueAdjustments] = useState<any[]>([]);
+  const [teamName, setTeamName] = useState("");
+  const [teamDescription, setTeamDescription] = useState("");
+  const [teamEmployeeId, setTeamEmployeeId] = useState("");
+  const [adjustmentValue, setAdjustmentValue] = useState("");
+  const [adjustmentReason, setAdjustmentReason] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -87,14 +94,18 @@ export default function AssetsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [aData, cData, lData] = await Promise.all([
+      const [aData, cData, lData, teams, adjustments] = await Promise.all([
         api.getAssets(),
         api.getAssetCategories(),
         api.getAssetLocations(),
+        api.getAssetMaintenanceTeams(),
+        api.getAssetValueAdjustments(),
       ]);
       setAssets(aData);
       setCategories(cData);
       setLocations(lData);
+      setMaintenanceTeams(teams || []);
+      setValueAdjustments(adjustments || []);
       if (cData.length > 0 && !formAsset.asset_category_id) {
         setFormAsset((prev) => ({ ...prev, asset_category_id: cData[0].category_id }));
       }
@@ -103,6 +114,25 @@ export default function AssetsPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleCreateMaintenanceTeam = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createAssetMaintenanceTeam({ team_name: teamName, description: teamDescription || null,
+        members: teamEmployeeId ? [{ employee_id: teamEmployeeId, role: "Technician" }] : [] });
+      setTeamName(""); setTeamDescription(""); await loadData();
+    } catch (err: any) { setError(err.message || "Failed to create maintenance team."); }
+  };
+
+  const handleValueAdjustment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedAsset) return;
+    try {
+      await api.adjustAssetValue(selectedAsset.asset_id, { new_book_value: adjustmentValue,
+        adjustment_date: new Date().toISOString().slice(0, 10), reason: adjustmentReason });
+      setAdjustmentValue(""); setAdjustmentReason(""); await openAssetDetail(selectedAsset.asset_id); await loadData();
+    } catch (err: any) { setError(err.message || "Failed to adjust asset value."); }
   };
 
   useEffect(() => {
@@ -353,6 +383,9 @@ export default function AssetsPage() {
         >
           Locations ({locations.length})
         </button>
+        <button onClick={() => setActiveTab("maintenance")} className={`pb-3 text-sm font-medium border-b-2 transition-colors ${activeTab === "maintenance" ? "border-stone-900 text-stone-900" : "border-transparent text-stone-500 hover:text-stone-800"}`}>
+          Maintenance & Value
+        </button>
       </div>
 
       {/* Tab 1: Asset Registry */}
@@ -492,6 +525,25 @@ export default function AssetsPage() {
         </div>
       )}
 
+      {activeTab === "maintenance" && (
+        <div className="grid gap-5 xl:grid-cols-2">
+          <section className="bg-white border border-stone-200 rounded-xl p-5 space-y-4">
+            <div><h2 className="text-sm font-semibold text-stone-900">Asset Maintenance Teams</h2><p className="text-xs text-stone-500 mt-1">Assign employees to asset maintenance teams.</p></div>
+            <form onSubmit={handleCreateMaintenanceTeam} className="space-y-2">
+              <input required minLength={2} value={teamName} onChange={(e) => setTeamName(e.target.value)} placeholder="Team name" className="w-full px-3 py-2 text-sm border rounded-lg" />
+              <input value={teamDescription} onChange={(e) => setTeamDescription(e.target.value)} placeholder="Description (optional)" className="w-full px-3 py-2 text-sm border rounded-lg" />
+              <input value={teamEmployeeId} onChange={(e) => setTeamEmployeeId(e.target.value)} placeholder="Employee UUID (optional member)" className="w-full px-3 py-2 text-sm border rounded-lg font-mono" />
+              <button className="px-4 py-2 text-sm bg-stone-900 text-white rounded-lg">Create team</button>
+            </form>
+            <div className="divide-y border-t">{maintenanceTeams.map((team) => <div key={team.team_id} className="py-3"><div className="font-medium text-sm text-stone-900">{team.team_name}</div><div className="text-xs text-stone-500">{team.description || "No description"} · {team.members.length} member(s)</div>{team.members.map((member: any) => <div key={member.member_id} className="mt-1 text-[11px] font-mono text-stone-500">{member.employee_id} {member.role ? `· ${member.role}` : ""}</div>)}</div>)}</div>
+          </section>
+          <section className="bg-white border border-stone-200 rounded-xl p-5 space-y-4">
+            <div><h2 className="text-sm font-semibold text-stone-900">Asset Value Adjustment History</h2><p className="text-xs text-stone-500 mt-1">Revaluations are journaled and preserve previous and resulting carrying values.</p></div>
+            <div className="space-y-2">{valueAdjustments.length === 0 ? <p className="py-8 text-center text-sm text-stone-500">No asset revaluations recorded.</p> : valueAdjustments.map((row) => <div key={row.adjustment_id} className="rounded-lg border p-3"><div className="flex justify-between text-sm"><span className="font-mono text-stone-700">{assets.find((asset) => asset.asset_id === row.asset_id)?.asset_code || row.asset_id}</span><span className={Number(row.adjustment_amount) >= 0 ? "text-emerald-700" : "text-rose-700"}>{Number(row.adjustment_amount) >= 0 ? "+" : ""}{Number(row.adjustment_amount).toFixed(2)}</span></div><div className="mt-1 text-xs text-stone-500">{row.adjustment_date} · {row.reason}</div><div className="mt-1 text-[11px] text-stone-400">{Number(row.previous_book_value).toFixed(2)} → {Number(row.new_book_value).toFixed(2)} · {row.status}</div></div>)}</div>
+          </section>
+        </div>
+      )}
+
       {/* Asset Lifecycle Detail Drawer */}
       {selectedAsset && (
         <div className="fixed inset-0 z-50 bg-stone-900/40 backdrop-blur-sm flex justify-end">
@@ -542,6 +594,7 @@ export default function AssetsPage() {
                 <Wrench className="w-3.5 h-3.5" />
                 Record Repair
               </button>
+              <button onClick={() => setAdjustmentValue(String(selectedAsset.current_book_value ?? ""))} disabled={selectedAsset.status === "SCRAPPED" || selectedAsset.status === "SOLD"} className="flex-1 py-2 text-xs font-medium text-stone-700 bg-stone-50 border border-stone-200 hover:bg-stone-100 rounded-lg">Adjust Value</button>
               <button
                 onClick={handleScrapAsset}
                 disabled={selectedAsset.status === "SCRAPPED"}
@@ -551,6 +604,14 @@ export default function AssetsPage() {
                 Scrap
               </button>
             </div>
+
+            {adjustmentValue !== "" && <form onSubmit={handleValueAdjustment} className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2">
+              <h3 className="text-sm font-semibold text-stone-900">Record Book Value Adjustment</h3>
+              <input required type="number" min="0" step="0.0001" value={adjustmentValue} onChange={(e) => setAdjustmentValue(e.target.value)} className="w-full px-3 py-2 text-sm border rounded-lg" aria-label="New book value" />
+              <input required minLength={3} value={adjustmentReason} onChange={(e) => setAdjustmentReason(e.target.value)} placeholder="Reason for revaluation" className="w-full px-3 py-2 text-sm border rounded-lg" />
+              <button className="px-3 py-2 text-xs bg-stone-900 text-white rounded-lg">Post adjustment</button>
+              <button type="button" onClick={() => { setAdjustmentValue(""); setAdjustmentReason(""); }} className="ml-2 px-3 py-2 text-xs text-stone-600">Cancel</button>
+            </form>}
 
             {/* Financial Summary */}
             <div className="grid grid-cols-3 gap-3 bg-stone-50 rounded-xl p-4 border border-stone-200">

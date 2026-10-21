@@ -38,6 +38,9 @@ class Item(Base, TenantMixin, TimestampMixin):
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
     category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    item_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("item_groups.item_group_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     package_quantity: Mapped[str | None] = mapped_column(String(128), nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     stock_uom: Mapped[str] = mapped_column(String(32), nullable=False, default="Nos")
@@ -67,6 +70,7 @@ class Item(Base, TenantMixin, TimestampMixin):
     has_serial_no: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     parent_item = relationship("Item", remote_side=[item_id])
+    item_group = relationship("ItemGroup")
 
     __table_args__ = (Index("idx_item_tenant_code", "tenant_id", "item_code", unique=True),)
 

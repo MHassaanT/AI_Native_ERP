@@ -15,6 +15,7 @@ from erp.api.routes.inventory_rop import router as inventory_rop_router
 from erp.api.routes.iot_telemetry import router as iot_telemetry_router
 from erp.api.routes.ledger import router as ledger_router
 from erp.api.routes.maintenance import router as maintenance_router
+from erp.api.routes.master_data import router as master_data_router
 from erp.api.routes.mcp import router as mcp_router
 from erp.api.routes.onboarding import router as onboarding_router
 from erp.api.routes.payroll import router as payroll_router
@@ -53,6 +54,7 @@ __all__ = [
     "iot_telemetry_router",
     "ledger_router",
     "maintenance_router",
+    "master_data_router",
     "mcp_router",
     "onboarding_router",
     "payroll_router",

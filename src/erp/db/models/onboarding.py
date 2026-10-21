@@ -44,6 +44,11 @@ class TenantSettings(Base, TenantMixin, TimestampMixin):
     margin_floor_pct: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, default=Decimal("22.00")
     )
+    auto_material_request: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    allow_negative_stock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    over_receipt_percentage: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("0.00"))
+    over_billing_percentage: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("0.00"))
+    backflush_based_on: Mapped[str] = mapped_column(String(32), nullable=False, default="BOM")
 
     tenant: Mapped["Tenant"] = relationship(back_populates="settings")  # type: ignore[name-defined] # noqa: F821
 

@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 
 from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.db.models.inventory import Item, ItemTodo, StockLedgerEntry, StockLevel, Warehouse
+from erp.db.models.shared_master import ItemGroup
 from erp.db.models.purchasing import PurchaseOrder, PurchaseOrderItem, Supplier
 from erp.db.models.sales import (
     Customer,
@@ -42,6 +43,7 @@ class CreateItemRequest(BaseModel):
     barcode: str | None = Field(default=None, max_length=64)
     brand: str | None = Field(default=None, max_length=255)
     category: str | None = Field(default=None, max_length=255)
+    item_group_id: uuid.UUID | None = None
     package_quantity: str | None = Field(default=None, max_length=128)
     image_url: str | None = None
     is_stock_item: bool = True
@@ -55,6 +57,7 @@ class UpdateItemRequest(BaseModel):
     barcode: str | None = Field(default=None, max_length=64)
     brand: str | None = Field(default=None, max_length=255)
     category: str | None = Field(default=None, max_length=255)
+    item_group_id: uuid.UUID | None = None
     package_quantity: str | None = Field(default=None, max_length=128)
     image_url: str | None = None
     stock_uom: str | None = Field(default=None, max_length=32)
@@ -119,6 +122,7 @@ def _build_inventory_records(
         barcode=req.barcode,
         brand=req.brand,
         category=req.category,
+        item_group_id=req.item_group_id,
         package_quantity=req.package_quantity,
         image_url=req.image_url,
         stock_uom=req.stock_uom,
@@ -189,6 +193,8 @@ async def list_inventory_items(tenant_id: TenantIdDep, db: DbSessionDep):
         .order_by(Item.item_code.asc())
     )
     rows = (await db.execute(stmt)).all()
+    item_groups = (await db.scalars(select(ItemGroup).where(ItemGroup.tenant_id == tenant_id))).all()
+    group_names = {group.item_group_id: group.group_name for group in item_groups}
 
     items = []
     for item, curr_qty, res_qty, avail_qty, val_rate in rows:
@@ -201,6 +207,8 @@ async def list_inventory_items(tenant_id: TenantIdDep, db: DbSessionDep):
                 "barcode": item.barcode,
                 "brand": item.brand,
                 "category": item.category,
+                "item_group_id": str(item.item_group_id) if item.item_group_id else None,
+                "item_group_name": group_names.get(item.item_group_id),
                 "package_quantity": item.package_quantity,
                 "image_url": item.image_url,
                 "stock_uom": item.stock_uom,
@@ -231,6 +239,12 @@ async def create_inventory_item(req: CreateItemRequest, tenant_id: TenantIdDep, 
             detail=f"Item with code '{req.item_code}' already exists.",
         )
 
+    if req.item_group_id:
+        group = await db.scalar(select(ItemGroup.item_group_id).where(
+            ItemGroup.item_group_id == req.item_group_id, ItemGroup.tenant_id == tenant_id, ItemGroup.is_active.is_(True)
+        ))
+        if not group:
+            raise HTTPException(status_code=422, detail="Item group must belong to this workspace and be active.")
     warehouse = await _default_warehouse(tenant_id, db)
     return await _create_item(req, tenant_id, warehouse, db)
 
@@ -594,6 +608,12 @@ async def update_inventory_item(
     ).scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Inventory item not found.")
+    if req.item_group_id:
+        group = await db.scalar(select(ItemGroup.item_group_id).where(
+            ItemGroup.item_group_id == req.item_group_id, ItemGroup.tenant_id == tenant_id, ItemGroup.is_active.is_(True)
+        ))
+        if not group:
+            raise HTTPException(status_code=422, detail="Item group must belong to this workspace and be active.")
     for field, value in req.model_dump(exclude_unset=True).items():
         setattr(item, field, value)
     await db.flush()

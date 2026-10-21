@@ -82,6 +82,9 @@ class Employee(Base, TenantMixin, TimestampMixin):
     reports_to_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("employees.employee_id"), nullable=True
     )
+    employee_grade_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employee_grades.employee_grade_id", ondelete="SET NULL"), nullable=True
+    )
     gender: Mapped[str | None] = mapped_column(String(32), nullable=True)
     date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
     date_of_joining: Mapped[date | None] = mapped_column(Date, nullable=True)

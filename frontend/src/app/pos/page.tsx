@@ -28,6 +28,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { PhaseBShortcuts } from "@/components/phase-b-shortcuts";
 import { getUser } from "@/lib/auth";
 
 interface POSProfile {
@@ -729,6 +730,8 @@ export default function POSPage() {
       )}
 
       {/* Main Terminal Workspace */}
+      <PhaseBShortcuts area="pos" />
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Product Catalog & Fast Search (7 cols) */}
         <div className="lg:col-span-7 space-y-4">
