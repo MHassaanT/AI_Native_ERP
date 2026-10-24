@@ -86,6 +86,10 @@ class CandidateApplication(Base, TenantMixin, TimestampMixin):
     )
 
     __table_args__ = (
+        # Required by tenant-scoped relationships such as Interview.
+        UniqueConstraint(
+            "application_id", "tenant_id", name="uq_candidate_application_tenant"
+        ),
         ForeignKeyConstraint(
             ["role_id", "tenant_id"],
             ["recruitment_roles.role_id", "recruitment_roles.tenant_id"],

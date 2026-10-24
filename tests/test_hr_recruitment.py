@@ -199,6 +199,7 @@ def test_recruitment_models_enforce_tenant_role_relationship_and_score_range():
         if constraint.name
     }
     assert "fk_candidate_application_role_tenant" in application_constraints
+    assert "uq_candidate_application_tenant" in application_constraints
     assert "ck_candidate_application_score" in application_constraints
     assert "tenant_id" in RecruitmentRole.__table__.columns
     assert "uq_recruitment_email_review_message" in {
