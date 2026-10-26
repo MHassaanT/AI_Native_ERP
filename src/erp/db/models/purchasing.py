@@ -85,6 +85,15 @@ class PurchaseOrder(Base, TenantMixin, TimestampMixin):
     material_request_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("material_requests.mr_id"), nullable=True
     )
+    supplier_quotation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("supplier_quotations.sq_id", name="fk_purchase_orders_supplier_quotation"), nullable=True
+    )
+    required_by_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    department: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.project_id", name="fk_purchase_orders_project"), nullable=True)
+    cost_center_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("cost_centers.cost_center_id", name="fk_purchase_orders_cost_center"), nullable=True)
+    attachments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    source_warehouse_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id", name="fk_purchase_orders_source_warehouse"), nullable=True)
     supplier_contact_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("contacts.contact_id"), nullable=True
     )
@@ -294,6 +303,7 @@ class SupplierInvoice(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("goods_receipt_notes.grn_id"), nullable=True
     )
     invoice_date: Mapped[date] = mapped_column(Date, nullable=False)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     purchase_tax_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("purchase_taxes_and_charges_templates.template_id"), nullable=True)
     tax_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
@@ -397,6 +407,7 @@ class MaterialRequest(Base, TenantMixin, TimestampMixin):
         String(32), nullable=False, default="PURCHASE"  # PURCHASE, MATERIAL_TRANSFER, MATERIAL_ISSUE, MANUFACTURE
     )
     schedule_date: Mapped[date] = mapped_column(Date, nullable=False)
+    required_by_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="DRAFT"  # DRAFT, SUBMITTED, ORDERED, PARTIALLY_ORDERED, CANCELLED
     )
@@ -409,6 +420,12 @@ class MaterialRequest(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("terms_and_conditions_templates.terms_template_id"), nullable=True
     )
     terms_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    department: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.project_id", name="fk_material_requests_project"), nullable=True)
+    cost_center_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("cost_centers.cost_center_id", name="fk_material_requests_cost_center"), nullable=True)
+    attachments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    source_warehouse_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id", name="fk_material_requests_source_warehouse"), nullable=True)
+    amended_from_mr_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("material_requests.mr_id", name="fk_material_requests_amended_from"), nullable=True)
 
     items: Mapped[list["MaterialRequestItem"]] = relationship(
         back_populates="material_request", cascade="all, delete-orphan"
@@ -439,10 +456,19 @@ class MaterialRequestItem(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=True
     )
     uom: Mapped[str] = mapped_column(String(32), nullable=False, default="Nos")
+    uom_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("uoms.uom_id", name="fk_material_request_item_uom"), nullable=True)
+    conversion_factor: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("1"))
+    stock_quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    source_mr_item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("material_request_items.mr_item_id", name="fk_material_request_item_source"), nullable=True)
 
     material_request: Mapped["MaterialRequest"] = relationship(back_populates="items")
     item = relationship("Item")
     target_warehouse = relationship("Warehouse", foreign_keys=[target_warehouse_id])
+
+    __table_args__ = (
+        CheckConstraint("conversion_factor > 0", name="ck_mr_item_conversion_positive"),
+        CheckConstraint("stock_quantity >= 0", name="ck_mr_item_stock_quantity_nonnegative"),
+    )
 
 
 # =========================================================================
@@ -589,6 +615,9 @@ class SupplierQuotationItem(Base, TenantMixin, TimestampMixin):
     )
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     lead_time_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    uom_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("uoms.uom_id", name="fk_supplier_quotation_item_uom"), nullable=True)
+    conversion_factor: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("1.00000000"))
+    stock_quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0.0000"))
 
     supplier_quotation: Mapped["SupplierQuotation"] = relationship(back_populates="items")
     item = relationship("Item")

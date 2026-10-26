@@ -13,6 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from erp.db.models.inventory import Item, StockLayerConsumption, StockLedgerEntry, StockLevel, StockValuationLayer, Warehouse
+from erp.db.models.ledger import GeneralLedgerEntry as GL
+from erp.db.models.billing import (
+    CreditNote, CreditNoteItem, POSInvoice, POSInvoiceItem, POSOpeningEntry,
+    POSProfile,
+)
 from erp.db.models.purchasing import (
     GoodsReceiptNote, GoodsReceiptNoteItem, MaterialRequest, MaterialRequestItem,
     PurchaseOrder, PurchaseOrderItem, Supplier, SupplierInvoice, SupplierInvoiceItem,
@@ -22,6 +27,7 @@ from erp.db.models.sales import (
     SalesOrder, SalesOrderItem, SalesQuotation,
 )
 from erp.db.models.phase_b import SalesPartner, SalesTeam
+from erp.workflows.reports.party_ledger_service import party_ledger_service
 from erp.db.models.shared_master import UOM
 from erp.db.models.support import Issue
 from erp.db.models.hr import (
@@ -74,7 +80,9 @@ class EnterpriseReportsService:
                   as_of_date: date | None = None, month: int | None = None,
                   fiscal_year: int | None = None, item_id: uuid.UUID | None = None,
                   party_id: uuid.UUID | None = None, currency: str | None = None,
-                  territory: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
+                  territory: str | None = None, granularity: str = "month",
+                  status_filter: str | None = None, page: int = 1,
+                  page_size: int = 50) -> dict[str, Any] | list[dict[str, Any]]:
         as_of_date = as_of_date or to_date or date.today()
         period = (from_date, to_date)
 
@@ -200,56 +208,99 @@ class EnterpriseReportsService:
                               "delivered_quantity": r.delivered_quantity} for r in rows]}
 
         if name in {"customer-ledger-summary", "supplier-ledger-summary"}:
-            if name.startswith("customer"):
-                entity, inv, date_col, id_col, label = Customer, SalesInvoice, SalesInvoice.invoice_date, SalesInvoice.customer_id, "customer"
-                amount = SalesInvoice.total_amount
-                join_cond = SalesInvoice.customer_id == Customer.customer_id
-                status_col = SalesInvoice.status
-                paid_values = ("PAID",)
-            else:
-                entity, inv, date_col, id_col, label = Supplier, SupplierInvoice, SupplierInvoice.invoice_date, SupplierInvoice.supplier_id, "supplier"
-                amount = SupplierInvoice.total_amount
-                join_cond = SupplierInvoice.supplier_id == Supplier.supplier_id
-                status_col = SupplierInvoice.matching_status
-                paid_values = ("POSTED", "MATCHED")
-            stmt = select(entity, func.count(inv.invoice_id), func.coalesce(func.sum(amount), 0),
-                          func.coalesce(func.sum(case((status_col.in_(paid_values), amount), else_=0)), 0)).join(inv, join_cond).where(entity.tenant_id == tenant_id, inv.tenant_id == tenant_id, *self._period(date_col, *period)).group_by(entity).order_by(func.sum(amount).desc())
-            rows = (await db.execute(stmt)).all()
-            return [{"id": str(e.customer_id if label == "customer" else e.supplier_id), "name": e.customer_name if label == "customer" else e.supplier_name,
-                     "invoice_count": int(n), "invoiced": total, "settled_or_posted": settled, "open_balance_estimate": total - settled} for e, n, total, settled in rows]
+            return await party_ledger_service.summary(
+                db, tenant_id, "CUSTOMER" if name.startswith("customer") else "SUPPLIER",
+                from_date, to_date, currency,
+            )
 
         if name == "gross-profit-analysis":
-            # Historical line-level COGS is not stored on invoice lines. Use the
-            # outbound stock ledger rate for linked delivery notes; otherwise use
-            # current item standard_rate and flag the estimate in the payload.
-            delivery_cost = select(
-                StockLedgerEntry.source_document_id.label("delivery_note_id"),
-                StockLedgerEntry.item_id.label("item_id"),
-                (func.sum(StockLedgerEntry.actual_qty * StockLedgerEntry.outgoing_rate)
-                 / func.nullif(func.sum(StockLedgerEntry.actual_qty), 0)).label("weighted_rate"),
-            ).where(
-                StockLedgerEntry.tenant_id == tenant_id,
-                StockLedgerEntry.source_document_type == "DELIVERY_NOTE",
-                StockLedgerEntry.actual_qty < 0,
-                StockLedgerEntry.is_cancelled.is_(False),
-            ).group_by(StockLedgerEntry.source_document_id, StockLedgerEntry.item_id).subquery()
-            cost = func.coalesce(delivery_cost.c.weighted_rate, Item.standard_rate, 0)
-            stmt = select(Item.item_id, Item.item_code, Item.item_name, Customer.customer_id,
-                          Customer.customer_name, func.sum(SalesInvoiceItem.line_total).label("revenue"),
-                          func.sum(SalesInvoiceItem.quantity * cost).label("estimated_cost"))\
-                .join(SalesInvoice, SalesInvoice.invoice_id == SalesInvoiceItem.invoice_id)\
-                .join(Customer, Customer.customer_id == SalesInvoice.customer_id)\
-                .join(Item, Item.item_id == SalesInvoiceItem.item_id)\
-                .outerjoin(DeliveryNote, DeliveryNote.delivery_note_id == SalesInvoice.delivery_note_id)\
-                .outerjoin(delivery_cost, (delivery_cost.c.delivery_note_id == DeliveryNote.delivery_note_id) & (delivery_cost.c.item_id == Item.item_id))\
-                .where(SalesInvoice.tenant_id == tenant_id, SalesInvoiceItem.tenant_id == tenant_id, Item.tenant_id == tenant_id, Customer.tenant_id == tenant_id, SalesInvoice.status != "CANCELLED", *self._period(SalesInvoice.invoice_date, *period))\
-                .group_by(Item.item_id, Item.item_code, Item.item_name, Customer.customer_id, Customer.customer_name)
+            # Invoice/delivery costs are frozen at dispatch. Credit notes reverse
+            # their linked invoice-line cost, so later item-rate edits cannot
+            # rewrite historical margins.
+            invoice_cost = func.coalesce(SalesInvoiceItem.cost_amount,
+                SalesInvoiceItem.quantity * Item.standard_rate, 0)
+            invoice_estimated = func.coalesce(SalesInvoiceItem.cost_is_estimated, True)
+            sales_lines = select(
+                Item.item_id.label("item_id"), Item.item_code.label("item_code"), Item.item_name.label("item_name"),
+                Customer.customer_id.label("customer_id"), Customer.customer_name.label("customer_name"),
+                SalesInvoice.currency.label("currency"), SalesInvoiceItem.line_total.label("revenue"),
+                case((invoice_estimated.is_(True), 0), else_=invoice_cost).label("recorded_cost"),
+                case((invoice_estimated.is_(True), invoice_cost), else_=0).label("estimated_cost"),
+                invoice_estimated.label("cost_estimated"),
+            ).join(SalesInvoice, SalesInvoice.invoice_id == SalesInvoiceItem.invoice_id)\
+             .join(Customer, Customer.customer_id == SalesInvoice.customer_id)\
+             .join(Item, Item.item_id == SalesInvoiceItem.item_id)\
+             .where(SalesInvoice.tenant_id == tenant_id, SalesInvoiceItem.tenant_id == tenant_id,
+                    Customer.tenant_id == tenant_id, Item.tenant_id == tenant_id,
+                    SalesInvoice.status != "CANCELLED", *self._period(SalesInvoice.invoice_date, *period))
+
+            return_cost = func.coalesce(CreditNoteItem.cost_amount,
+                CreditNoteItem.quantity * Item.standard_rate, 0)
+            return_estimated = func.coalesce(CreditNoteItem.cost_is_estimated, True)
+            return_lines = select(
+                Item.item_id.label("item_id"), Item.item_code.label("item_code"), Item.item_name.label("item_name"),
+                Customer.customer_id.label("customer_id"), Customer.customer_name.label("customer_name"),
+                CreditNote.currency.label("currency"), (-CreditNoteItem.line_total).label("revenue"),
+                case((return_estimated.is_(True), 0), else_=-return_cost).label("recorded_cost"),
+                case((return_estimated.is_(True), -return_cost), else_=0).label("estimated_cost"),
+                return_estimated.label("cost_estimated"),
+            ).join(CreditNote, CreditNote.credit_note_id == CreditNoteItem.credit_note_id)\
+             .join(Customer, Customer.customer_id == CreditNote.customer_id)\
+             .join(Item, Item.item_id == CreditNoteItem.item_id)\
+             .where(CreditNote.tenant_id == tenant_id, CreditNoteItem.tenant_id == tenant_id,
+                    Customer.tenant_id == tenant_id, Item.tenant_id == tenant_id,
+                    CreditNote.status == "POSTED", *self._period(CreditNote.posting_date, *period))
+
+            pos_cost = func.coalesce(POSInvoiceItem.cost_amount,
+                POSInvoiceItem.stock_quantity * Item.standard_rate, 0)
+            pos_estimated = func.coalesce(POSInvoiceItem.cost_is_estimated, True)
+            pos_lines = select(
+                Item.item_id.label("item_id"), Item.item_code.label("item_code"), Item.item_name.label("item_name"),
+                Customer.customer_id.label("customer_id"), Customer.customer_name.label("customer_name"),
+                POSProfile.currency.label("currency"),
+                case((POSInvoice.is_return.is_(True), -POSInvoiceItem.line_total),
+                     else_=POSInvoiceItem.line_total).label("revenue"),
+                case((pos_estimated.is_(True), 0),
+                     (POSInvoice.is_return.is_(True), -pos_cost), else_=pos_cost).label("recorded_cost"),
+                case((pos_estimated.is_(True),
+                      case((POSInvoice.is_return.is_(True), -pos_cost), else_=pos_cost)),
+                     else_=0).label("estimated_cost"),
+                pos_estimated.label("cost_estimated"),
+            ).join(POSInvoice, POSInvoice.pos_invoice_id == POSInvoiceItem.pos_invoice_id)\
+             .join(POSOpeningEntry, POSOpeningEntry.opening_id == POSInvoice.opening_id)\
+             .join(POSProfile, POSProfile.profile_id == POSOpeningEntry.profile_id)\
+             .join(Customer, Customer.customer_id == POSInvoice.customer_id)\
+             .join(Item, Item.item_id == POSInvoiceItem.item_id)\
+             .where(POSInvoice.tenant_id == tenant_id, POSInvoiceItem.tenant_id == tenant_id,
+                    POSOpeningEntry.tenant_id == tenant_id, POSProfile.tenant_id == tenant_id,
+                    Customer.tenant_id == tenant_id, Item.tenant_id == tenant_id,
+                    POSInvoice.status != "CANCELLED", *self._period(POSInvoice.posting_date, *period))
+            if currency:
+                sales_lines = sales_lines.where(SalesInvoice.currency == currency.upper())
+                return_lines = return_lines.where(CreditNote.currency == currency.upper())
+                pos_lines = pos_lines.where(POSProfile.currency == currency.upper())
+            lines = sales_lines.union_all(return_lines, pos_lines).subquery()
+            stmt = select(
+                lines.c.item_id, lines.c.item_code, lines.c.item_name,
+                lines.c.customer_id, lines.c.customer_name, lines.c.currency,
+                func.sum(lines.c.revenue).label("revenue"),
+                func.sum(lines.c.recorded_cost).label("recorded_cost"),
+                func.sum(lines.c.estimated_cost).label("estimated_cost"),
+                func.count().label("line_count"),
+                func.sum(case((lines.c.cost_estimated.is_(True), 1), else_=0)).label("estimated_line_count"),
+            ).group_by(lines.c.item_id, lines.c.item_code, lines.c.item_name,
+                       lines.c.customer_id, lines.c.customer_name, lines.c.currency)\
+             .order_by(lines.c.item_name, lines.c.customer_name, lines.c.currency)
             rows = (await db.execute(stmt)).all()
             data = [{"item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name,
-                     "customer_id": str(r.customer_id), "customer_name": r.customer_name,
-                     "revenue": r.revenue or 0, "estimated_cost": r.estimated_cost or 0,
-                     "gross_profit_estimate": (r.revenue or 0) - (r.estimated_cost or 0)} for r in rows]
-            return {"cost_basis": "Delivery Note stock ledger outgoing rate; falls back to current item standard rate", "historical_cost_is_estimated": True, "rows": data}
+                     "customer_id": str(r.customer_id), "customer_name": r.customer_name, "currency": r.currency,
+                     "revenue": r.revenue or 0, "recorded_cost": r.recorded_cost or 0,
+                     "estimated_cost": r.estimated_cost or 0,
+                     "gross_profit": (r.revenue or 0) - (r.recorded_cost or 0) - (r.estimated_cost or 0),
+                     "line_count": r.line_count, "estimated_line_count": r.estimated_line_count,
+                     "cost_snapshot_complete": not bool(r.estimated_line_count)} for r in rows]
+            return {"cost_basis": "Frozen delivery or POS stock-level valuation; linked credit notes and POS returns reverse source cost.",
+                    "legacy_estimates_are_flagged": True, "rows": data}
 
         trend_sources = {
             "sales-invoice-trends": (SalesInvoice, SalesInvoice.invoice_date, SalesInvoice.total_amount, SalesInvoice.status, "invoice"),
@@ -260,6 +311,128 @@ class EnterpriseReportsService:
         }
         if name in trend_sources:
             model, date_col, amount_col, status_col, kind = trend_sources[name]
+            if name in {"sales-invoice-trends", "purchase-invoice-trends"}:
+                granularity = granularity.lower()
+                if granularity not in {"day", "month", "quarter", "year"}:
+                    raise ValueError("Trend granularity must be day, month, quarter or year.")
+                if page < 1 or not 1 <= page_size <= 200:
+                    raise ValueError("Trend page must be positive and page size must be 1–200.")
+                start = from_date or date((to_date or date.today()).year, 1, 1)
+                end = to_date or date.today()
+                if start > end:
+                    raise ValueError("From date must not exceed to date.")
+                previous_end = start - timedelta(days=1)
+                previous_start = previous_end - (end - start)
+                currency_col = model.currency
+                party_model = Customer if name == "sales-invoice-trends" else Supplier
+                party_id_col = model.customer_id if name == "sales-invoice-trends" else model.supplier_id
+                party_name_col = party_model.customer_name if name == "sales-invoice-trends" else party_model.supplier_name
+                bucket = func.date_trunc(granularity, date_col)
+                common = [model.tenant_id == tenant_id]
+                if status_filter:
+                    common.append(func.upper(status_col) == status_filter.strip().upper())
+                elif name == "sales-invoice-trends":
+                    common.append(func.upper(status_col) != "CANCELLED")
+                if currency:
+                    common.append(func.upper(currency_col) == currency.strip().upper())
+
+                current_stmt = select(bucket.label("period"), status_col.label("status"),
+                    currency_col.label("currency"), func.count().label("document_count"),
+                    func.coalesce(func.sum(amount_col), 0).label("amount"))\
+                    .where(*common, date_col >= start, date_col <= end)\
+                    .group_by(bucket, status_col, currency_col).order_by(bucket, status_col, currency_col)
+                series_rows = (await db.execute(current_stmt)).all()
+                previous_stmt = select(func.count().label("document_count"),
+                    func.coalesce(func.sum(amount_col), 0).label("amount"))\
+                    .where(*common, date_col >= previous_start, date_col <= previous_end)
+                previous = (await db.execute(previous_stmt)).one()
+                current_stmt = select(func.count().label("document_count"),
+                    func.coalesce(func.sum(amount_col), 0).label("amount"))\
+                    .where(*common, date_col >= start, date_col <= end)
+                current = (await db.execute(current_stmt)).one()
+                doc_filters = [*common, date_col >= start, date_col <= end]
+                document_count = await db.scalar(select(func.count()).select_from(model).where(*doc_filters)) or 0
+                page_docs_stmt = select(model, party_name_col.label("party_name"))\
+                    .join(party_model, party_id_col == (party_model.customer_id if name == "sales-invoice-trends" else party_model.supplier_id))\
+                    .where(*doc_filters, party_model.tenant_id == tenant_id)\
+                    .order_by(date_col.desc(), model.invoice_id.desc())\
+                    .limit(page_size).offset((page - 1) * page_size)
+                page_docs = (await db.execute(page_docs_stmt)).all()
+                invoice_ids = [doc.invoice_id for doc, _ in page_docs]
+                gl_links = {}
+                related_balances = {}
+                if invoice_ids:
+                    source_types = ("SALES_INVOICE",) if name == "sales-invoice-trends" else (
+                        "SUPPLIER_INVOICE", "AUTOMATED_AP_MATCH", "PURCHASE_INVOICE")
+                    gl_rows = (await db.execute(select(GL.source_document_id, GL.transaction_id)
+                        .where(GL.tenant_id == tenant_id, GL.source_document_type.in_(source_types),
+                               GL.source_document_id.in_(invoice_ids))
+                        .order_by(GL.created_at, GL.entry_id))).all()
+                    gl_links = {source_id: transaction_id for source_id, transaction_id in gl_rows}
+                    contra = GL.debit_amount - GL.credit_amount if name == "sales-invoice-trends" else GL.credit_amount - GL.debit_amount
+                    contra_rows = (await db.execute(select(GL.against_document_id, GL.currency,
+                        func.sum(contra).label("open_balance"))
+                        .where(GL.tenant_id == tenant_id, GL.party_type == ("CUSTOMER" if name == "sales-invoice-trends" else "SUPPLIER"),
+                               GL.against_document_type == ("SALES_INVOICE" if name == "sales-invoice-trends" else "SUPPLIER_INVOICE"),
+                               GL.against_document_id.in_(invoice_ids))
+                        .group_by(GL.against_document_id, GL.currency))).all()
+                    related_balances = {(invoice_id, row_currency): balance for invoice_id, row_currency, balance in contra_rows}
+                current_currency_stmt = select(currency_col, func.count().label("document_count"),
+                    func.coalesce(func.sum(amount_col), 0).label("amount"))\
+                    .where(*common, date_col >= start, date_col <= end).group_by(currency_col)
+                previous_currency_stmt = select(currency_col, func.count().label("document_count"),
+                    func.coalesce(func.sum(amount_col), 0).label("amount"))\
+                    .where(*common, date_col >= previous_start, date_col <= previous_end).group_by(currency_col)
+                current_by_currency = {r.currency: r for r in (await db.execute(current_currency_stmt)).all()}
+                previous_by_currency = {r.currency: r for r in (await db.execute(previous_currency_stmt)).all()}
+                currency_comparison = []
+                for code in sorted(set(current_by_currency) | set(previous_by_currency)):
+                    now = current_by_currency.get(code)
+                    before = previous_by_currency.get(code)
+                    now_amount = now.amount if now else 0
+                    before_amount = before.amount if before else 0
+                    delta = now_amount - before_amount
+                    currency_comparison.append({"currency": code, "current_amount": now_amount,
+                        "previous_amount": before_amount, "amount_change": delta,
+                        "amount_change_percent": (delta / before_amount * 100) if before_amount else None,
+                        "current_documents": int(now.document_count) if now else 0,
+                        "previous_documents": int(before.document_count) if before else 0})
+                current_amount, previous_amount = current.amount or 0, previous.amount or 0
+                amount_delta = current_amount - previous_amount
+                count_delta = current.document_count - previous.document_count
+                comparison = {
+                    "current_amount": current_amount if currency else None,
+                    "previous_amount": previous_amount if currency else None,
+                    "amount_change": amount_delta if currency else None,
+                    "amount_change_percent": (amount_delta / previous_amount * 100) if previous_amount and currency else None,
+                    "by_currency": currency_comparison,
+                    "current_documents": int(current.document_count), "previous_documents": int(previous.document_count),
+                    "document_change": count_delta,
+                    "document_change_percent": (count_delta / previous.document_count * 100) if previous.document_count else None,
+                    "previous_from_date": previous_start, "previous_to_date": previous_end,
+                }
+                return {
+                    "granularity": granularity, "from_date": start, "to_date": end,
+                    "comparison": comparison,
+                    "series": [{"period": r.period.date().isoformat() if hasattr(r.period, "date") else str(r.period),
+                        "status": r.status, "currency": r.currency, "document_count": int(r.document_count),
+                        "amount": r.amount} for r in series_rows],
+                    "documents": [{"invoice_id": doc.invoice_id, "invoice_number": doc.invoice_number,
+                        "date": getattr(doc, "invoice_date"), "party_name": party_name, "status": getattr(doc, status_col.key),
+                        "currency": doc.currency, "amount": doc.total_amount,
+                        "journal_open_balance": related_balances.get((doc.invoice_id, doc.currency)),
+                        "journal_applied_or_adjusted": (doc.total_amount - related_balances[(doc.invoice_id, doc.currency)])
+                            if (doc.invoice_id, doc.currency) in related_balances else None,
+                        "settlement_note": "Matching status is not payment status; open balance and applied amount come from linked journal entries."
+                            if name == "purchase-invoice-trends" else None,
+                        "transaction_id": gl_links.get(doc.invoice_id),
+                        "source_url": f"/ledger?transaction_id={gl_links[doc.invoice_id]}" if doc.invoice_id in gl_links else None}
+                        for doc, party_name in page_docs],
+                    "pagination": {"page": page, "page_size": page_size, "total_documents": int(document_count),
+                        "total_pages": (int(document_count) + page_size - 1) // page_size},
+                    "payment_semantics": "Purchase invoice matching state is reported separately and never implies payment."
+                        if name == "purchase-invoice-trends" else "Cancelled invoices are excluded unless explicitly selected.",
+                }
             bucket = func.date_trunc("month", date_col)
             measures = [func.count().label("document_count")]
             if kind != "delivery": measures.append(func.coalesce(func.sum(amount_col), 0).label("amount"))

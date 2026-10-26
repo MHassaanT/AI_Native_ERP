@@ -68,7 +68,7 @@ class CreateManualSalesOrderRequest(BaseModel):
 
 
 class BankSettlementWebhookPayload(BaseModel):
-    settlement_id: str = Field(default_factory=lambda: f"settle_{uuid.uuid4().hex[:8]}")
+    settlement_id: str = Field(..., min_length=1, max_length=128)
     amount: float
     currency: str = "USD"
     debtor_name: str
@@ -507,6 +507,7 @@ async def ingest_banking_settlement(
 ):
     """Receives live settlement notifications from open-banking rails and executes reconciliation against open receivables."""
     raw_tx = bank_feed_ingestor.parse_webhook_payload({
+        "transaction_id": payload.settlement_id,
         "account_number": payload.debtor_account,
         "amount": payload.amount,
         "counterparty_name": payload.debtor_name,
@@ -531,7 +532,11 @@ async def ingest_banking_settlement(
         "confidence": result.confidence_score,
         "action": action,
         "matched_document": result.matched_order_number,
-        "transaction_id": str(result.ledger_commit.transaction_id) if result.ledger_commit else None,
+        "transaction_id": str(result.ledger_transaction_id)
+        if result.ledger_transaction_id
+        else str(result.ledger_commit.transaction_id)
+        if result.ledger_commit
+        else None,
     }
 
 

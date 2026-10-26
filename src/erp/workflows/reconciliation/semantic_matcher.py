@@ -6,10 +6,11 @@ from decimal import Decimal
 from difflib import SequenceMatcher
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from erp.db.models.sales import Customer, SalesOrder
+from erp.db.models.ledger import GeneralLedgerEntry
+from erp.db.models.sales import Customer
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class CandidateMatch(BaseModel):
     customer_id: uuid.UUID
     customer_name: str
     order_amount: Decimal
+    currency: str = "USD"
     amount_difference: Decimal
     semantic_similarity: float
     composite_confidence: float = Field(..., ge=0.0, le=1.0)
@@ -47,8 +49,13 @@ class SemanticReconciler:
         amount: Decimal,
         counterparty: str,
         narrative: str = "",
+        currency: str | None = None,
     ) -> ReconciliationMatchResult:
-        """Finds candidate customer sales orders matching the bank payment."""
+        """Finds open, posted customer invoices matching the bank payment.
+
+        Confirmed orders are not receivables: only an invoice with an attributed
+        AR balance can safely be cleared from an incoming bank transaction.
+        """
         from erp.db.models.sales import SalesInvoice
 
         # Query open sales invoices for tenant
@@ -62,21 +69,43 @@ class SemanticReconciler:
         )
         inv_results = (await session.execute(inv_stmt)).all()
 
-        # Query open sales orders for tenant
-        stmt = (
-            select(SalesOrder, Customer.customer_name)
-            .join(Customer, SalesOrder.customer_id == Customer.customer_id)
-            .where(
-                SalesOrder.tenant_id == tenant_id,
-                SalesOrder.status.in_(["CONFIRMED", "DELIVERED"]),
+        # An ISSUED status alone is not evidence of an outstanding balance.
+        # Require an explicit, party-attributed AR control movement and compute
+        # the remaining balance from it (including partial payments/credits).
+        balances_stmt = (
+            select(
+                GeneralLedgerEntry.against_document_id,
+                GeneralLedgerEntry.currency,
+                func.sum(GeneralLedgerEntry.debit_amount - GeneralLedgerEntry.credit_amount),
             )
+            .where(
+                GeneralLedgerEntry.tenant_id == tenant_id,
+                GeneralLedgerEntry.party_type == "CUSTOMER",
+                GeneralLedgerEntry.party_id.is_not(None),
+                GeneralLedgerEntry.against_document_type == "SALES_INVOICE",
+                GeneralLedgerEntry.against_document_id.is_not(None),
+                GeneralLedgerEntry.account_code == "1200-AR-CUSTOMERS",
+            )
+            .group_by(GeneralLedgerEntry.against_document_id, GeneralLedgerEntry.currency)
         )
-        results = (await session.execute(stmt)).all()
+        balance_rows = (await session.execute(balances_stmt)).all()
+        open_balances = {
+            (invoice_id, currency): balance
+            for invoice_id, currency, balance in balance_rows
+            if balance > Decimal("0.01")
+        }
 
         candidates: list[CandidateMatch] = []
 
         for inv, cust_name in inv_results:
-            amt_diff = abs(inv.total_amount - amount)
+            outstanding = open_balances.get((inv.invoice_id, inv.currency))
+            # Do not auto-clear against invoices whose posting is absent or
+            # whose receivable has already been settled.
+            if outstanding is None or amount <= 0 or amount > outstanding + Decimal("0.01"):
+                continue
+            if currency is not None and inv.currency != currency:
+                continue
+            amt_diff = abs(outstanding - amount)
             amt_score = 1.0 if amt_diff <= Decimal("0.01") else (0.8 if amt_diff <= Decimal("10.00") else max(0.0, 1.0 - float(amt_diff / (inv.total_amount or 1))))
             s1 = SequenceMatcher(None, counterparty.lower(), cust_name.lower()).ratio()
             s2 = 1.0 if inv.invoice_number.lower() in narrative.lower() else 0.0
@@ -89,7 +118,8 @@ class SemanticReconciler:
                     order_number=inv.invoice_number,
                     customer_id=inv.customer_id,
                     customer_name=cust_name,
-                    order_amount=inv.total_amount,
+                    order_amount=outstanding,
+                    currency=inv.currency,
                     amount_difference=amt_diff,
                     semantic_similarity=round(semantic_score, 4),
                     composite_confidence=round(composite, 4),
@@ -97,46 +127,6 @@ class SemanticReconciler:
                 )
             )
 
-
-        for so, cust_name in results:
-            # 1. Amount Delta Score (within 1 cent = 1.0, otherwise penalty)
-            amt_diff = abs(so.total_amount - amount)
-            if amt_diff <= Decimal("0.01"):
-                amt_score = 1.0
-            elif amt_diff <= Decimal("10.00"):
-                amt_score = 0.8
-            else:
-                amt_score = max(0.0, 1.0 - float(amt_diff / (so.total_amount or 1)))
-
-            # 2. Semantic Similarity Score over Counterparty & Narrative
-            s1 = SequenceMatcher(None, counterparty.lower(), cust_name.lower()).ratio()
-            s2 = 1.0 if so.order_number.lower() in narrative.lower() else 0.0
-            semantic_score = max(s1, s2)
-
-            # 3. Composite Confidence: 60% Amount Match + 40% Semantic Match
-            composite = (amt_score * 0.60) + (semantic_score * 0.40)
-
-            status = (
-                "AUTO_MATCH"
-                if composite >= self.AUTO_CLEAR_CONFIDENCE_THRESHOLD
-                else "AMBIGUOUS"
-                if composite >= 0.60
-                else "NO_MATCH"
-            )
-
-            candidates.append(
-                CandidateMatch(
-                    order_id=so.order_id,
-                    order_number=so.order_number,
-                    customer_id=so.customer_id,
-                    customer_name=cust_name,
-                    order_amount=so.total_amount,
-                    amount_difference=amt_diff,
-                    semantic_similarity=round(semantic_score, 4),
-                    composite_confidence=round(composite, 4),
-                    match_status=status,
-                )
-            )
 
         # Sort candidates descending by confidence
         candidates.sort(key=lambda c: c.composite_confidence, reverse=True)

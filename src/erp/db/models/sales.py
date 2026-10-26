@@ -111,6 +111,7 @@ class SalesQuotationItem(Base, TenantMixin, TimestampMixin):
     pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("pricing_rules.pricing_rule_id"), nullable=True)
     promotion_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("promotional_schemes.scheme_id"), nullable=True)
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bundle_components_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     quotation: Mapped["SalesQuotation"] = relationship(back_populates="items")
 
     __table_args__ = (
@@ -227,6 +228,7 @@ class SalesOrderItem(Base, TenantMixin, TimestampMixin):
     pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("pricing_rules.pricing_rule_id"), nullable=True)
     promotion_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("promotional_schemes.scheme_id"), nullable=True)
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bundle_components_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     sales_order: Mapped["SalesOrder"] = relationship(back_populates="items")
 
@@ -290,6 +292,15 @@ class DeliveryNoteItem(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=False
     )
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    conversion_factor: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("1"))
+    stock_quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    cost_unit_stock: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_valuation_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    cost_source_entry_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    cost_is_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    bundle_components_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     delivery_note: Mapped["DeliveryNote"] = relationship(back_populates="items")
 
@@ -362,6 +373,14 @@ class SalesInvoiceItem(Base, TenantMixin, TimestampMixin):
     delivery_note_item_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("delivery_note_items.dn_item_id"), nullable=True
     )
+    stock_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_unit_stock: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_valuation_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    cost_source_entry_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    cost_is_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    bundle_components_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     sales_invoice: Mapped["SalesInvoice"] = relationship(back_populates="items")
 

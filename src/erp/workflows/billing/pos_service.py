@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,6 +32,15 @@ from erp.db.models.inventory import Item, StockLedgerEntry, StockLevel
 from erp.db.models.sales import Customer, SalesInvoice, SalesInvoiceItem
 from erp.ledger.engine import LedgerEngine, TransactionProposal
 from erp.ledger.invariants import LedgerLineProposal
+from erp.workflows.commercial.calculation_service import (
+    CalculationLineInput,
+    CommercialCalculationService,
+    commercial_calculation_service,
+)
+from erp.workflows.commercial.bundle_service import (
+    bundle_stock_requirements,
+    snapshot_bundle_components,
+)
 
 
 class POSService:
@@ -88,6 +97,7 @@ class POSService:
         """Processes a fast retail POS transaction with split payments, inventory movements, and GL entry."""
         if not items:
             raise ValueError("POS sale requires at least one item in the cart.")
+        requested_customer_id = customer_id
 
         # 1. Verify open shift and load profile
         shift_stmt = select(POSOpeningEntry).where(
@@ -119,24 +129,225 @@ class POSService:
                 await session.flush()
             customer_id = default_cust.customer_id
 
-        profile_stmt = select(POSProfile).where(POSProfile.profile_id == shift.profile_id)
+        profile_stmt = select(POSProfile).where(
+            POSProfile.profile_id == shift.profile_id,
+            POSProfile.tenant_id == tenant_id,
+            POSProfile.is_active.is_(True),
+        )
         profile_res = await session.execute(profile_stmt)
         profile = profile_res.scalars().first()
         warehouse_id = profile.warehouse_id if profile else None
         cost_center = profile.cost_center if profile else "Main - CC"
         currency = profile.currency if profile else "USD"
 
-        # 2. Compute lines & totals
+        # A return must use the recipe that was sold, not a possibly edited
+        # current bundle master. Old receipts without a snapshot retain their
+        # historical parent-item stock behavior.
+        return_bundle_snapshots: dict[uuid.UUID, list[dict] | None] = {}
+        return_source_lines_by_item: dict[uuid.UUID, list[POSInvoiceItem]] = {}
+        source_invoice = None
+        if is_return and not return_against:
+            raise ValueError("A POS return must reference its original POS receipt.")
+        if is_return:
+            try:
+                source_id = uuid.UUID(str(return_against))
+                source_invoice = await session.scalar(select(POSInvoice).where(
+                    POSInvoice.tenant_id == tenant_id,
+                    POSInvoice.pos_invoice_id == source_id,
+                    POSInvoice.is_return.is_(False),
+                ))
+            except ValueError:
+                source_invoice = await session.scalar(select(POSInvoice).where(
+                    POSInvoice.tenant_id == tenant_id,
+                    func.lower(POSInvoice.pos_invoice_number) == str(return_against).strip().lower(),
+                    POSInvoice.is_return.is_(False),
+                ))
+            if source_invoice is not None:
+                if requested_customer_id and requested_customer_id != source_invoice.customer_id:
+                    raise ValueError("A POS return must use the original receipt customer.")
+                customer_id = source_invoice.customer_id
+                source_lines = (await session.scalars(select(POSInvoiceItem).where(
+                    POSInvoiceItem.tenant_id == tenant_id,
+                    POSInvoiceItem.pos_invoice_id == source_invoice.pos_invoice_id,
+                ))).all()
+                for source_line in source_lines:
+                    return_source_lines_by_item.setdefault(source_line.item_id, []).append(source_line)
+                    return_bundle_snapshots[source_line.item_id] = source_line.bundle_components_snapshot
+            else:
+                raise ValueError("The original POS receipt was not found in this workspace.")
+
+        # 2. Resolve the tenant's selling defaults and freeze each POS line.
+        calculation = None
+        calculated_main = []
+        if not is_return:
+            calculation = await commercial_calculation_service.calculate(
+                session, tenant_id=tenant_id, context="SELLING", currency=currency,
+                price_list_id=profile.price_list_id if profile else None,
+                use_tenant_default=True,
+                lines=[CalculationLineInput(
+                    item_id=uuid.UUID(str(it["item_id"])) if isinstance(it["item_id"], str) else it["item_id"],
+                    quantity=Decimal(str(it["quantity"])),
+                    unit_price=Decimal(str(it["unit_price"])),
+                    uom_id=uuid.UUID(str(it["uom_id"])) if it.get("uom_id") and isinstance(it["uom_id"], str) else it.get("uom_id"),
+                ) for it in items],
+            )
+            calculated_main = [line for line in calculation.lines if not line.is_free]
+
         subtotal = Decimal("0.0000")
+        gross_subtotal = Decimal("0.0000")
         invoice_items = []
-        for it in items:
+        allocated_returns: dict[uuid.UUID, Decimal] = {}
+
+        async def frozen_cost(item_id, stock_quantity, bundle_snapshot, quantity, source_line=None):
+            if source_line is not None:
+                ratio = quantity / Decimal(source_line.quantity)
+                source_cost = Decimal(source_line.cost_amount) if source_line.cost_amount is not None else None
+                return {
+                    "cost_unit_stock": source_line.cost_unit_stock,
+                    "cost_amount": (source_cost * ratio).quantize(Decimal("0.0001")) if source_cost is not None else None,
+                    "cost_valuation_method": source_line.cost_valuation_method,
+                    "cost_source": source_line.cost_source,
+                    "cost_is_estimated": bool(source_line.cost_is_estimated),
+                }, bundle_snapshot
+
+            if bundle_snapshot is not None:
+                total_cost = Decimal("0")
+                estimated = False
+                for component in bundle_snapshot:
+                    component_id = uuid.UUID(str(component["item_id"]))
+                    component_item = await session.scalar(select(Item).where(
+                        Item.tenant_id == tenant_id, Item.item_id == component_id,
+                    ))
+                    stock = await session.scalar(select(StockLevel).where(
+                        StockLevel.tenant_id == tenant_id, StockLevel.item_id == component_id,
+                        StockLevel.warehouse_id == warehouse_id,
+                    )) if warehouse_id else None
+                    stock_rate = Decimal(stock.valuation_rate) if stock is not None else Decimal("0")
+                    is_estimated = stock_rate <= 0
+                    rate = stock_rate if stock_rate > 0 else Decimal(component_item.standard_rate or 0)
+                    unit_quantity = Decimal(str(component["stock_quantity_per_bundle"]))
+                    unit_cost = unit_quantity * rate
+                    total_cost += unit_cost * quantity
+                    estimated = estimated or is_estimated
+                    component.update({
+                        "cost_unit_stock": str(rate),
+                        "cost_amount": str(unit_cost),
+                        "cost_valuation_method": "STOCK_LEVEL" if not is_estimated else "STANDARD_RATE_ESTIMATE",
+                        "cost_source": "POS_COMPONENT_STOCK" if not is_estimated else "LEGACY_ITEM_RATE",
+                        "cost_is_estimated": is_estimated,
+                    })
+                return {
+                    "cost_unit_stock": None,
+                    "cost_amount": total_cost.quantize(Decimal("0.0001")),
+                    "cost_valuation_method": "COMPONENT_COST_SNAPSHOT",
+                    "cost_source": "BUNDLE_COMPONENTS",
+                    "cost_is_estimated": estimated,
+                }, bundle_snapshot
+
+            item = await session.scalar(select(Item).where(
+                Item.tenant_id == tenant_id, Item.item_id == item_id,
+            ))
+            stock = await session.scalar(select(StockLevel).where(
+                StockLevel.tenant_id == tenant_id, StockLevel.item_id == item_id,
+                StockLevel.warehouse_id == warehouse_id,
+            )) if warehouse_id else None
+            stock_rate = Decimal(stock.valuation_rate) if stock is not None else Decimal("0")
+            estimated = stock_rate <= 0
+            rate = stock_rate if stock_rate > 0 else Decimal(item.standard_rate or 0)
+            return {
+                "cost_unit_stock": rate,
+                "cost_amount": (Decimal(stock_quantity) * rate).quantize(Decimal("0.0001")),
+                "cost_valuation_method": "STOCK_LEVEL" if not estimated else "STANDARD_RATE_ESTIMATE",
+                "cost_source": "POS_STOCK_LEVEL" if not estimated else "LEGACY_ITEM_RATE",
+                "cost_is_estimated": estimated,
+            }, bundle_snapshot
+
+        for index, it in enumerate(items):
             item_id = uuid.UUID(str(it["item_id"])) if isinstance(it["item_id"], str) else it["item_id"]
             qty = Decimal(str(it["quantity"]))
-            unit_price = Decimal(str(it["unit_price"]))
+            if qty <= 0:
+                raise ValueError("POS quantities must be positive.")
             discount_pct = Decimal(str(it.get("discount_pct", "0.00")))
-            line_net = (qty * unit_price) * (Decimal("1") - (discount_pct / Decimal("100")))
-            line_net = round(line_net, 4)
+            if discount_pct < 0 or discount_pct > 100:
+                raise ValueError("POS line discount must be between 0 and 100 percent.")
+            calculated_line = calculated_main[index] if calculation else None
+            source_pos_item_id = None
+            source_line = None
+            if is_return:
+                candidates = return_source_lines_by_item.get(item_id, [])
+                source_reference = it.get("source_pos_item_id")
+                if source_reference:
+                    source_reference = uuid.UUID(str(source_reference))
+                    source_line = next((line for line in candidates if line.pos_item_id == source_reference), None)
+                    if source_line is None:
+                        raise ValueError("Returned POS line must belong to the referenced receipt and item.")
+                elif len(candidates) == 1:
+                    source_line = candidates[0]
+                elif not candidates:
+                    raise ValueError("Every returned POS item must exist on the referenced receipt.")
+                else:
+                    raise ValueError("Select the original receipt line when that receipt contains the item more than once.")
+                source_pos_item_id = source_line.pos_item_id
+
+                source_keys = [str(source_invoice.pos_invoice_id), source_invoice.pos_invoice_number]
+                linked_prior = await session.scalar(select(func.coalesce(func.sum(POSInvoiceItem.quantity), 0))
+                    .join(POSInvoice, POSInvoice.pos_invoice_id == POSInvoiceItem.pos_invoice_id)
+                    .where(POSInvoice.tenant_id == tenant_id, POSInvoice.is_return.is_(True),
+                        POSInvoice.status != "CANCELLED", POSInvoice.return_against.in_(source_keys),
+                        POSInvoiceItem.tenant_id == tenant_id,
+                        POSInvoiceItem.source_pos_item_id == source_line.pos_item_id)) or Decimal("0")
+                legacy_prior = await session.scalar(select(func.coalesce(func.sum(POSInvoiceItem.quantity), 0))
+                    .join(POSInvoice, POSInvoice.pos_invoice_id == POSInvoiceItem.pos_invoice_id)
+                    .where(POSInvoice.tenant_id == tenant_id, POSInvoice.is_return.is_(True),
+                        POSInvoice.status != "CANCELLED", POSInvoice.return_against.in_(source_keys),
+                        POSInvoiceItem.tenant_id == tenant_id, POSInvoiceItem.item_id == item_id,
+                        POSInvoiceItem.source_pos_item_id.is_(None))) or Decimal("0")
+                if legacy_prior and len(candidates) > 1:
+                    raise ValueError("Legacy POS returns for duplicate receipt items must be reconciled before another return.")
+                current_prior = allocated_returns.get(source_line.pos_item_id, Decimal("0"))
+                if Decimal(linked_prior) + Decimal(legacy_prior) + current_prior + qty > Decimal(source_line.quantity):
+                    raise ValueError("POS return quantity exceeds the quantity sold on the referenced receipt line.")
+                allocated_returns[source_line.pos_item_id] = current_prior + qty
+
+            bundle_snapshot = (
+                source_line.bundle_components_snapshot
+                if is_return
+                else await snapshot_bundle_components(session, tenant_id, item_id)
+            )
+            if source_line is not None:
+                unit_price = Decimal(source_line.unit_price)
+                conversion_factor = Decimal(source_line.conversion_factor)
+                stock_quantity = (Decimal(source_line.stock_quantity) * qty / Decimal(source_line.quantity)).quantize(Decimal("0.0001"))
+                gross_line = qty * unit_price
+                line_net = (Decimal(source_line.line_total) * qty / Decimal(source_line.quantity)).quantize(Decimal("0.0001"))
+                discount_amount = gross_line - line_net
+                discount_pct = (discount_amount * Decimal("100") / gross_line).quantize(Decimal("0.01")) if gross_line else Decimal("0")
+                uom_id = source_line.uom_id
+            elif calculated_line:
+                unit_price = Decimal(calculated_line.base_rate)
+                gross_line = qty * unit_price
+                after_rule_discount = Decimal(calculated_line.line_total)
+                line_net = (after_rule_discount * (Decimal("1") - discount_pct / Decimal("100"))).quantize(Decimal("0.0001"))
+                conversion_factor = Decimal(calculated_line.conversion_factor)
+                stock_quantity = Decimal(calculated_line.stock_quantity)
+                discount_amount = gross_line - line_net
+            else:
+                unit_price = Decimal(str(it["unit_price"]))
+                uom_id = uuid.UUID(str(it["uom_id"])) if it.get("uom_id") and isinstance(it["uom_id"], str) else it.get("uom_id")
+                item = await session.scalar(select(Item).where(
+                    Item.tenant_id == tenant_id, Item.item_id == item_id, Item.is_active.is_(True), Item.is_sales_item.is_(True)))
+                if item is None:
+                    raise ValueError("Every POS line must reference an active sales item in this workspace.")
+                conversion_factor = await CommercialCalculationService.resolve_uom_factor(session, tenant_id, item, uom_id)
+                stock_quantity = qty * conversion_factor
+                gross_line = qty * unit_price
+                line_net = (gross_line * (Decimal("1") - discount_pct / Decimal("100"))).quantize(Decimal("0.0001"))
+                discount_amount = gross_line - line_net
+            cost_snapshot, bundle_snapshot = await frozen_cost(
+                item_id, stock_quantity, bundle_snapshot, qty, source_line,
+            )
             subtotal += line_net
+            gross_subtotal += gross_line
 
             invoice_items.append(
                 POSInvoiceItem(
@@ -146,8 +357,44 @@ class POSService:
                     unit_price=unit_price,
                     discount_pct=discount_pct,
                     line_total=line_net,
+                    uom_id=calculated_line.uom_id if calculated_line else uom_id,
+                    source_pos_item_id=source_pos_item_id,
+                    conversion_factor=conversion_factor,
+                    stock_quantity=stock_quantity,
+                    price_list_id=calculated_line.price_list_id if calculated_line else None,
+                    item_price_id=calculated_line.item_price_id if calculated_line else None,
+                    price_list_rate=calculated_line.price_list_rate if calculated_line else None,
+                    discount_amount=discount_amount,
+                    pricing_rule_id=calculated_line.pricing_rule_id if calculated_line else None,
+                    promotion_id=calculated_line.promotion_id if calculated_line else None,
+                    is_free=False,
+                    bundle_components_snapshot=bundle_snapshot,
+                    **cost_snapshot,
                 )
             )
+
+        if calculation:
+            for free_line in calculation.lines:
+                if not free_line.is_free:
+                    continue
+                free_bundle_snapshot = await snapshot_bundle_components(
+                    session, tenant_id, free_line.item_id,
+                )
+                free_cost_snapshot, free_bundle_snapshot = await frozen_cost(
+                    free_line.item_id,
+                    Decimal(free_line.stock_quantity),
+                    free_bundle_snapshot,
+                    Decimal(free_line.entered_quantity),
+                )
+                invoice_items.append(POSInvoiceItem(
+                    tenant_id=tenant_id, item_id=free_line.item_id,
+                    quantity=free_line.entered_quantity, unit_price=Decimal("0"), discount_pct=Decimal("0"),
+                    line_total=Decimal("0"), conversion_factor=free_line.conversion_factor,
+                    stock_quantity=free_line.stock_quantity, price_list_id=free_line.price_list_id,
+                    price_list_rate=Decimal("0"), promotion_id=free_line.promotion_id, is_free=True,
+                    bundle_components_snapshot=free_bundle_snapshot,
+                    **free_cost_snapshot,
+                ))
 
         tax_amount = round(subtotal * Decimal("0.05"), 4)  # Standard 5% sales tax
         grand_total = subtotal + tax_amount
@@ -175,7 +422,7 @@ class POSService:
             posting_time=datetime.utcnow(),
             subtotal=subtotal,
             tax_amount=tax_amount,
-            discount_amount=Decimal("0.0000"),
+            discount_amount=gross_subtotal - subtotal,
             grand_total=grand_total,
             paid_amount=actual_paid,
             change_amount=change_amount,
@@ -184,6 +431,11 @@ class POSService:
             status="RETURNED" if is_return else "PAID",
             is_return=is_return,
             return_against=return_against,
+            price_list_id=(
+                calculation.price_list_id if calculation else
+                source_invoice.price_list_id if is_return and source_invoice else
+                profile.price_list_id if profile else None
+            ),
         )
         pos_invoice.items = invoice_items
 
@@ -216,6 +468,35 @@ class POSService:
         # 3. Stock movement
         if warehouse_id:
             for it in invoice_items:
+                if it.bundle_components_snapshot is not None:
+                    requirements = bundle_stock_requirements(
+                        it.bundle_components_snapshot, Decimal(it.stock_quantity),
+                    )
+                    for component_item_id, required_quantity in requirements.items():
+                        stock_lvl = await session.scalar(select(StockLevel).where(
+                            StockLevel.tenant_id == tenant_id,
+                            StockLevel.item_id == component_item_id,
+                            StockLevel.warehouse_id == warehouse_id,
+                        ).with_for_update())
+                        if stock_lvl is None:
+                            raise ValueError("POS bundle component has no stock balance in the profile warehouse.")
+                        stock_delta = required_quantity if is_return else -required_quantity
+                        if not is_return and stock_lvl.current_qty < required_quantity:
+                            raise ValueError("Insufficient stock for one or more POS bundle components.")
+                        stock_lvl.current_qty += stock_delta
+                        stock_lvl.available_qty += stock_delta
+                        session.add(StockLedgerEntry(
+                            tenant_id=tenant_id,
+                            posting_datetime=datetime.utcnow(),
+                            item_id=component_item_id,
+                            warehouse_id=warehouse_id,
+                            actual_qty=stock_delta,
+                            qty_after_transaction=stock_lvl.current_qty,
+                            valuation_rate=stock_lvl.valuation_rate,
+                            source_document_type="POS_RETURN" if is_return else "POS_INVOICE",
+                            source_document_id=pos_invoice.pos_invoice_id,
+                        ))
+                    continue
                 stock_stmt = select(StockLevel).where(
                     StockLevel.tenant_id == tenant_id,
                     StockLevel.item_id == it.item_id,
@@ -225,7 +506,8 @@ class POSService:
                 stock_lvl = stock_res.scalars().first()
 
                 # If return: restore inventory (+qty); if sale: decrement inventory (-qty)
-                stock_delta = abs(it.quantity) if is_return else -abs(it.quantity)
+                stock_quantity = Decimal(it.stock_quantity)
+                stock_delta = abs(stock_quantity) if is_return else -abs(stock_quantity)
                 if stock_lvl:
                     stock_lvl.current_qty += stock_delta
                     stock_lvl.available_qty += stock_delta

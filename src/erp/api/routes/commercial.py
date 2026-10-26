@@ -53,6 +53,11 @@ from erp.workflows.commercial.calculation_service import (
     calculate_tax_rows,
     commercial_calculation_service,
 )
+from erp.workflows.commercial.bundle_service import (
+    bundle_delivery_snapshot,
+    bundle_stock_requirements,
+    snapshot_bundle_components,
+)
 from erp.workflows.commercial.sales_team_service import invoice_sales_team_snapshot
 
 router = APIRouter(prefix="/commercial", tags=["Commercial & Dynamic Pricing Agent"])
@@ -242,6 +247,7 @@ async def create_sales_quote(
         calculation = await commercial_calculation_service.calculate(
             db, tenant_id=tenant_id, context="SELLING", currency=req.currency.upper(),
             price_list_id=req.price_list_id, shipping_rule_id=req.shipping_rule_id,
+            use_tenant_default=True,
             lines=[CalculationLineInput(
                 item_id=line.item_id, quantity=line.quantity, unit_price=line.unit_price,
                 uom_id=line.uom_id, price_list_id=line.price_list_id,
@@ -297,7 +303,7 @@ async def create_sales_quote(
         tax_amount=tax_amount,
         total_amount=total,
         currency=req.currency.upper(),
-        price_list_id=req.price_list_id,
+        price_list_id=calculation.price_list_id or req.price_list_id,
         shipping_rule_id=req.shipping_rule_id,
         sales_tax_template_id=req.sales_tax_template_id,
         tax_snapshot=tax_snapshot,
@@ -310,6 +316,10 @@ async def create_sales_quote(
     db.add(quote)
     await db.flush()
     for calculated in calculation.lines:
+        try:
+            bundle_snapshot = await snapshot_bundle_components(db, tenant_id, calculated.item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         db.add(SalesQuotationItem(
             tenant_id=tenant_id,
             quotation_id=quote.quotation_id,
@@ -327,6 +337,7 @@ async def create_sales_quote(
             pricing_rule_id=calculated.pricing_rule_id,
             promotion_id=calculated.promotion_id,
             is_free=calculated.is_free,
+            bundle_components_snapshot=bundle_snapshot,
         ))
     await db.flush()
     return quote
@@ -538,12 +549,37 @@ async def convert_quote_to_order(
         for line, source in zip(req.items, source_quote_lines, strict=True)
     ):
         raise HTTPException(status_code=409, detail="Sales order lines must match the accepted quotation line snapshots.")
+    required_by_item: dict[uuid.UUID, Decimal] = {}
+    for line, source_quote_line in zip(req.items, source_quote_lines, strict=True):
+        if source_quote_line and source_quote_line.bundle_components_snapshot is not None:
+            line_requirements = bundle_stock_requirements(
+                source_quote_line.bundle_components_snapshot, line.quantity * source_quote_line.conversion_factor,
+            )
+        else:
+            required_stock = (
+                source_quote_line.stock_quantity
+                if source_quote_line and source_quote_line.stock_quantity > 0
+                else line.quantity * source_quote_line.conversion_factor
+                if source_quote_line
+                else line.quantity
+            )
+            line_requirements = {line.item_id: required_stock}
+        for required_item_id, stock_qty in line_requirements.items():
+            required_by_item[required_item_id] = required_by_item.get(required_item_id, Decimal("0")) + stock_qty
+    active_component_ids = set((await db.scalars(select(Item.item_id).where(
+        Item.tenant_id == tenant_id,
+        Item.item_id.in_(required_by_item),
+        Item.is_active.is_(True),
+        Item.is_stock_item.is_(True),
+    ))).all())
+    if active_component_ids != set(required_by_item):
+        raise HTTPException(status_code=409, detail="A bundle component is no longer an active stock item in this workspace.")
     open_invoice_total = (
         await db.execute(
             select(func.coalesce(func.sum(SalesInvoice.total_amount), 0)).where(
                 SalesInvoice.tenant_id == tenant_id,
                 SalesInvoice.customer_id == customer.customer_id,
-                SalesInvoice.status.notin__(("PAID", "CANCELLED")),
+                SalesInvoice.status.notin_(("PAID", "CANCELLED")),
             )
         )
     ).scalar_one()
@@ -552,7 +588,7 @@ async def convert_quote_to_order(
             select(func.coalesce(func.sum(SalesOrder.total_amount), 0)).where(
                 SalesOrder.tenant_id == tenant_id,
                 SalesOrder.customer_id == customer.customer_id,
-                SalesOrder.status.in__(("PENDING_CONFIRMATION", "CONFIRMED", "BACKORDERED", "PARTIALLY_DELIVERED")),
+                SalesOrder.status.in_(("PENDING_CONFIRMATION", "CONFIRMED", "BACKORDERED", "PARTIALLY_DELIVERED")),
             )
         )
     ).scalar_one()
@@ -579,7 +615,7 @@ async def convert_quote_to_order(
                 .where(
                     StockLevel.tenant_id == tenant_id,
                     StockLevel.warehouse_id == warehouse.warehouse_id,
-                    StockLevel.item_id.in_(item_ids),
+                    StockLevel.item_id.in_(required_by_item),
                 )
                 .order_by(StockLevel.item_id)
                 .with_for_update()
@@ -587,16 +623,6 @@ async def convert_quote_to_order(
         ).scalars().all()
         stock_by_item = {stock.item_id: stock for stock in stocks}
         candidate: list[tuple[StockLevel, Decimal]] = []
-        required_by_item: dict[uuid.UUID, Decimal] = {}
-        for line, source_quote_line in zip(req.items, source_quote_lines, strict=True):
-            required_stock = (
-                source_quote_line.stock_quantity
-                if source_quote_line and source_quote_line.stock_quantity > 0
-                else line.quantity * source_quote_line.conversion_factor
-                if source_quote_line
-                else line.quantity
-            )
-            required_by_item[line.item_id] = required_by_item.get(line.item_id, Decimal("0")) + required_stock
         for required_item_id, required_stock in sorted(required_by_item.items(), key=lambda pair: str(pair[0])):
             stock = stock_by_item.get(required_item_id)
             if stock is None or stock.is_quarantined or stock.current_qty - stock.reserved_qty < required_stock:
@@ -672,6 +698,7 @@ async def convert_quote_to_order(
             promotion_id=source_quote_line.promotion_id if source_quote_line else None,
             is_free=source_quote_line.is_free if source_quote_line else False,
             source_quotation_item_id=(source_quote_line.quotation_item_id if source_quote_line else None),
+            bundle_components_snapshot=source_quote_line.bundle_components_snapshot if source_quote_line else None,
         )
         db.add(so_item)
     for stock, quantity in reservation_rows:
@@ -795,8 +822,11 @@ async def confirm_pending_sales_order(
     warehouses = (await db.execute(warehouse_query.order_by(Warehouse.warehouse_code))).scalars().all()
     stock_requirements: dict[uuid.UUID, Decimal] = {}
     for line in lines:
-        required_stock = line.stock_quantity or (line.quantity * line.conversion_factor)
-        stock_requirements[line.item_id] = stock_requirements.get(line.item_id, Decimal("0")) + required_stock
+        line_requirements = bundle_stock_requirements(line.bundle_components_snapshot, line.quantity * line.conversion_factor) if line.bundle_components_snapshot is not None else {
+            line.item_id: line.stock_quantity or (line.quantity * line.conversion_factor)
+        }
+        for required_item_id, required_stock in line_requirements.items():
+            stock_requirements[required_item_id] = stock_requirements.get(required_item_id, Decimal("0")) + required_stock
     reservations: list[tuple[StockLevel, Decimal]] | None = None
     chosen_warehouse: Warehouse | None = None
     for warehouse in warehouses:
@@ -873,12 +903,13 @@ async def cancel_sales_order(order_id: uuid.UUID, tenant_id: TenantIdDep, db: Db
         quantities: dict[uuid.UUID, Decimal] = {}
         for line in order.items:
             remaining_entered = line.quantity - line.delivered_quantity
-            remaining_stock = remaining_entered * line.conversion_factor
-            quantities[line.item_id] = quantities.get(line.item_id, Decimal("0")) + (
-                line.stock_quantity - line.delivered_quantity * line.conversion_factor
-                if line.stock_quantity > 0
-                else remaining_stock
-            )
+            if line.bundle_components_snapshot is not None:
+                requirements = bundle_stock_requirements(line.bundle_components_snapshot, remaining_entered * line.conversion_factor)
+            else:
+                remaining_stock = remaining_entered * line.conversion_factor
+                requirements = {line.item_id: line.stock_quantity - line.delivered_quantity * line.conversion_factor if line.stock_quantity > 0 else remaining_stock}
+            for item_id, quantity in requirements.items():
+                quantities[item_id] = quantities.get(item_id, Decimal("0")) + quantity
         stocks = (await db.scalars(select(StockLevel).where(
             StockLevel.tenant_id == tenant_id,
             StockLevel.warehouse_id == order.fulfillment_warehouse_id,
@@ -955,6 +986,7 @@ async def amend_sales_order(
             conversion_factor=line.conversion_factor, stock_quantity=line.stock_quantity,
             price_list_id=line.price_list_id, item_price_id=line.item_price_id,
             price_list_rate=line.price_list_rate,
+            bundle_components_snapshot=line.bundle_components_snapshot,
         ))
     db.add(DocumentAuditBatch(
         tenant_id=tenant_id, operation="SALES_ORDER_AMENDMENT_CREATED", idempotency_key=str(revision.order_id),
@@ -975,7 +1007,9 @@ async def sales_order_timeline(order_id: uuid.UUID, tenant_id: TenantIdDep, db: 
     deliveries = (await db.scalars(select(DeliveryNote).where(
         DeliveryNote.tenant_id == tenant_id, DeliveryNote.order_id == order_id,
     ).order_by(DeliveryNote.delivery_date))).all()
-    invoices = (await db.scalars(select(SalesInvoice).where(
+    invoices = (await db.scalars(select(SalesInvoice).options(
+        selectinload(SalesInvoice.items),
+    ).where(
         SalesInvoice.tenant_id == tenant_id, SalesInvoice.order_id == order_id,
     ).order_by(SalesInvoice.invoice_date))).all()
     events = (await db.scalars(select(DocumentAuditBatch).where(
@@ -988,9 +1022,22 @@ async def sales_order_timeline(order_id: uuid.UUID, tenant_id: TenantIdDep, db: 
             "amended_from_order_id": str(order.amended_from_order_id) if order.amended_from_order_id else None,
             "lines": [{"order_item_id": str(line.order_item_id), "source_quotation_item_id": str(line.source_quotation_item_id) if line.source_quotation_item_id else None,
                 "delivered_quantity": line.delivered_quantity, "invoiced_quantity": line.invoiced_quantity,
+                "bundle_components_snapshot": line.bundle_components_snapshot,
                 "remaining_to_deliver": line.quantity - line.delivered_quantity,
                 "remaining_to_invoice": line.delivered_quantity - line.invoiced_quantity} for line in order.items]},
-        "delivery_notes": deliveries, "sales_invoices": invoices, "audit_events": events}
+        "delivery_notes": deliveries,
+        "sales_invoices": [{
+            "invoice_id": str(invoice.invoice_id),
+            "invoice_number": invoice.invoice_number,
+            "invoice_date": invoice.invoice_date,
+            "total_amount": invoice.total_amount,
+            "items": [{
+                "item_id": str(line.item_id),
+                "quantity": line.quantity,
+                "bundle_components_snapshot": line.bundle_components_snapshot,
+            } for line in invoice.items],
+        } for invoice in invoices],
+        "audit_events": events}
 
 
 @router.post("/orders/{order_id}/fulfill", status_code=status.HTTP_201_CREATED, summary="Fulfill order and generate Delivery Note")
@@ -1062,9 +1109,11 @@ async def fulfill_sales_order(
     order_quantities: dict[uuid.UUID, Decimal] = {}
     for order_item_id, quantity in fulfill_quantities.items():
         order_line = order_items_by_id[order_item_id]
-        item_id = order_line.item_id
-        stock_quantity = quantity * order_line.conversion_factor
-        order_quantities[item_id] = order_quantities.get(item_id, Decimal("0.0000")) + stock_quantity
+        line_requirements = bundle_stock_requirements(order_line.bundle_components_snapshot, quantity * order_line.conversion_factor) if order_line.bundle_components_snapshot is not None else {
+            order_line.item_id: quantity * order_line.conversion_factor
+        }
+        for item_id, stock_quantity in line_requirements.items():
+            order_quantities[item_id] = order_quantities.get(item_id, Decimal("0.0000")) + stock_quantity
     stock_rows = (
         await db.execute(
             select(StockLevel)
@@ -1109,39 +1158,75 @@ async def fulfill_sales_order(
 
     for order_item_id, quantity in fulfill_quantities.items():
         itm = order_items_by_id[order_item_id]
-        dn_item = DeliveryNoteItem(
-            tenant_id=tenant_id,
-            delivery_note_id=dn.delivery_note_id,
-            order_item_id=itm.order_item_id,
-            item_id=itm.item_id,
-            warehouse_id=wh_id,
-            quantity=quantity,
-        )
+        if itm.bundle_components_snapshot is not None:
+            delivery_components, stock_quantity, cost_amount = bundle_delivery_snapshot(
+                itm.bundle_components_snapshot, quantity * itm.conversion_factor, stock_by_item,
+            )
+            dn_item = DeliveryNoteItem(
+                tenant_id=tenant_id, delivery_note_id=dn.delivery_note_id,
+                order_item_id=itm.order_item_id, item_id=itm.item_id, warehouse_id=wh_id,
+                quantity=quantity, conversion_factor=itm.conversion_factor,
+                stock_quantity=stock_quantity, cost_unit_stock=None, cost_amount=cost_amount,
+                cost_valuation_method="COMPONENT_STOCK_LEVELS", cost_source="BUNDLE_COMPONENTS",
+                cost_is_estimated=False, bundle_components_snapshot=delivery_components,
+            )
+        else:
+            stk = stock_by_item[itm.item_id]
+            stock_quantity = quantity * itm.conversion_factor
+            rate = stk.valuation_rate
+            cost_amount = stock_quantity * rate
+            dn_item = DeliveryNoteItem(
+                tenant_id=tenant_id, delivery_note_id=dn.delivery_note_id,
+                order_item_id=itm.order_item_id, item_id=itm.item_id, warehouse_id=wh_id,
+                quantity=quantity, conversion_factor=itm.conversion_factor,
+                stock_quantity=stock_quantity, cost_unit_stock=rate, cost_amount=cost_amount,
+                cost_valuation_method="STOCK_LEVEL", cost_source="DELIVERY_STOCK_LEVEL",
+                cost_is_estimated=False,
+            )
         db.add(dn_item)
 
         itm.delivered_quantity += quantity
-
-        stk = stock_by_item[itm.item_id]
-        stock_quantity = quantity * itm.conversion_factor
-        stk.current_qty -= stock_quantity
-        stk.reserved_qty = max(Decimal("0.0000"), stk.reserved_qty - stock_quantity)
-        stk.available_qty = stk.current_qty - stk.reserved_qty
-        rate = stk.valuation_rate
-        qty_after = stk.current_qty
-
-        sle = StockLedgerEntry(
-            tenant_id=tenant_id,
-            posting_datetime=datetime.now(UTC),
-            item_id=itm.item_id,
-            warehouse_id=wh_id,
-            actual_qty=-stock_quantity,
-            qty_after_transaction=qty_after,
-            valuation_rate=rate,
-            stock_value_difference=-stock_quantity * rate,
-            source_document_type="DELIVERY_NOTE",
-            source_document_id=dn.delivery_note_id,
-        )
-        db.add(sle)
+        component_entries: list[StockLedgerEntry] = []
+        single_entry: StockLedgerEntry | None = None
+        if itm.bundle_components_snapshot is not None:
+            for component in delivery_components or []:
+                component_id = uuid.UUID(str(component["item_id"]))
+                component_stock_qty = Decimal(str(component["stock_quantity"]))
+                component_rate = Decimal(str(component["cost_unit_stock"]))
+                stk = stock_by_item[component_id]
+                stk.current_qty -= component_stock_qty
+                stk.reserved_qty = max(Decimal("0.0000"), stk.reserved_qty - component_stock_qty)
+                stk.available_qty = stk.current_qty - stk.reserved_qty
+                component_entry = StockLedgerEntry(
+                    tenant_id=tenant_id, posting_datetime=datetime.now(UTC), item_id=component_id,
+                    warehouse_id=wh_id, actual_qty=-component_stock_qty,
+                    qty_after_transaction=stk.current_qty, valuation_rate=component_rate,
+                    outgoing_rate=component_rate,
+                    stock_value_difference=-component_stock_qty * component_rate,
+                    source_document_type="DELIVERY_NOTE", source_document_id=dn.delivery_note_id,
+                )
+                db.add(component_entry)
+                component_entries.append(component_entry)
+        else:
+            stk = stock_by_item[itm.item_id]
+            rate = stk.valuation_rate
+            stk.current_qty -= stock_quantity
+            stk.reserved_qty = max(Decimal("0.0000"), stk.reserved_qty - stock_quantity)
+            stk.available_qty = stk.current_qty - stk.reserved_qty
+            single_entry = StockLedgerEntry(
+                tenant_id=tenant_id, posting_datetime=datetime.now(UTC), item_id=itm.item_id,
+                warehouse_id=wh_id, actual_qty=-stock_quantity, qty_after_transaction=stk.current_qty,
+                valuation_rate=rate, outgoing_rate=rate, stock_value_difference=-stock_quantity * rate,
+                source_document_type="DELIVERY_NOTE", source_document_id=dn.delivery_note_id,
+            )
+            db.add(single_entry)
+        await db.flush()
+        if single_entry is not None:
+            dn_item.cost_source_entry_id = single_entry.entry_id
+        elif delivery_components is not None:
+            for component, entry in zip(delivery_components, component_entries, strict=True):
+                component["cost_source_entry_id"] = str(entry.entry_id)
+            dn_item.bundle_components_snapshot = delivery_components
 
     order.status = "DELIVERED" if all(line.delivered_quantity >= line.quantity for line in order.items) else "PARTIALLY_DELIVERED"
     await db.flush()
@@ -1292,6 +1377,14 @@ async def create_sales_invoice_from_delivery(
             discount_amount=line_discount,
             order_item_id=order_item.order_item_id,
             delivery_note_item_id=itm.dn_item_id,
+            stock_quantity=itm.stock_quantity,
+            cost_unit_stock=itm.cost_unit_stock,
+            cost_amount=itm.cost_amount,
+            cost_valuation_method=itm.cost_valuation_method,
+            cost_source=itm.cost_source,
+            cost_source_entry_id=itm.cost_source_entry_id,
+            cost_is_estimated=itm.cost_is_estimated,
+            bundle_components_snapshot=itm.bundle_components_snapshot,
         )
         db.add(sinv_item)
         order_item.invoiced_quantity += itm.quantity
@@ -1311,6 +1404,8 @@ async def create_sales_invoice_from_delivery(
         LedgerLineProposal(
             account_code=ar_account.account_code,
             cost_center=cost_center.cost_center_code,
+            party_type="CUSTOMER", party_id=invoice.customer_id,
+            against_document_type="SALES_INVOICE", against_document_id=invoice.invoice_id,
             debit_amount=total_amt,
             credit_amount=Decimal("0.0000"),
             currency=tenant_currency,
@@ -1461,6 +1556,14 @@ async def list_delivery_notes(tenant_id: TenantIdDep, db: DbSessionDep):
         "delivery_date": note.delivery_date,
         "status": note.status,
         "item_count": len(note.items),
+        "items": [{
+            "delivery_note_item_id": str(line.dn_item_id),
+            "item_id": str(line.item_id),
+            "quantity": float(line.quantity),
+            "stock_quantity": float(line.stock_quantity),
+            "cost_amount": float(line.cost_amount) if line.cost_amount is not None else None,
+            "bundle_components_snapshot": line.bundle_components_snapshot,
+        } for line in note.items],
         "invoice_id": invoice_by_note[note.delivery_note_id].invoice_id if note.delivery_note_id in invoice_by_note else None,
         "invoice_number": invoice_by_note[note.delivery_note_id].invoice_number if note.delivery_note_id in invoice_by_note else None,
     } for note in notes]

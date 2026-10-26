@@ -13,6 +13,8 @@ from sqlalchemy.orm import selectinload
 from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.db.models.inventory import Item, StockLedgerEntry, StockLevel, Warehouse
 from erp.db.models.hr import Employee
+from erp.db.models.ledger import CostCenter
+from erp.db.models.projects import Project
 from erp.db.models.purchasing import (
     GoodsReceiptNote,
     GoodsReceiptNoteItem,
@@ -35,6 +37,13 @@ from erp.workflows.procurement import (
 router = APIRouter(prefix="/procurement", tags=["Procurement & Sourcing"])
 
 
+@router.get("/cost-centers", summary="List active workspace cost centers")
+async def list_procurement_cost_centers(tenant_id: TenantIdDep, db: DbSessionDep):
+    return list((await db.scalars(select(CostCenter).where(
+        CostCenter.tenant_id == tenant_id, CostCenter.is_active.is_(True)
+    ).order_by(CostCenter.cost_center_code))).all())
+
+
 # =========================================================================
 # Request Schemas
 # =========================================================================
@@ -45,17 +54,31 @@ class MaterialRequestItemSchema(BaseModel):
     quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
     target_warehouse_id: uuid.UUID | None = None
     uom: str = "Nos"
+    uom_id: uuid.UUID | None = None
+
+
+class MaterialRequestAttachmentSchema(BaseModel):
+    file_name: str = Field(min_length=1, max_length=255)
+    storage_key: str = Field(min_length=1, max_length=1024)
+    media_type: str | None = Field(default=None, max_length=128)
+    size_bytes: int | None = Field(default=None, ge=0, le=50_000_000)
 
 
 class CreateMaterialRequestSchema(BaseModel):
     mr_number: str = Field(..., min_length=2, max_length=64)
     material_request_type: str = "PURCHASE"  # PURCHASE, MATERIAL_TRANSFER, MATERIAL_ISSUE, MANUFACTURE
     schedule_date: date | None = None
+    required_by_date: date | None = None
     notes: str | None = None
     requester_employee_id: uuid.UUID | None = None
     external_reference: str | None = Field(default=None, max_length=255)
     terms_template_id: uuid.UUID | None = None
     terms_text: str | None = None
+    department: str | None = Field(default=None, max_length=128)
+    project_id: uuid.UUID | None = None
+    cost_center_id: uuid.UUID | None = None
+    source_warehouse_id: uuid.UUID | None = None
+    attachments: list[MaterialRequestAttachmentSchema] = Field(default_factory=list, max_length=20)
     items: list[MaterialRequestItemSchema] = Field(default_factory=list)
 
 
@@ -63,6 +86,10 @@ class ConvertMRToPOSchema(BaseModel):
     po_number: str = Field(..., min_length=2, max_length=64)
     supplier_id: uuid.UUID
     items: list[dict[str, Any]] | None = None
+
+
+class AmendMaterialRequestSchema(BaseModel):
+    mr_number: str = Field(..., min_length=2, max_length=64)
 
 
 class RFQItemSchema(BaseModel):
@@ -83,6 +110,7 @@ class SupplierQuoteItemSchema(BaseModel):
     item_id: uuid.UUID
     quantity: Decimal
     unit_price: Decimal
+    uom_id: uuid.UUID | None = None
     discount_pct: Decimal = Decimal("0.00")
     lead_time_days: int = 7
 
@@ -312,6 +340,23 @@ async def create_material_request(
             ))
             if requester is None:
                 raise HTTPException(status_code=422, detail="Requester must be an active employee in this workspace.")
+        if req.project_id and await db.scalar(select(Project.project_id).where(
+            Project.tenant_id == tenant_id, Project.project_id == req.project_id,
+            Project.status != "CANCELLED",
+        )) is None:
+            raise HTTPException(status_code=422, detail="Project must belong to this workspace and remain active.")
+        if req.cost_center_id and await db.scalar(select(CostCenter.cost_center_id).where(
+            CostCenter.tenant_id == tenant_id, CostCenter.cost_center_id == req.cost_center_id,
+            CostCenter.is_active.is_(True),
+        )) is None:
+            raise HTTPException(status_code=422, detail="Cost center must be active and belong to this workspace.")
+        if req.source_warehouse_id and await db.scalar(select(Warehouse.warehouse_id).where(
+            Warehouse.tenant_id == tenant_id, Warehouse.warehouse_id == req.source_warehouse_id,
+            Warehouse.is_active.is_(True),
+        )) is None:
+            raise HTTPException(status_code=422, detail="Source warehouse must be active and belong to this workspace.")
+        if req.schedule_date and req.required_by_date and req.required_by_date < req.schedule_date:
+            raise HTTPException(status_code=422, detail="Required-by date cannot precede the request schedule date.")
         terms_text = req.terms_text
         if req.terms_template_id:
             template = await db.scalar(select(TermsAndConditionsTemplate).where(
@@ -335,6 +380,12 @@ async def create_material_request(
             external_reference=req.external_reference,
             terms_template_id=req.terms_template_id,
             terms_text=terms_text,
+            required_by_date=req.required_by_date,
+            department=req.department,
+            project_id=req.project_id,
+            cost_center_id=req.cost_center_id,
+            source_warehouse_id=req.source_warehouse_id,
+            attachments=[attachment.model_dump() for attachment in req.attachments],
             items=[i.model_dump() for i in req.items],
         )
         return mr
@@ -353,6 +404,29 @@ async def get_material_request(
     if not mr:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Material Request not found.")
     return mr
+
+
+@router.put("/material-requests/{mr_id}", summary="Edit an unconverted draft Material Request")
+async def edit_material_request(mr_id: uuid.UUID, req: CreateMaterialRequestSchema,
+                                tenant_id: TenantIdDep, db: DbSessionDep):
+    values = req.model_dump()
+    values["schedule_date"] = req.schedule_date or date.today()
+    values["items"] = [line.model_dump() for line in req.items]
+    values["attachments"] = [attachment.model_dump() for attachment in req.attachments]
+    try:
+        return await requisition_service.update_draft_material_request(db, tenant_id, mr_id, values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/material-requests/{mr_id}/amend", status_code=status.HTTP_201_CREATED,
+             summary="Create a linked amendment containing only the remaining quantity")
+async def amend_material_request(mr_id: uuid.UUID, req: AmendMaterialRequestSchema,
+                                 tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        return await requisition_service.amend_material_request(db, tenant_id, mr_id, req.mr_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/material-requests/{mr_id}/submit", summary="Submit Material Request")

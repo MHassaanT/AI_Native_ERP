@@ -39,6 +39,8 @@ from erp.db.models.billing import (
     TaxWithholdingCategory,
 )
 from erp.db.models.sales import Customer, SalesInvoice, SalesInvoiceItem
+from erp.db.models.inventory import Warehouse
+from erp.db.models.shared_master import PriceList
 from erp.workflows.billing.budget_service import BudgetService
 from erp.workflows.billing.dunning_service import DunningService
 from erp.workflows.billing.pos_service import POSService
@@ -64,6 +66,7 @@ tax_terms_service = TaxAndTermsService()
 class CreatePOSProfileRequest(BaseModel):
     profile_name: str = Field(..., min_length=2, max_length=128)
     warehouse_id: uuid.UUID
+    price_list_id: uuid.UUID | None = None
     cost_center: str = "Main - CC"
     currency: str = "USD"
     income_account: str = "4000-SALES-REVENUE"
@@ -87,6 +90,8 @@ class POSItemLine(BaseModel):
     item_id: uuid.UUID
     quantity: Decimal
     unit_price: Decimal
+    source_pos_item_id: uuid.UUID | None = None
+    uom_id: uuid.UUID | None = None
     discount_pct: Decimal = Decimal("0.00")
 
 
@@ -190,8 +195,8 @@ class CalculateTaxesRequest(BaseModel):
 
 class AllocateAdvanceRequest(BaseModel):
     customer_id: uuid.UUID
-    allocated_amount: Decimal
-    reference_note: str | None = None
+    allocated_amount: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
+    reference_note: str | None = Field(default=None, max_length=255)
 
 
 class CreateDunningTypeRequest(BaseModel):
@@ -260,12 +265,32 @@ async def create_pos_profile(
     session: DbSessionDep,
     tenant_id: TenantIdDep,
 ):
+    warehouse = await session.scalar(select(Warehouse).where(
+        Warehouse.tenant_id == tenant_id,
+        Warehouse.warehouse_id == payload.warehouse_id,
+        Warehouse.is_active.is_(True),
+    ))
+    if warehouse is None:
+        raise HTTPException(status_code=422, detail="POS profile warehouse must be active and belong to this workspace.")
+    price_list_id = None
+    if payload.price_list_id is not None:
+        price_list = await session.scalar(select(PriceList).where(
+            PriceList.tenant_id == tenant_id,
+            PriceList.price_list_id == payload.price_list_id,
+            PriceList.is_active.is_(True),
+            PriceList.selling.is_(True),
+            PriceList.currency == payload.currency.upper(),
+        ))
+        if price_list is None:
+            raise HTTPException(status_code=422, detail="POS price list must be active, selling, and match the profile currency in this workspace.")
+        price_list_id = price_list.price_list_id
     profile = POSProfile(
         tenant_id=tenant_id,
         profile_name=payload.profile_name,
         warehouse_id=payload.warehouse_id,
+        price_list_id=price_list_id,
         cost_center=payload.cost_center,
-        currency=payload.currency,
+        currency=payload.currency.upper(),
         income_account=payload.income_account,
         expense_account=payload.expense_account,
         allow_discount_change=payload.allow_discount_change,
@@ -289,6 +314,7 @@ async def list_pos_profiles(
             "profile_id": str(p.profile_id),
             "profile_name": p.profile_name,
             "warehouse_id": str(p.warehouse_id),
+            "price_list_id": str(p.price_list_id) if p.price_list_id else None,
             "cost_center": p.cost_center,
             "currency": p.currency,
             "is_active": p.is_active,
@@ -440,6 +466,10 @@ async def create_pos_invoice(
                 "quantity": float(it.quantity),
                 "unit_price": float(it.unit_price),
                 "discount_pct": float(it.discount_pct),
+                "uom_id": str(it.uom_id) if it.uom_id else None,
+                "conversion_factor": float(it.conversion_factor),
+                "stock_quantity": float(it.stock_quantity),
+                "bundle_components_snapshot": it.bundle_components_snapshot,
                 "amount": float(it.line_total),
             }
             for it in full_invoice.items
@@ -1128,14 +1158,17 @@ async def reconcile_advance_payment(
     session: DbSessionDep,
     tenant_id: TenantIdDep,
 ):
-    allocation = await tax_terms_service.allocate_advance_payment(
-        session=session,
-        tenant_id=tenant_id,
-        customer_id=payload.customer_id,
-        invoice_id=invoice_id,
-        allocated_amount=payload.allocated_amount,
-        reference_note=payload.reference_note,
-    )
+    try:
+        allocation = await tax_terms_service.allocate_advance_payment(
+            session=session,
+            tenant_id=tenant_id,
+            customer_id=payload.customer_id,
+            invoice_id=invoice_id,
+            allocated_amount=payload.allocated_amount,
+            reference_note=payload.reference_note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await session.commit()
     return {
         "message": f"Successfully allocated ${float(allocation.allocated_amount)} advance towards invoice",
@@ -1166,6 +1199,7 @@ async def list_invoice_advance_allocations(
             "allocated_amount": float(a.allocated_amount),
             "reference_note": a.reference_note,
             "posting_date": a.posting_date.isoformat(),
+            "ledger_posted": a.ledger_posted,
         }
         for a in allocs
     ]

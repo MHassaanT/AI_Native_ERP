@@ -33,6 +33,8 @@ from erp.db.models.billing import (
 from erp.db.models.inventory import Item, Warehouse
 from erp.db.models.sales import Customer, SalesInvoice
 from erp.db.models.user import User
+from erp.ledger.engine import LedgerEngine, TransactionProposal
+from erp.ledger.invariants import LedgerLineProposal
 from erp.workflows.billing.pos_service import POSService
 from erp.workflows.billing.subscription_service import SubscriptionService
 from erp.workflows.billing.tax_and_terms_service import TaxAndTermsService
@@ -299,6 +301,32 @@ async def test_phase1_all_parity_workflows():
             status="ISSUED",
         )
         session.add(test_inv)
+        await session.commit()
+
+        parity_ledger = LedgerEngine(validate_masters=False)
+        await parity_ledger.commit_transaction(session, TransactionProposal(
+            tenant_id=tenant_id, posting_date=test_inv.invoice_date, currency=test_inv.currency,
+            source_document_type="SALES_INVOICE", source_document_id=test_inv.invoice_id,
+            entries=[
+                LedgerLineProposal(account_code="1200-AR-CUSTOMERS", cost_center="SALES-GLOBAL",
+                    party_type="CUSTOMER", party_id=customer.customer_id,
+                    against_document_type="SALES_INVOICE", against_document_id=test_inv.invoice_id,
+                    debit_amount=test_inv.total_amount, credit_amount=0, currency=test_inv.currency),
+                LedgerLineProposal(account_code="4000-SALES-REVENUE", cost_center="SALES-GLOBAL",
+                    debit_amount=0, credit_amount=test_inv.total_amount, currency=test_inv.currency),
+            ], human_in_the_loop_approved=True,
+        ))
+        await parity_ledger.commit_transaction(session, TransactionProposal(
+            tenant_id=tenant_id, posting_date=date.today(), currency=test_inv.currency,
+            source_document_type="CUSTOMER_ADVANCE_RECEIPT", source_document_id=uuid.uuid4(),
+            entries=[
+                LedgerLineProposal(account_code="1020-BANK-OPERATING", cost_center="SALES-GLOBAL",
+                    debit_amount=Decimal("3000.0000"), credit_amount=0, currency=test_inv.currency),
+                LedgerLineProposal(account_code="2150-CUSTOMER-ADVANCES", cost_center="SALES-GLOBAL",
+                    debit_amount=0, credit_amount=Decimal("3000.0000"), currency=test_inv.currency,
+                    party_type="CUSTOMER", party_id=customer.customer_id),
+            ], human_in_the_loop_approved=True,
+        ))
         await session.commit()
 
         schedules = await tax_service.generate_payment_schedule_for_invoice(

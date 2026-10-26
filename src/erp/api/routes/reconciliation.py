@@ -21,6 +21,7 @@ router = APIRouter(prefix="/reconciliation", tags=["Bank Reconciliation"])
 
 
 class IngestBankFeedRequest(BaseModel):
+    transaction_id: str = Field(..., min_length=1, max_length=128)
     account_number: str = "ACC-OPERATING-01"
     amount: Decimal
     counterparty_name: str

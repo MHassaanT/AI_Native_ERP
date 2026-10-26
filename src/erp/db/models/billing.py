@@ -90,6 +90,13 @@ class CreditNoteItem(Base, TenantMixin, TimestampMixin):
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    stock_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_unit_stock: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_valuation_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    cost_is_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    bundle_components_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     credit_note = relationship("CreditNote", back_populates="items")
     item = relationship("Item")
@@ -170,6 +177,9 @@ class POSProfile(Base, TenantMixin, TimestampMixin):
     warehouse_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=False
     )
+    price_list_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("price_lists.price_list_id", name="fk_pos_profile_price_list"), nullable=True
+    )
     cost_center: Mapped[str] = mapped_column(String(64), nullable=False, default="Main - CC")
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     income_account: Mapped[str] = mapped_column(String(32), nullable=False, default="4000-SALES-REVENUE")
@@ -179,6 +189,7 @@ class POSProfile(Base, TenantMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     warehouse = relationship("Warehouse")
+    price_list = relationship("PriceList")
 
     __table_args__ = (
         Index("idx_pos_profile_name", "tenant_id", "profile_name", unique=True),
@@ -271,6 +282,7 @@ class POSInvoice(Base, TenantMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="PAID")  # PAID, RETURNED, CANCELLED
     is_return: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     return_against: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    price_list_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("price_lists.price_list_id", name="fk_pos_invoice_price_list"), nullable=True)
     consolidated_invoice_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     customer = relationship("Customer")
@@ -368,6 +380,11 @@ class POSInvoiceItem(Base, TenantMixin, TimestampMixin):
     pos_invoice_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("pos_invoices.pos_invoice_id"), nullable=False
     )
+    source_pos_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey(
+            "pos_invoice_items.pos_item_id", name="fk_pos_invoice_item_source_pos_item",
+        ), nullable=True
+    )
     item_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=False
     )
@@ -375,6 +392,22 @@ class POSInvoiceItem(Base, TenantMixin, TimestampMixin):
     unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     discount_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("0.00"))
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    uom_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("uoms.uom_id", name="fk_pos_invoice_item_uom"), nullable=True)
+    conversion_factor: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("1.00000000"))
+    stock_quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0.0000"))
+    price_list_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("price_lists.price_list_id", name="fk_pos_invoice_item_price_list"), nullable=True)
+    item_price_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("item_prices.item_price_id", name="fk_pos_invoice_item_item_price"), nullable=True)
+    price_list_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("pricing_rules.pricing_rule_id", name="fk_pos_invoice_item_pricing_rule"), nullable=True)
+    promotion_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("promotional_schemes.scheme_id", name="fk_pos_invoice_item_promotion"), nullable=True)
+    is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bundle_components_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    cost_unit_stock: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    cost_valuation_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    cost_is_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     pos_invoice = relationship("POSInvoice", back_populates="items")
     item = relationship("Item")
@@ -705,6 +738,7 @@ class AdvancePaymentAllocation(Base, TenantMixin, TimestampMixin):
     allocated_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     reference_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     posting_date: Mapped[date] = mapped_column(Date, nullable=False, default=date.today)
+    ledger_posted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     customer = relationship("Customer")
     sales_invoice = relationship("SalesInvoice")

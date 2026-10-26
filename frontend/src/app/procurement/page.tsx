@@ -19,6 +19,7 @@ import {
   FileText,
   Filter,
   Layers,
+  Pencil,
   Percent,
   Play,
   Plus,
@@ -62,6 +63,9 @@ export default function ProcurementPage() {
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [employees, setEmployees] = useState<any[]>([]);
+  const [uoms, setUoms] = useState<any[]>([]);
+  const [projects, setProjects] = useState<any[]>([]);
+  const [costCenters, setCostCenters] = useState<any[]>([]);
   const [goodsReceipts, setGoodsReceipts] = useState<any[]>([]);
   const [procurementTracker, setProcurementTracker] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,15 +77,24 @@ export default function ProcurementPage() {
   const [purchaseTaxTemplates, setPurchaseTaxTemplates] = useState<any[]>([]);
   const [mrFilterStatus, setMrFilterStatus] = useState<string>("");
   const [showCreateMRModal, setShowCreateMRModal] = useState(false);
+  const [editingMrId, setEditingMrId] = useState<string | null>(null);
   const [showConvertMRModal, setShowConvertMRModal] = useState<any | null>(null);
   const [mrFormData, setMrFormData] = useState<any>({
     mr_number: "",
     material_request_type: "PURCHASE",
     schedule_date: "",
+    required_by_date: "",
     notes: "",
     requester_employee_id: "",
     external_reference: "",
     terms_text: "",
+    department: "",
+    project_id: "",
+    cost_center_id: "",
+    source_warehouse_id: "",
+    attachments: [],
+    attachment_file_name: "",
+    attachment_storage_key: "",
     items: [{ item_id: "", quantity: 1, target_warehouse_id: "", uom: "Nos" }],
   });
   const [convertPOData, setConvertPOData] = useState<any>({
@@ -212,13 +225,16 @@ export default function ProcurementPage() {
 
   const loadMasterData = async () => {
     try {
-      const [itms, supps, whs, grns, staff, taxTemplates] = await Promise.all([
+      const [itms, supps, whs, grns, staff, taxTemplates, uomRows, projectRows, costRows] = await Promise.all([
         api.getItems().catch(() => []),
         api.getSuppliers().catch(() => []),
         api.getWarehouses().catch(() => []),
         api.getGoodsReceipts().catch(() => []),
         api.getEmployees().catch(() => []),
         api.getMasterData("purchase-tax-templates").catch(() => []),
+        api.getMasterData("uoms").catch(() => []),
+        api.getProjects().catch(() => []),
+        api.getProcurementCostCenters().catch(() => []),
       ]);
       setItems(itms || []);
       setSuppliers(supps || []);
@@ -226,6 +242,9 @@ export default function ProcurementPage() {
       setGoodsReceipts(grns || []);
       setEmployees(staff || []);
       setPurchaseTaxTemplates((taxTemplates || []).filter((row: any) => !row.disabled));
+      setUoms((uomRows || []).filter((row: any) => row.is_active !== false));
+      setProjects((projectRows || []).filter((row: any) => row.status !== "CANCELLED"));
+      setCostCenters(costRows || []);
     } catch (err: any) {
       console.error("Failed to load master data", err);
     }
@@ -322,23 +341,34 @@ export default function ProcurementPage() {
     e.preventDefault();
     setActionLoading(true);
     try {
-      await api.createMaterialRequest({
+      const payload = {
         mr_number: mrFormData.mr_number || `MR-${Date.now().toString().slice(-6)}`,
         material_request_type: mrFormData.material_request_type,
         schedule_date: mrFormData.schedule_date || undefined,
+        required_by_date: mrFormData.required_by_date || mrFormData.schedule_date || undefined,
         notes: mrFormData.notes || undefined,
         requester_employee_id: mrFormData.requester_employee_id || undefined,
         external_reference: mrFormData.external_reference || undefined,
         terms_text: mrFormData.terms_text || undefined,
+        department: mrFormData.department || undefined,
+        project_id: mrFormData.project_id || undefined,
+        cost_center_id: mrFormData.cost_center_id || undefined,
+        source_warehouse_id: mrFormData.source_warehouse_id || undefined,
+        attachments: [...(mrFormData.attachments || []), ...(mrFormData.attachment_file_name && mrFormData.attachment_storage_key
+          ? [{ file_name: mrFormData.attachment_file_name, storage_key: mrFormData.attachment_storage_key }] : [])],
         items: mrFormData.items.map((it: any) => ({
           item_id: it.item_id,
           quantity: Number(it.quantity),
           target_warehouse_id: it.target_warehouse_id || undefined,
           uom: it.uom || "Nos",
+          uom_id: it.uom_id || undefined,
         })),
-      });
-      showToast("Material Request created in DRAFT successfully.");
+      };
+      if (editingMrId) await api.updateMaterialRequest(editingMrId, payload);
+      else await api.createMaterialRequest(payload);
+      showToast(editingMrId ? "Draft Material Request updated." : "Material Request created in DRAFT successfully.");
       setShowCreateMRModal(false);
+      setEditingMrId(null);
       loadRequisitions();
     } catch (err: any) {
       showToast(err.message, "error");
@@ -352,6 +382,47 @@ export default function ProcurementPage() {
     try {
       await api.submitMaterialRequest(mrId);
       showToast("Material Request submitted for purchasing.");
+      loadRequisitions();
+    } catch (err: any) {
+      showToast(err.message, "error");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleEditMR = (mr: any) => {
+    setEditingMrId(mr.mr_id);
+    setMrFormData({
+      mr_number: mr.mr_number,
+      material_request_type: mr.material_request_type,
+      schedule_date: String(mr.schedule_date || "").slice(0, 10),
+      required_by_date: String(mr.required_by_date || mr.schedule_date || "").slice(0, 10),
+      notes: mr.notes || "",
+      requester_employee_id: mr.requester_employee_id || "",
+      external_reference: mr.external_reference || "",
+      terms_text: mr.terms_text || "",
+      department: mr.department || "",
+      project_id: mr.project_id || "",
+      cost_center_id: mr.cost_center_id || "",
+      source_warehouse_id: mr.source_warehouse_id || "",
+      attachments: mr.attachments || [],
+      attachment_file_name: "",
+      attachment_storage_key: "",
+      items: (mr.items || []).map((line: any) => ({
+        item_id: line.item_id, quantity: line.quantity, target_warehouse_id: line.target_warehouse_id || "",
+        uom: line.uom, uom_id: line.uom_id || "",
+      })),
+    });
+    setShowCreateMRModal(true);
+  };
+
+  const handleAmendMR = async (mr: any) => {
+    const number = window.prompt("New amendment requisition number", `${mr.mr_number}-AMEND-${Date.now().toString().slice(-4)}`);
+    if (!number) return;
+    setActionLoading(true);
+    try {
+      await api.amendMaterialRequest(mr.mr_id, number);
+      showToast("Amendment created with only the unconverted quantity.");
       loadRequisitions();
     } catch (err: any) {
       showToast(err.message, "error");
@@ -765,12 +836,16 @@ export default function ProcurementPage() {
                     mr_number: `MR-${Date.now().toString().slice(-6)}`,
                     material_request_type: "PURCHASE",
                     schedule_date: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+                    required_by_date: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                     notes: "",
                     requester_employee_id: "",
                     external_reference: "",
                     terms_text: "",
-                    items: [{ item_id: items[0]?.item_id || "", quantity: 10, target_warehouse_id: warehouses[0]?.warehouse_id || "", uom: "Nos" }],
+                    department: "", project_id: "", cost_center_id: "", source_warehouse_id: "",
+                    attachments: [], attachment_file_name: "", attachment_storage_key: "",
+                    items: [{ item_id: items[0]?.item_id || "", quantity: 10, target_warehouse_id: warehouses[0]?.warehouse_id || "", uom: items[0]?.stock_uom || "Nos", uom_id: "" }],
                   });
+                  setEditingMrId(null);
                   setShowCreateMRModal(true);
                 }}
                 className="flex items-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-cream-900 text-cream-50 hover:bg-cream-800 transition-colors shadow-sm"
@@ -1028,20 +1103,21 @@ export default function ProcurementPage() {
                         <td className="py-3.5 px-4 font-mono font-medium text-cream-950">
                           {mr.mr_number}
                           {mr.notes && <p className="text-[10px] text-cream-500 mt-0.5">{mr.notes}</p>}
+                          <p className="mt-1 font-sans text-[10px] font-normal text-cream-500">{[mr.department, mr.project_id && `Project ${mr.project_id.slice(0, 8)}`, mr.cost_center_id && `Cost center ${mr.cost_center_id.slice(0, 8)}`].filter(Boolean).join(" · ") || "No department or project context"}{mr.attachments?.length ? ` · ${mr.attachments.length} attachment(s)` : ""}</p>
                         </td>
                         <td className="py-3.5 px-4">
                           <span className="px-2 py-0.5 text-[10px] font-medium rounded-full bg-cream-100 text-cream-800 border border-cream-200">
                             {mr.material_request_type}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4 text-cream-700">{mr.schedule_date}</td>
+                        <td className="py-3.5 px-4 text-cream-700">{mr.required_by_date || mr.schedule_date}</td>
                         <td className="py-3.5 px-4">
                           <div className="space-y-1">
                             {mr.items?.map((it: any) => (
                               <div key={it.mr_item_id} className="flex items-center gap-2 text-[11px]">
                                 <span className="font-semibold text-cream-900">{it.item?.item_code || "SKU"}:</span>
                                 <span className="text-cream-600">
-                                  {Number(it.ordered_qty).toFixed(1)} / {Number(it.quantity).toFixed(1)} {it.uom}
+                                  {Number(it.ordered_qty).toFixed(1)} / {Number(it.quantity).toFixed(1)} {it.uom} ({it.stock_quantity} stock units)
                                 </span>
                                 <div className="w-16 bg-cream-200 h-1.5 rounded-full overflow-hidden">
                                   <div
@@ -1074,6 +1150,8 @@ export default function ProcurementPage() {
                         </td>
                         <td className="py-3.5 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">
+                            {mr.status === "DRAFT" && <button onClick={() => handleEditMR(mr)} disabled={actionLoading} title="Edit draft" className="rounded border border-cream-300 p-1.5 text-cream-700 hover:bg-cream-100"><Pencil className="h-3.5 w-3.5" /></button>}
+                            {(mr.status === "SUBMITTED" || mr.status === "PARTIALLY_ORDERED") && <button onClick={() => void handleAmendMR(mr)} disabled={actionLoading} className="rounded border border-blue-200 px-2 py-1 text-[10px] font-medium text-blue-800 hover:bg-blue-50">Amend remainder</button>}
                             {mr.status === "DRAFT" && (
                               <button
                                 onClick={() => handleSubmitMR(mr.mr_id)}
@@ -1724,7 +1802,7 @@ export default function ProcurementPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-xl border border-cream-200 shadow-xl max-w-xl w-full p-6 space-y-4">
             <div className="flex justify-between items-center border-b border-cream-200 pb-3">
-              <h3 className="text-base font-bold text-cream-950 font-serif">New Material Requisition</h3>
+              <h3 className="text-base font-bold text-cream-950 font-serif">{editingMrId ? "Edit Draft Requisition" : "New Material Requisition"}</h3>
               <button onClick={() => setShowCreateMRModal(false)}>
                 <X className="w-5 h-5 text-cream-500 hover:text-cream-800" />
               </button>
@@ -1762,8 +1840,8 @@ export default function ProcurementPage() {
                   <label className="block text-cream-700 font-semibold mb-1">Required By Date</label>
                   <input
                     type="date"
-                    value={mrFormData.schedule_date}
-                    onChange={(e) => setMrFormData({ ...mrFormData, schedule_date: e.target.value })}
+                    value={mrFormData.required_by_date || mrFormData.schedule_date}
+                    onChange={(e) => setMrFormData({ ...mrFormData, schedule_date: e.target.value, required_by_date: e.target.value })}
                     className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50"
                   />
                 </div>
@@ -1792,6 +1870,19 @@ export default function ProcurementPage() {
                   <input type="text" maxLength={255} value={mrFormData.external_reference} onChange={(e) => setMrFormData({ ...mrFormData, external_reference: e.target.value })} placeholder="Project, department, or request reference" className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50" />
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block text-cream-700 font-semibold">Department<input maxLength={128} value={mrFormData.department} onChange={(e) => setMrFormData({ ...mrFormData, department: e.target.value })} className="mt-1 w-full rounded-lg border border-cream-300 bg-cream-50/50 px-3 py-2 font-normal" placeholder="Maintenance" /></label>
+                <label className="block text-cream-700 font-semibold">Project<select value={mrFormData.project_id} onChange={(e) => setMrFormData({ ...mrFormData, project_id: e.target.value })} className="mt-1 w-full rounded-lg border border-cream-300 bg-cream-50/50 px-3 py-2 font-normal"><option value="">No project</option>{projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.project_code} · {project.project_name}</option>)}</select></label>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block text-cream-700 font-semibold">Cost Center<select value={mrFormData.cost_center_id} onChange={(e) => setMrFormData({ ...mrFormData, cost_center_id: e.target.value })} className="mt-1 w-full rounded-lg border border-cream-300 bg-cream-50/50 px-3 py-2 font-normal"><option value="">No cost center</option>{costCenters.map((center) => <option key={center.cost_center_id} value={center.cost_center_id}>{center.cost_center_code} · {center.cost_center_name}</option>)}</select></label>
+                {mrFormData.material_request_type === "MATERIAL_TRANSFER" && <label className="block text-cream-700 font-semibold">Transfer From<select value={mrFormData.source_warehouse_id} onChange={(e) => setMrFormData({ ...mrFormData, source_warehouse_id: e.target.value })} className="mt-1 w-full rounded-lg border border-cream-300 bg-cream-50/50 px-3 py-2 font-normal"><option value="">Select source warehouse</option>{warehouses.map((wh) => <option key={wh.warehouse_id} value={wh.warehouse_id}>{wh.warehouse_name}</option>)}</select></label>}
+              </div>
+              <div className="grid grid-cols-2 gap-4 rounded-lg bg-cream-50 p-3">
+                <label className="block text-cream-700 font-semibold">Attachment name<input value={mrFormData.attachment_file_name} onChange={(e) => setMrFormData({ ...mrFormData, attachment_file_name: e.target.value })} className="mt-1 w-full rounded-lg border border-cream-300 bg-white px-3 py-2 font-normal" placeholder="specification.pdf" /></label>
+                <label className="block text-cream-700 font-semibold">Stored file key<input value={mrFormData.attachment_storage_key} onChange={(e) => setMrFormData({ ...mrFormData, attachment_storage_key: e.target.value })} className="mt-1 w-full rounded-lg border border-cream-300 bg-white px-3 py-2 font-normal" placeholder="storage/path/specification.pdf" /></label>
+                <p className="col-span-2 text-[10px] font-normal text-cream-500">File metadata only. The file itself must already be stored by your document service.</p>
+              </div>
               <div>
                 <label className="block text-cream-700 font-semibold mb-1">Terms Snapshot</label>
                 <textarea rows={2} value={mrFormData.terms_text} onChange={(e) => setMrFormData({ ...mrFormData, terms_text: e.target.value })} placeholder="Terms copied onto this request" className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50" />
@@ -1806,9 +1897,9 @@ export default function ProcurementPage() {
                     onClick={() =>
                       setMrFormData({
                         ...mrFormData,
-                        items: [
+                    items: [
                           ...mrFormData.items,
-                          { item_id: items[0]?.item_id || "", quantity: 1, target_warehouse_id: warehouses[0]?.warehouse_id || "", uom: "Nos" },
+                          { item_id: items[0]?.item_id || "", quantity: 1, target_warehouse_id: warehouses[0]?.warehouse_id || "", uom: items[0]?.stock_uom || "Nos", uom_id: "" },
                         ],
                       })
                     }
@@ -1820,12 +1911,16 @@ export default function ProcurementPage() {
 
                 {mrFormData.items.map((it: any, idx: number) => (
                   <div key={idx} className="grid grid-cols-12 gap-2 items-center bg-cream-50/75 p-2 rounded-lg border border-cream-200">
-                    <div className="col-span-5">
+                    <div className="col-span-4">
                       <select
                         value={it.item_id}
                         onChange={(e) => {
                           const updated = [...mrFormData.items];
                           updated[idx].item_id = e.target.value;
+                          const selectedItem = items.find((item) => item.item_id === e.target.value);
+                          const stockUom = uoms.find((uom) => uom.abbreviation?.toLowerCase() === selectedItem?.stock_uom?.toLowerCase() || uom.uom_name?.toLowerCase() === selectedItem?.stock_uom?.toLowerCase());
+                          updated[idx].uom = selectedItem?.stock_uom || "Nos";
+                          updated[idx].uom_id = stockUom?.uom_id || "";
                           setMrFormData({ ...mrFormData, items: updated });
                         }}
                         className="w-full px-2 py-1.5 border border-cream-300 rounded bg-white text-[11px]"
@@ -1838,7 +1933,7 @@ export default function ProcurementPage() {
                       </select>
                     </div>
 
-                    <div className="col-span-3">
+                    <div className="col-span-2">
                       <input
                         type="number"
                         min="0.01"
@@ -1852,6 +1947,15 @@ export default function ProcurementPage() {
                         }}
                         className="w-full px-2 py-1.5 border border-cream-300 rounded bg-white text-[11px]"
                       />
+                    </div>
+
+                    <div className="col-span-2">
+                      <select value={it.uom_id || ""} onChange={(e) => {
+                        const updated = [...mrFormData.items];
+                        updated[idx].uom_id = e.target.value;
+                        updated[idx].uom = uoms.find((uom) => uom.uom_id === e.target.value)?.abbreviation || updated[idx].uom;
+                        setMrFormData({ ...mrFormData, items: updated });
+                      }} className="w-full rounded border border-cream-300 bg-white px-2 py-1.5 text-[11px]"><option value="">Legacy unit label</option>{uoms.map((uom) => <option key={uom.uom_id} value={uom.uom_id}>{uom.abbreviation} · {uom.uom_name}</option>)}</select>
                     </div>
 
                     <div className="col-span-3">
@@ -1893,7 +1997,7 @@ export default function ProcurementPage() {
               <div className="flex justify-end gap-2 pt-3 border-t border-cream-200">
                 <button
                   type="button"
-                  onClick={() => setShowCreateMRModal(false)}
+                  onClick={() => { setShowCreateMRModal(false); setEditingMrId(null); }}
                   className="px-4 py-2 border border-cream-300 rounded-lg text-cream-700 hover:bg-cream-100"
                 >
                   Cancel
@@ -1903,7 +2007,7 @@ export default function ProcurementPage() {
                   disabled={actionLoading}
                   className="px-4 py-2 bg-cream-900 text-cream-50 rounded-lg hover:bg-cream-800 font-semibold"
                 >
-                  {actionLoading ? "Creating..." : "Save Draft Requisition"}
+                  {actionLoading ? "Saving..." : editingMrId ? "Save Draft Changes" : "Save Draft Requisition"}
                 </button>
               </div>
             </form>

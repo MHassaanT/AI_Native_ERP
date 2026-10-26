@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Layers, Plus, RefreshCw, AlertCircle, CheckCircle2, ShieldCheck, ArrowRight } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, fetchWithTenant } from "@/lib/api";
 
 export default function LedgerPage() {
   const [entries, setEntries] = useState<any[]>([]);
@@ -18,13 +18,27 @@ export default function LedgerPage() {
   const [sourceDoc, setSourceDoc] = useState("MANUAL_JOURNAL");
   const [staging, setStaging] = useState(false);
   const [commitResult, setCommitResult] = useState<any | null>(null);
+  const [partyType, setPartyType] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [partySide, setPartySide] = useState("debit");
+  const [parties, setParties] = useState<{ id: string; name: string }[]>([]);
+
+  useEffect(() => {
+    let current = true;
+    setPartyId(""); setParties([]);
+    if (partyType) fetchWithTenant(partyType === "CUSTOMER" ? "/commercial/customers" : "/ap/suppliers")
+      .then(rows => { if (current) setParties(rows.map((row: any) => partyType === "CUSTOMER"
+        ? { id: row.customer_id, name: row.customer_name } : { id: row.supplier_id, name: row.supplier_name })); })
+      .catch((reason: Error) => { if (current) setError(reason.message); });
+    return () => { current = false; };
+  }, [partyType]);
 
   const loadData = async () => {
     setLoading(true);
     setError(null);
     try {
       const [glEntries, chartOfAccounts] = await Promise.all([
-        api.getGLEntries(),
+        api.getGLEntries(new URLSearchParams(window.location.search).get("transaction_id") || undefined),
         api.getAccounts(),
       ]);
       setEntries(glEntries);
@@ -46,7 +60,7 @@ export default function LedgerPage() {
     setError(null);
     setCommitResult(null);
 
-    const val = parseFloat(amount);
+    const val = amount;
     const today = new Date().toISOString().split("T")[0];
 
     try {
@@ -54,10 +68,11 @@ export default function LedgerPage() {
         posting_date: today,
         currency: "USD",
         source_document_type: sourceDoc,
-        source_document_id: "00000000-0000-0000-0000-000000000000",
+        source_document_id: crypto.randomUUID(),
         entries: [
           {
             account_code: debitAccount,
+            ...(partyType && partyId && partySide === "debit" ? { party_type: partyType, party_id: partyId } : {}),
             cost_center: "PLANT-01",
             debit_amount: val,
             credit_amount: 0,
@@ -65,6 +80,7 @@ export default function LedgerPage() {
           },
           {
             account_code: creditAccount,
+            ...(partyType && partyId && partySide === "credit" ? { party_type: partyType, party_id: partyId } : {}),
             cost_center: "CORP-FINANCE",
             debit_amount: 0,
             credit_amount: val,
@@ -184,6 +200,7 @@ export default function LedgerPage() {
                   <th className="py-2.5 px-4">Debit</th>
                   <th className="py-2.5 px-4">Credit</th>
                   <th className="py-2.5 px-4">Source Type</th>
+                  <th className="py-2.5 px-4">Party</th>
                   <th className="py-2.5 px-4">Txn ID</th>
                 </tr>
               </thead>
@@ -200,6 +217,7 @@ export default function LedgerPage() {
                       {parseFloat(e.credit_amount) > 0 ? `$${parseFloat(e.credit_amount).toFixed(2)}` : "-"}
                     </td>
                     <td className="py-3 px-4 text-[11px] text-cream-600">{e.source_document_type}</td>
+                    <td className="py-3 px-4 text-[11px] text-cream-600">{e.party_name_snapshot || "—"}</td>
                     <td className="py-3 px-4 text-[11px] text-cream-500">{e.transaction_id.slice(0, 8)}</td>
                   </tr>
                 ))}
@@ -256,12 +274,20 @@ export default function LedgerPage() {
                 <input
                   type="number"
                   step="0.01"
+                  min="0.01"
                   required
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
                   className="w-full rounded-lg border border-cream-300 bg-cream-50 px-3 py-1.5 text-xs text-cream-900 font-mono"
                 />
               </div>
+
+              <fieldset className="space-y-2 rounded border border-cream-300 p-3 text-xs">
+                <legend className="px-1 font-medium">Party attribution</legend>
+                <p className="text-cream-700">Attribute only the receivable/payable leg. General adjustments remain unallocated to an invoice.</p>
+                <label className="block">Party type<select value={partyType} onChange={e => setPartyType(e.target.value)} className="mt-1 w-full rounded border bg-cream-50 p-2"><option value="">No party</option><option value="CUSTOMER">Customer</option><option value="SUPPLIER">Supplier</option></select></label>
+                {partyType && <><label className="block">Party<select required value={partyId} onChange={e => setPartyId(e.target.value)} className="mt-1 w-full rounded border bg-cream-50 p-2"><option value="">Choose a party</option>{parties.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label><label className="block">Control leg<select value={partySide} onChange={e => setPartySide(e.target.value)} className="mt-1 w-full rounded border bg-cream-50 p-2"><option value="debit">Debit account</option><option value="credit">Credit account</option></select></label></>}
+              </fieldset>
 
               <div className="flex justify-end gap-2 pt-3 border-t border-cream-300">
                 <button

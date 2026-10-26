@@ -38,7 +38,7 @@ interface SalesQuote {
   total_amount: number;
   contribution_margin_pct: number;
   status: string;
-  items?: Array<{ quotation_item_id: string; item_id: string; quantity: number; unit_price: number; is_free?: boolean; promotion_id?: string | null }>;
+  items?: Array<{ quotation_item_id: string; item_id: string; quantity: number; unit_price: number; is_free?: boolean; promotion_id?: string | null; bundle_components_snapshot?: Array<{ item_name: string; quantity_per_bundle: string; stock_uom: string }> | null }>;
 }
 
 interface CatalogItem {
@@ -943,6 +943,7 @@ export default function CommercialPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <section className="w-full max-w-xl space-y-4 rounded-xl border border-cream-300 bg-white p-5 shadow-xl">
             <div><h3 className="font-semibold">Convert {convertingQuote.quotation_number} to Sales Order</h3><p className="mt-1 text-xs text-cream-600">Choose tenant-scoped contact, addresses, warehouse, and terms to snapshot onto the order.</p></div>
+            {convertingQuote.items?.some((line) => line.bundle_components_snapshot?.length) && <div className="rounded-lg border border-sage-200 bg-sage-50 p-3 text-xs"><p className="font-semibold text-sage-900">Bundle contents frozen on this quotation</p>{convertingQuote.items.filter((line) => line.bundle_components_snapshot?.length).map((line) => <p key={line.quotation_item_id} className="mt-1 text-sage-800">{line.quantity} bundle(s): {line.bundle_components_snapshot!.map((part) => `${part.quantity_per_bundle} × ${part.item_name} (${part.stock_uom})`).join(", ")}</p>)}</div>}
             <div className="grid gap-3 text-xs sm:grid-cols-2">
               <label>Customer contact<select value={conversionDetails.customer_contact_id} onChange={(e) => setConversionDetails({ ...conversionDetails, customer_contact_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No contact</option>{salesMasters.contacts.filter((row) => row.is_active).map((row) => <option key={row.contact_id} value={row.contact_id}>{row.full_name}</option>)}</select></label>
               <label>Billing address<select value={conversionDetails.billing_address_id} onChange={(e) => setConversionDetails({ ...conversionDetails, billing_address_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No address</option>{salesMasters.addresses.map((row) => <option key={row.address_id} value={row.address_id}>{row.address_title} · {row.city}</option>)}</select></label>

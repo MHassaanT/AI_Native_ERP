@@ -14,12 +14,13 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.db.models.inventory import Item
 from erp.db.models.phase_b import PricingRule, PromotionalScheme, ShippingRule, ShippingRuleCondition
 from erp.db.models.shared_master import ItemPrice, PriceList, UOM, UOMConversion
+from erp.db.models.onboarding import TenantSettings
 
 MONEY_QUANTUM = Decimal("0.0001")
 
@@ -191,6 +192,7 @@ class CommercialCalculationService:
         destination_country: str | None = None,
         destination_state: str | None = None,
         calculation_date: date | None = None,
+        use_tenant_default: bool = False,
     ) -> CalculationResult:
         context = context.upper()
         if context not in {"BUYING", "SELLING"}:
@@ -198,6 +200,19 @@ class CommercialCalculationService:
         if not lines:
             raise ValueError("At least one commercial line is required.")
         on_date = calculation_date or date.today()
+        if price_list_id is None and use_tenant_default and any(line.price_list_id is None for line in lines):
+            setting = await session.scalar(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id))
+            configured_name = (setting.default_buying_price_list if context == "BUYING" else setting.default_selling_price_list) if setting else None
+            if configured_name:
+                is_buying = context == "BUYING"
+                default_list = await session.scalar(select(PriceList).where(
+                    PriceList.tenant_id == tenant_id, PriceList.price_list_name == configured_name,
+                    PriceList.is_active.is_(True), PriceList.currency == currency,
+                    PriceList.buying.is_(True) if is_buying else PriceList.selling.is_(True),
+                ))
+                if default_list is None:
+                    raise ValueError(f"Configured default {context.lower()} price list is not active or does not match document currency {currency}.")
+                price_list_id = default_list.price_list_id
         effective_lists: dict[uuid.UUID, PriceList] = {}
         for selected_list in {line.price_list_id or price_list_id for line in lines if line.price_list_id or price_list_id}:
             plist = await session.scalar(select(PriceList).where(
@@ -231,28 +246,7 @@ class CommercialCalculationService:
             plist = effective_lists.get(selected_list_id) if selected_list_id else None
             factor = Decimal("1")
             if line.uom_id:
-                uom = await session.scalar(select(UOM).where(
-                    UOM.tenant_id == tenant_id, UOM.uom_id == line.uom_id, UOM.is_active.is_(True),
-                ))
-                if uom is None:
-                    raise ValueError("Line unit of measure must be active and belong to this workspace.")
-                conversion = await session.scalar(select(UOMConversion).where(
-                    UOMConversion.tenant_id == tenant_id,
-                    UOMConversion.from_uom_id == line.uom_id,
-                    UOMConversion.item_id == line.item_id,
-                ))
-                if conversion is None:
-                    conversion = await session.scalar(select(UOMConversion).where(
-                        UOMConversion.tenant_id == tenant_id,
-                        UOMConversion.from_uom_id == line.uom_id,
-                        UOMConversion.item_id.is_(None),
-                    ))
-                if conversion is None:
-                    # Stock UOM is represented by the item's configured name.
-                    if uom.abbreviation != item.stock_uom and uom.uom_name != item.stock_uom:
-                        raise ValueError("No tenant/item UOM conversion exists for the selected unit.")
-                else:
-                    factor = Decimal(conversion.factor)
+                factor = await self.resolve_uom_factor(session, tenant_id, item, line.uom_id)
 
             item_price = None
             if plist:
@@ -282,6 +276,10 @@ class CommercialCalculationService:
             # An explicit price list owns the rate. Manual entry remains the
             # fallback when no valid list price exists or no list was selected.
             rate = Decimal(item_price.rate) if item_price else Decimal(line.unit_price) if line.unit_price is not None else Decimal(item.standard_rate)
+            if item_price and item_price.uom_id is None and line.uom_id:
+                # A price without a UOM is a stock-UOM rate. Convert it to the
+                # entered unit before multiplying by entered quantity.
+                rate *= factor
             if rate < 0:
                 raise ValueError("Unit price cannot be negative.")
 
@@ -375,6 +373,41 @@ class CommercialCalculationService:
             shipping_charge=shipping_charge, total=_money(subtotal + shipping_charge),
             warnings=tuple(warnings), calculation_hash=digest,
         )
+
+    @staticmethod
+    async def resolve_uom_factor(session: AsyncSession, tenant_id: uuid.UUID, item: Item,
+                                 uom_id: uuid.UUID | None) -> Decimal:
+        if uom_id is None:
+            return Decimal("1")
+        selected = await session.scalar(select(UOM).where(
+            UOM.tenant_id == tenant_id, UOM.uom_id == uom_id, UOM.is_active.is_(True)))
+        if selected is None:
+            raise ValueError("Line unit of measure must be active and belong to this workspace.")
+        stock = await session.scalar(select(UOM).where(
+            UOM.tenant_id == tenant_id, UOM.is_active.is_(True),
+            or_(func.lower(UOM.abbreviation) == item.stock_uom.lower(),
+                func.lower(UOM.uom_name) == item.stock_uom.lower())))
+        if stock is None:
+            if selected.abbreviation.lower() == item.stock_uom.lower() or selected.uom_name.lower() == item.stock_uom.lower():
+                return Decimal("1")
+            raise ValueError(f"Stock UOM '{item.stock_uom}' is not configured in this workspace.")
+        if selected.uom_id == stock.uom_id:
+            return Decimal("1")
+        direct = await session.scalar(select(UOMConversion).where(
+            UOMConversion.tenant_id == tenant_id, UOMConversion.from_uom_id == selected.uom_id,
+            UOMConversion.to_uom_id == stock.uom_id,
+            or_(UOMConversion.item_id == item.item_id, UOMConversion.item_id.is_(None)))
+            .order_by(UOMConversion.item_id.is_not(None).desc()))
+        if direct is not None:
+            return Decimal(direct.factor)
+        reverse = await session.scalar(select(UOMConversion).where(
+            UOMConversion.tenant_id == tenant_id, UOMConversion.from_uom_id == stock.uom_id,
+            UOMConversion.to_uom_id == selected.uom_id,
+            or_(UOMConversion.item_id == item.item_id, UOMConversion.item_id.is_(None)))
+            .order_by(UOMConversion.item_id.is_not(None).desc()))
+        if reverse is not None:
+            return Decimal("1") / Decimal(reverse.factor)
+        raise ValueError("No tenant/item UOM conversion exists between the selected unit and stock unit.")
 
     async def _shipping_charge(
         self, session: AsyncSession, tenant_id: uuid.UUID, rule_id: uuid.UUID | None,

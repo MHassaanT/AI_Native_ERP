@@ -36,6 +36,7 @@ interface POSProfile {
   profile_name: string;
   warehouse_id: string;
   currency: string;
+  price_list_id?: string | null;
 }
 
 interface POSWarehouse {
@@ -58,6 +59,8 @@ interface CartItem {
   unit_price: number;
   quantity: number;
   discount_pct: number;
+  uom_id?: string | null;
+  source_pos_item_id?: string;
 }
 
 const formatMoney = (val: any) => {
@@ -68,7 +71,9 @@ const formatMoney = (val: any) => {
 export default function POSPage() {
   const [profiles, setProfiles] = useState<POSProfile[]>([]);
   const [warehouses, setWarehouses] = useState<POSWarehouse[]>([]);
+  const [sellingPriceLists, setSellingPriceLists] = useState<any[]>([]);
   const [profileWarehouseId, setProfileWarehouseId] = useState("");
+  const [profilePriceListId, setProfilePriceListId] = useState("");
   const [isCreatingProfile, setIsCreatingProfile] = useState(false);
   const [shift, setShift] = useState<POSShift | null>(null);
   const [items, setItems] = useState<any[]>([]);
@@ -126,8 +131,10 @@ export default function POSPage() {
         api.getParkedPOSCarts().catch(() => []),
       ]);
       const warehouseData = await api.getWarehouses();
+      const priceListsData = await api.getMasterData("price-lists").catch(() => []);
       setProfiles(profilesData || []);
       setWarehouses(warehouseData || []);
+      setSellingPriceLists((priceListsData || []).filter((list: any) => list.selling && list.is_active));
       if (warehouseData?.length > 0 && !profileWarehouseId) {
         setProfileWarehouseId(warehouseData[0].warehouse_id);
       }
@@ -165,7 +172,8 @@ export default function POSPage() {
       await api.createPOSProfile({
         profile_name: "Default POS",
         warehouse_id: profileWarehouseId,
-        currency: tenantCurrency,
+        price_list_id: profilePriceListId || undefined,
+        currency: sellingPriceLists.find((list) => list.price_list_id === profilePriceListId)?.currency || tenantCurrency,
       });
       await loadData();
       setSuccessMsg("Default POS profile created. You can now open a cashier shift.");
@@ -419,11 +427,13 @@ export default function POSPage() {
       if (inv.items && inv.items.length > 0) {
         const returnCartItems = inv.items.map((it: any) => ({
           item_id: it.item_id,
+          source_pos_item_id: it.pos_item_id,
           item_code: it.item_code,
           item_name: it.item_name,
           unit_price: Number(it.unit_price) || 0,
           quantity: Math.abs(Number(it.quantity) || 1),
           discount_pct: Number(it.discount_pct) || 0,
+          uom_id: it.uom_id || null,
         }));
         setCart(returnCartItems);
       }
@@ -482,8 +492,12 @@ export default function POSPage() {
         customer_id: selectedCustomer || undefined,
         items: cart.map((c) => ({
           item_id: c.item_id,
-          quantity: isReturnMode ? -Math.abs(c.quantity) : c.quantity,
+          // The API accepts positive quantities for both sales and returns;
+          // `is_return` controls the inventory and accounting direction.
+          quantity: Math.abs(c.quantity),
           unit_price: c.unit_price,
+          source_pos_item_id: isReturnMode ? c.source_pos_item_id : undefined,
+          uom_id: c.uom_id,
           discount_pct: c.discount_pct,
         })),
         payment_method: isSplitPayment ? "SPLIT" : paymentMethod,
@@ -1126,6 +1140,21 @@ export default function POSPage() {
                             </option>
                           ))}
                         </select>
+                        <div>
+                          <label className="mb-1 block font-medium text-cream-800">Selling price list</label>
+                          <select
+                            value={profilePriceListId}
+                            onChange={(event) => setProfilePriceListId(event.target.value)}
+                            className="w-full rounded-md border border-cream-300 bg-white px-3 py-2 text-xs text-cream-900"
+                          >
+                            <option value="">Use workspace default</option>
+                            {sellingPriceLists.map((list) => (
+                              <option key={list.price_list_id} value={list.price_list_id}>
+                                {list.price_list_name} ({list.currency})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                         <button
                           type="button"
                           onClick={() => void handleCreateDefaultProfile()}
@@ -1555,6 +1584,13 @@ export default function POSPage() {
                               <span className="ml-1 text-terracotta-700">({it.discount_pct}% off)</span>
                             )}
                           </div>
+                          {it.bundle_components_snapshot?.length > 0 && (
+                            <div className="mt-1 text-[10px] leading-snug text-cream-600">
+                              Bundle contents: {it.bundle_components_snapshot.map((part: any) =>
+                                `${Number(part.stock_quantity_per_bundle) * Number(it.stock_quantity || 0)} ${part.stock_uom} ${part.item_name}`
+                              ).join(" · ")}
+                            </div>
+                          )}
                         </td>
                         <td className="py-2 text-center text-cream-800 font-medium whitespace-nowrap">
                           {it.quantity}

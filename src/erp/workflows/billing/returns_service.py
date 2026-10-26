@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.db.models.billing import CreditNote, CreditNoteItem, DebitNote, DebitNoteItem
 from erp.db.models.inventory import StockLedgerEntry, StockLevel
-from erp.db.models.purchasing import SupplierInvoice
+from erp.db.models.purchasing import Supplier, SupplierInvoice
 from erp.db.models.sales import SalesInvoice, SalesInvoiceItem, SalesOrderItem
 from erp.ledger.engine import LedgerEngine, TransactionProposal
 from erp.ledger.invariants import LedgerLineProposal
@@ -126,6 +126,35 @@ class ReturnsService:
                 line_tot = round(qty * unit_price, 4)
             subtotal += line_tot
 
+            stock_quantity = None
+            cost_amount = None
+            cost_unit_stock = None
+            cost_valuation_method = None
+            cost_source = None
+            cost_is_estimated = True
+            bundle_snapshot = None
+            if source_line:
+                source_stock_quantity = getattr(source_line, "stock_quantity", None)
+                source_cost_amount = getattr(source_line, "cost_amount", None)
+                if source_stock_quantity is not None and source_line.quantity:
+                    stock_quantity = (Decimal(source_stock_quantity) * qty / Decimal(source_line.quantity)).quantize(Decimal("0.0001"))
+                if source_cost_amount is not None and source_line.quantity:
+                    cost_amount = (Decimal(source_cost_amount) * qty / Decimal(source_line.quantity)).quantize(Decimal("0.0001"))
+                cost_unit_stock = getattr(source_line, "cost_unit_stock", None)
+                cost_valuation_method = getattr(source_line, "cost_valuation_method", None)
+                cost_source = getattr(source_line, "cost_source", None)
+                cost_is_estimated = bool(getattr(source_line, "cost_is_estimated", True))
+                source_bundle = getattr(source_line, "bundle_components_snapshot", None)
+                if source_bundle is not None and source_line.quantity:
+                    ratio = qty / Decimal(source_line.quantity)
+                    bundle_snapshot = []
+                    for component in source_bundle:
+                        scaled = dict(component)
+                        for key in ("quantity", "stock_quantity", "cost_amount"):
+                            if key in scaled:
+                                scaled[key] = str(Decimal(str(scaled[key])) * ratio)
+                        bundle_snapshot.append(scaled)
+
             cn_items.append(
                 CreditNoteItem(
                     tenant_id=tenant_id,
@@ -134,6 +163,13 @@ class ReturnsService:
                     quantity=qty,
                     unit_price=unit_price,
                     line_total=line_tot,
+                    stock_quantity=stock_quantity,
+                    cost_unit_stock=cost_unit_stock,
+                    cost_amount=cost_amount,
+                    cost_valuation_method=cost_valuation_method,
+                    cost_source=cost_source,
+                    cost_is_estimated=cost_is_estimated,
+                    bundle_components_snapshot=bundle_snapshot,
                 )
             )
 
@@ -180,6 +216,27 @@ class ReturnsService:
         # Restore inventory if returned to warehouse
         if warehouse_id:
             for it in cn_items:
+                if it.bundle_components_snapshot is not None:
+                    for component in it.bundle_components_snapshot:
+                        component_item_id = uuid.UUID(str(component["item_id"]))
+                        stock_qty = Decimal(str(component["stock_quantity"]))
+                        stock_lvl = await session.scalar(select(StockLevel).where(
+                            StockLevel.tenant_id == tenant_id, StockLevel.item_id == component_item_id,
+                            StockLevel.warehouse_id == warehouse_id,
+                        ).with_for_update())
+                        if stock_lvl:
+                            stock_lvl.current_qty += stock_qty
+                            stock_lvl.available_qty += stock_qty
+                        rate = Decimal(str(component["cost_unit_stock"]))
+                        session.add(StockLedgerEntry(
+                            tenant_id=tenant_id, posting_datetime=datetime.now(UTC), item_id=component_item_id,
+                            warehouse_id=warehouse_id, actual_qty=stock_qty,
+                            qty_after_transaction=stock_lvl.current_qty if stock_lvl else stock_qty,
+                            incoming_rate=rate, valuation_rate=rate,
+                            stock_value_difference=stock_qty * rate,
+                            source_document_type="CREDIT_NOTE", source_document_id=credit_note.credit_note_id,
+                        ))
+                    continue
                 stock_stmt = select(StockLevel).where(
                     StockLevel.tenant_id == tenant_id,
                     StockLevel.item_id == it.item_id,
@@ -187,18 +244,21 @@ class ReturnsService:
                 )
                 stock_res = await session.execute(stock_stmt)
                 stock_lvl = stock_res.scalars().first()
+                stock_qty = it.stock_quantity if it.stock_quantity is not None else it.quantity
                 if stock_lvl:
-                    stock_lvl.current_qty += it.quantity
-                    stock_lvl.available_qty += it.quantity
+                    stock_lvl.current_qty += stock_qty
+                    stock_lvl.available_qty += stock_qty
 
                 sle = StockLedgerEntry(
                     tenant_id=tenant_id,
                     posting_datetime=datetime.now(UTC),
                     item_id=it.item_id,
                     warehouse_id=warehouse_id,
-                    actual_qty=it.quantity,
-                    qty_after_transaction=stock_lvl.current_qty if stock_lvl else it.quantity,
-                    valuation_rate=it.unit_price,
+                    actual_qty=stock_qty,
+                    qty_after_transaction=stock_lvl.current_qty if stock_lvl else stock_qty,
+                    incoming_rate=it.cost_unit_stock or Decimal("0.0000"),
+                    valuation_rate=it.cost_unit_stock or Decimal("0.0000"),
+                    stock_value_difference=stock_qty * (it.cost_unit_stock or Decimal("0.0000")),
                     source_document_type="CREDIT_NOTE",
                     source_document_id=credit_note.credit_note_id,
                 )
@@ -230,11 +290,16 @@ class ReturnsService:
             LedgerLineProposal(
                 account_code="1200-AR-CUSTOMERS",
                 cost_center=cost_center,
+                party_type="CUSTOMER", party_id=customer_id, currency=currency,
+                against_document_type="SALES_INVOICE" if invoice_id else None,
+                against_document_id=invoice_id,
                 debit_amount=Decimal("0.0000"),
                 credit_amount=total_amount,
             )
         )
 
+        for line in gl_entries:
+            line.currency = currency
         proposal = TransactionProposal(
             tenant_id=tenant_id,
             posting_date=date.today(),
@@ -260,6 +325,20 @@ class ReturnsService:
         cost_center: str = "Main - CC",
     ) -> DebitNote:
         """Issues a Debit Note, writes off purchase stock (if warehouse provided), and reduces Accounts Payable."""
+        supplier = await session.scalar(select(Supplier).where(
+            Supplier.tenant_id == tenant_id, Supplier.supplier_id == supplier_id,
+        ))
+        if supplier is None:
+            raise ValueError("Supplier not found in this workspace.")
+        currency = supplier.currency
+        if supplier_invoice_id:
+            source_invoice = await session.scalar(select(SupplierInvoice).where(
+                SupplierInvoice.tenant_id == tenant_id, SupplierInvoice.invoice_id == supplier_invoice_id,
+                SupplierInvoice.supplier_id == supplier_id,
+            ).with_for_update())
+            if source_invoice is None:
+                raise ValueError("Supplier invoice must belong to this workspace and supplier.")
+            currency = source_invoice.currency
         subtotal = Decimal("0.0000")
         dn_items = []
         for it in items:
@@ -290,7 +369,7 @@ class ReturnsService:
             supplier_id=supplier_id,
             posting_date=date.today(),
             reason=reason,
-            currency="USD",
+            currency=currency,
             subtotal=subtotal,
             tax_amount=tax_amount,
             total_amount=total_amount,
@@ -329,13 +408,16 @@ class ReturnsService:
 
 
         # GL Reversal:
-        # Dr 2000-ACCOUNTS-PAYABLE = total_amount
+        # Dr 2100-AP-VENDORS = total_amount
         # Cr 5000-COGS (or Raw Materials 1300) = subtotal
         # Cr 1400-PREPAID-EXPENSES (or Tax) = tax_amount
         gl_entries = [
             LedgerLineProposal(
-                account_code="2000-ACCOUNTS-PAYABLE",
+                account_code="2100-AP-VENDORS",
                 cost_center=cost_center,
+                party_type="SUPPLIER", party_id=supplier_id, currency=debit_note.currency,
+                against_document_type="SUPPLIER_INVOICE" if supplier_invoice_id else None,
+                against_document_id=supplier_invoice_id,
                 debit_amount=total_amount,
                 credit_amount=Decimal("0.0000"),
             ),
@@ -356,18 +438,17 @@ class ReturnsService:
                 )
             )
 
-        try:
-            proposal = TransactionProposal(
+        for line in gl_entries:
+            line.currency = currency
+        proposal = TransactionProposal(
                 tenant_id=tenant_id,
                 posting_date=date.today(),
-                currency="USD",
+                currency=currency,
                 source_document_type="DEBIT_NOTE",
                 source_document_id=debit_note.debit_note_id,
                 entries=gl_entries,
                 human_in_the_loop_approved=True,
             )
-            await self.ledger_engine.commit_transaction(session, proposal)
-        except Exception:
-            pass
+        await self.ledger_engine.commit_transaction(session, proposal)
 
         return debit_note

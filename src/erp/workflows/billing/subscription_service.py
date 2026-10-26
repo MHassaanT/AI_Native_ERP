@@ -243,7 +243,9 @@ class SubscriptionService:
                 tenant_id=tenant_id,
                 invoice_number=inv_number,
                 customer_id=sub.customer_id,
-                posting_date=sub.next_billing_date,
+                invoice_date=sub.next_billing_date,
+                due_date=due_date,
+                currency=currency,
                 subtotal=total_invoice_amount,
                 tax_amount=Decimal("0.0000"),
                 total_amount=total_invoice_amount,
@@ -266,10 +268,9 @@ class SubscriptionService:
             # Balanced double-entry GL entry:
             # Dr 1200-AR-CUSTOMERS = total_invoice_amount
             # Cr 4000-SALES-REVENUE = total_invoice_amount
-            try:
-                proposal = TransactionProposal(
+            proposal = TransactionProposal(
                     tenant_id=tenant_id,
-                    posting_date=sales_invoice.posting_date,
+                    posting_date=sales_invoice.invoice_date,
                     currency=currency,
                     source_document_type="SUBSCRIPTION_INVOICE",
                     source_document_id=sales_invoice.invoice_id,
@@ -277,21 +278,22 @@ class SubscriptionService:
                         LedgerLineProposal(
                             account_code="1200-AR-CUSTOMERS",
                             cost_center="Main - CC",
+                            party_type="CUSTOMER", party_id=sub.customer_id, currency=currency,
+                            against_document_type="SALES_INVOICE", against_document_id=sales_invoice.invoice_id,
                             debit_amount=total_invoice_amount,
                             credit_amount=Decimal("0.0000"),
                         ),
                         LedgerLineProposal(
                             account_code="4000-SALES-REVENUE",
                             cost_center="Main - CC",
+                            currency=currency,
                             debit_amount=Decimal("0.0000"),
                             credit_amount=total_invoice_amount,
                         ),
                     ],
                     human_in_the_loop_approved=True,
                 )
-                await self.ledger_engine.commit_transaction(session, proposal)
-            except Exception:
-                pass
+            await self.ledger_engine.commit_transaction(session, proposal)
 
             generated_invoices.append({
                 "subscription_id": str(sub.subscription_id),

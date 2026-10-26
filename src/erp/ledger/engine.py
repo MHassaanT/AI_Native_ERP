@@ -12,6 +12,7 @@ from erp.db.models.audit import AgentAuditLog
 from erp.db.models.ledger import GeneralLedgerEntry
 from erp.db.models.outbox import TransactionalOutbox
 from erp.ledger.ceilings import CeilingEvaluationResult, evaluate_autonomy_tier
+from erp.ledger.party import validate_party_lines
 from erp.ledger.invariants import (
     LedgerLineProposal,
     validate_chart_of_accounts,
@@ -65,6 +66,7 @@ class LedgerEngine:
         """Validates all financial invariants and commits transaction atomically."""
         # 1. Zero-Sum Balance & Single-Sided Invariant Check
         total_volume = validate_zero_sum(proposal.entries)
+        party_names = await validate_party_lines(session, proposal.tenant_id, proposal.entries)
 
         # 2. Autonomous Financial Ceilings Check
         ceiling_result = evaluate_autonomy_tier(
@@ -110,6 +112,11 @@ class LedgerEngine:
                 exchange_rate=line.exchange_rate,
                 source_document_type=proposal.source_document_type,
                 source_document_id=proposal.source_document_id,
+                party_type=line.party_type,
+                party_id=line.party_id,
+                party_name_snapshot=party_names.get((line.party_type, line.party_id)),
+                against_document_type=line.against_document_type,
+                against_document_id=line.against_document_id,
                 period_closing_locked=False,
             )
             session.add(entry)

@@ -32,6 +32,9 @@ from erp.db.models.ledger import GeneralLedgerEntry
 from erp.db.models.sales import Customer, SalesInvoice
 from erp.db.models.purchasing import Supplier, SupplierInvoice
 from erp.db.models.user import User
+from erp.db.models.onboarding import TenantSettings
+from erp.db.models.shared_master import ItemPrice, PriceList, UOM, UOMConversion
+from erp.db.models.phase_b import PricingRule, PromotionalScheme
 
 from erp.ledger.invariants import LedgerLineProposal, validate_zero_sum
 from erp.mcp.tools.billing_tools import (
@@ -68,6 +71,13 @@ async def in_memory_db():
         Supplier.__table__,
         Warehouse.__table__,
         Item.__table__,
+        PriceList.__table__,
+        ItemPrice.__table__,
+        UOM.__table__,
+        UOMConversion.__table__,
+        PricingRule.__table__,
+        PromotionalScheme.__table__,
+        TenantSettings.__table__,
         StockLevel.__table__,
         StockLedgerEntry.__table__,
         GeneralLedgerEntry.__table__,
@@ -172,6 +182,38 @@ class TestPointOfSale:
         assert closing.expected_cash == Decimal("202.5000")
         assert closing.actual_counted_cash == Decimal("200.0000")
         assert closing.cash_variance == Decimal("-2.5000")
+
+    @pytest.mark.asyncio
+    async def test_pos_uses_configured_selling_price_list_and_freezes_uom_price(self, in_memory_db: AsyncSession, mock_tenant_id):
+        warehouse = Warehouse(tenant_id=mock_tenant_id, warehouse_code="POS-PRICE-WH", warehouse_name="POS Price Warehouse")
+        customer = Customer(tenant_id=mock_tenant_id, customer_code="POS-PRICE-CUST", customer_name="POS Price Customer")
+        item = Item(tenant_id=mock_tenant_id, item_code="POS-PRICE-ITEM", item_name="POS item", standard_rate=Decimal("8"), stock_uom="EA")
+        uom = UOM(tenant_id=mock_tenant_id, uom_name="Box", abbreviation="BOX")
+        each = UOM(tenant_id=mock_tenant_id, uom_name="Each", abbreviation="EA")
+        plist = PriceList(tenant_id=mock_tenant_id, price_list_name="Retail Default", currency="USD", selling=True)
+        profile = POSProfile(tenant_id=mock_tenant_id, profile_name="Price POS", warehouse_id=warehouse.warehouse_id,
+                             currency="USD", allow_rate_change=True)
+        settings = TenantSettings(tenant_id=mock_tenant_id, default_selling_price_list="Retail Default")
+        in_memory_db.add_all([warehouse, customer, item, uom, each, plist, profile, settings])
+        await in_memory_db.flush()
+        in_memory_db.add_all([
+            UOMConversion(tenant_id=mock_tenant_id, from_uom_id=uom.uom_id, to_uom_id=each.uom_id,
+                          item_id=item.item_id, factor=4),
+            ItemPrice(tenant_id=mock_tenant_id, item_id=item.item_id, price_list_id=plist.price_list_id,
+                      uom_id=uom.uom_id, rate=Decimal("30"), currency="USD", priority=1),
+        ])
+        await in_memory_db.flush()
+        shift = await POSService().open_shift(in_memory_db, mock_tenant_id, profile.profile_id, uuid.uuid4(), Decimal("0"))
+        invoice, _ = await POSService().process_pos_sale(
+            in_memory_db, mock_tenant_id, shift.opening_id, customer.customer_id,
+            items=[{"item_id": item.item_id, "quantity": Decimal("2"), "unit_price": Decimal("99"), "uom_id": uom.uom_id}],
+        )
+        assert invoice.subtotal == Decimal("60.0000")
+        assert invoice.price_list_id == plist.price_list_id
+        assert invoice.items[0].uom_id == uom.uom_id
+        assert invoice.items[0].conversion_factor == Decimal("4.00000000")
+        assert invoice.items[0].stock_quantity == Decimal("8.0000")
+        assert invoice.items[0].price_list_rate == Decimal("30.0000")
 
     @pytest.mark.asyncio
     async def test_pos_gl_balance_invariant(self):
@@ -537,4 +579,3 @@ class TestMCPBillingTools:
         assert category.category_name == "Professional Consultancy 194J"
         assert category.rate_pct == Decimal("10.00")
         assert category.is_active is True
-

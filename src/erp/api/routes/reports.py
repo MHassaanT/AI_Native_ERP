@@ -6,13 +6,43 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.workflows.reports import financial_reports_service, stock_reports_service
 from erp.workflows.reports.enterprise_reports_service import enterprise_reports_service
+from erp.workflows.reports.party_ledger_service import party_ledger_service
 
 router = APIRouter(prefix="/reports", tags=["Enterprise Reports & Analytics"])
+
+
+@router.get("/party-ledger-unattributed", summary="Unlinked legacy receivable/payable entries for reconciliation")
+async def get_unattributed_party_entries(
+    session: DbSessionDep, tenant_id: TenantIdDep, to_date: date | None = None,
+    limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0),
+):
+    result = await party_ledger_service.unattributed(session, tenant_id, to_date, limit, offset)
+    return JSONResponse(jsonable_encoder(result, custom_encoder={Decimal: str}))
+
+
+@router.get("/party-ledger/{party_type}/{party_id}", summary="Party GL journal, running balances and invoice ageing")
+async def get_party_ledger(
+    party_type: str, party_id: uuid.UUID, session: DbSessionDep, tenant_id: TenantIdDep,
+    from_date: date | None = None, to_date: date | None = None,
+    currency: str | None = Query(None, min_length=3, max_length=3),
+    limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0),
+):
+    try:
+        result = await party_ledger_service.journal(
+            session, tenant_id, party_type.upper(), party_id, from_date, to_date, currency, limit, offset,
+        )
+        return JSONResponse(jsonable_encoder(result, custom_encoder={Decimal: str}))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/trial-balance", summary="4-Column Trial Balance Report")
@@ -227,13 +257,21 @@ def _make_enterprise_report(report_name: str, summary: str):
         party_id: Optional[uuid.UUID] = Query(None),
         currency: Optional[str] = Query(None, min_length=3, max_length=3),
         territory: Optional[str] = Query(None, min_length=1, max_length=128),
+        granularity: str = Query("month", pattern="^(day|month|quarter|year)$"),
+        status: Optional[str] = Query(None, min_length=1, max_length=32),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
     ) -> Any:
-        return await enterprise_reports_service.run(
-            report_name, session, tenant_id, from_date=from_date, to_date=to_date,
-            as_of_date=as_of_date, month=month, fiscal_year=fiscal_year,
-            item_id=item_id, party_id=party_id, currency=currency,
-            territory=territory,
-        )
+        try:
+            return await enterprise_reports_service.run(
+                report_name, session, tenant_id, from_date=from_date, to_date=to_date,
+                as_of_date=as_of_date, month=month, fiscal_year=fiscal_year,
+                item_id=item_id, party_id=party_id, currency=currency,
+                territory=territory, granularity=granularity, status_filter=status,
+                page=page, page_size=page_size,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     endpoint.__name__ = f"get_{report_name.replace('-', '_')}"
     endpoint.__doc__ = summary

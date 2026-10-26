@@ -48,6 +48,11 @@ class GLEntryResponse(BaseModel):
     currency: str
     source_document_type: str
     source_document_id: uuid.UUID
+    party_type: str | None = None
+    party_id: uuid.UUID | None = None
+    party_name_snapshot: str | None = None
+    against_document_type: str | None = None
+    against_document_id: uuid.UUID | None = None
 
 
 @router.post(
@@ -103,6 +108,8 @@ async def stage_transaction(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.get(
@@ -115,6 +122,7 @@ async def list_gl_entries(
     db: DbSessionDep,
     limit: int = Query(default=100, le=500),
     offset: int = Query(default=0, ge=0),
+    transaction_id: uuid.UUID | None = None,
 ):
     """Returns general ledger entries filtered strictly by tenant isolation."""
     stmt = (
@@ -124,6 +132,8 @@ async def list_gl_entries(
         .limit(limit)
         .offset(offset)
     )
+    if transaction_id:
+        stmt = stmt.where(GeneralLedgerEntry.transaction_id == transaction_id)
     result = await db.execute(stmt)
     entries = result.scalars().all()
     return entries

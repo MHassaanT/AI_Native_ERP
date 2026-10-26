@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -24,10 +24,17 @@ from erp.db.models.billing import (
     SalesTaxesAndChargesTemplateDetail,
 )
 from erp.db.models.sales import Customer, SalesInvoice
+from erp.db.models.ledger import GeneralLedgerEntry
+from erp.ledger.engine import LedgerEngine, TransactionProposal
+from erp.ledger.invariants import LedgerLineProposal
+from erp.ledger.locks import acquire_advisory_xact_lock
 
 
 class TaxAndTermsService:
     """Core domain logic for Payment Terms, Tax Templates, and Advance Allocation."""
+
+    def __init__(self, ledger_engine: LedgerEngine | None = None):
+        self.ledger_engine = ledger_engine or LedgerEngine(validate_masters=False)
 
     # =========================================================================
     # 1. Payment Terms Templates & Schedules
@@ -250,22 +257,74 @@ class TaxAndTermsService:
         allocated_amount: Decimal,
         reference_note: str | None = None,
     ) -> AdvancePaymentAllocation:
-        """Allocates advance payment towards an unpaid Sales Invoice, updating invoice outstanding balance."""
+        """Apply a previously posted customer deposit to an open invoice.
+
+        The transfer consumes the held customer-advance liability and credits
+        accounts receivable; it never invents a deposit or changes invoice
+        state without a journal transaction.
+        """
+        if allocated_amount <= Decimal("0"):
+            raise ValueError("Allocated advance amount must be positive.")
+
+        await acquire_advisory_xact_lock(
+            session, "customer-advance", f"{tenant_id}:{customer_id}:currency-agnostic"
+        )
+        # Use the same lock namespace as bank settlements, so an advance and a
+        # bank payment cannot both spend the same invoice balance concurrently.
+        await acquire_advisory_xact_lock(session, "sales-invoice", str(invoice_id))
+
         inv_stmt = select(SalesInvoice).where(
             SalesInvoice.invoice_id == invoice_id,
             SalesInvoice.tenant_id == tenant_id,
-        )
-        inv_res = await session.execute(inv_stmt)
-        invoice = inv_res.scalars().first()
-        if not invoice:
-            raise ValueError(f"Sales Invoice {invoice_id} not found.")
+            SalesInvoice.customer_id == customer_id,
+        ).with_for_update()
+        invoice = (await session.execute(inv_stmt)).scalars().first()
+        if invoice is None:
+            raise ValueError("Sales invoice must belong to this workspace and customer.")
+        if invoice.status in {"PAID", "CANCELLED"}:
+            raise ValueError("Only an open sales invoice can receive an advance allocation.")
 
-        current_outstanding = getattr(invoice, "outstanding_amount", None)
-        if current_outstanding is None:
-            current_outstanding = getattr(invoice, "grand_total", None) or getattr(invoice, "total_amount", Decimal("0.0000"))
+        unapplied_legacy_allocations = await session.scalar(select(func.count()).select_from(
+            AdvancePaymentAllocation
+        ).where(
+            AdvancePaymentAllocation.tenant_id == tenant_id,
+            AdvancePaymentAllocation.customer_id == customer_id,
+            AdvancePaymentAllocation.invoice_id == invoice_id,
+            AdvancePaymentAllocation.ledger_posted.is_(False),
+        ))
+        if unapplied_legacy_allocations:
+            raise ValueError("This invoice has legacy advance allocations without ledger postings; reconcile them before allocating more.")
 
-        if allocated_amount > current_outstanding:
-            raise ValueError(f"Allocation amount ${allocated_amount} exceeds invoice outstanding balance ${current_outstanding}.")
+        outstanding = await session.scalar(select(func.coalesce(func.sum(
+            GeneralLedgerEntry.debit_amount - GeneralLedgerEntry.credit_amount
+        ), 0)).where(
+            GeneralLedgerEntry.tenant_id == tenant_id,
+            GeneralLedgerEntry.account_code == "1200-AR-CUSTOMERS",
+            GeneralLedgerEntry.party_type == "CUSTOMER",
+            GeneralLedgerEntry.party_id == customer_id,
+            GeneralLedgerEntry.currency == invoice.currency,
+            GeneralLedgerEntry.against_document_type == "SALES_INVOICE",
+            GeneralLedgerEntry.against_document_id == invoice_id,
+        ))
+        if outstanding is None or outstanding <= Decimal("0"):
+            raise ValueError("Invoice has no posted, outstanding receivable to settle.")
+        if allocated_amount > outstanding:
+            raise ValueError(f"Allocation amount {allocated_amount} exceeds invoice outstanding balance {outstanding}.")
+
+        advance_balance = await session.scalar(select(func.coalesce(func.sum(
+            GeneralLedgerEntry.credit_amount - GeneralLedgerEntry.debit_amount
+        ), 0)).where(
+            GeneralLedgerEntry.tenant_id == tenant_id,
+            GeneralLedgerEntry.account_code == "2150-CUSTOMER-ADVANCES",
+            GeneralLedgerEntry.party_type == "CUSTOMER",
+            GeneralLedgerEntry.party_id == customer_id,
+            GeneralLedgerEntry.currency == invoice.currency,
+            GeneralLedgerEntry.against_document_id.is_(None),
+        ))
+        if advance_balance is None or advance_balance <= Decimal("0"):
+            raise ValueError("No posted customer advance is available for allocation.")
+        if allocated_amount > advance_balance:
+            raise ValueError(f"Allocation amount {allocated_amount} exceeds available customer advance {advance_balance}.")
 
         allocation = AdvancePaymentAllocation(
             tenant_id=tenant_id,
@@ -276,15 +335,47 @@ class TaxAndTermsService:
             posting_date=date.today(),
         )
         session.add(allocation)
+        await session.flush()
 
-        # Update invoice outstanding and status
-        new_outstanding = current_outstanding - allocated_amount
-        if hasattr(invoice, "outstanding_amount"):
-            invoice.outstanding_amount = new_outstanding
-        if new_outstanding == Decimal("0.0000"):
+        proposal = TransactionProposal(
+            tenant_id=tenant_id,
+            posting_date=allocation.posting_date,
+            currency=invoice.currency,
+            source_document_type="ADVANCE_PAYMENT_ALLOCATION",
+            source_document_id=allocation.allocation_id,
+            entries=[
+                LedgerLineProposal(
+                    account_code="2150-CUSTOMER-ADVANCES",
+                    cost_center="SALES-GLOBAL",
+                    party_type="CUSTOMER", party_id=customer_id,
+                    debit_amount=allocated_amount,
+                    credit_amount=Decimal("0.0000"),
+                    currency=invoice.currency,
+                ),
+                LedgerLineProposal(
+                    account_code="1200-AR-CUSTOMERS",
+                    cost_center="SALES-GLOBAL",
+                    party_type="CUSTOMER", party_id=customer_id,
+                    against_document_type="SALES_INVOICE", against_document_id=invoice_id,
+                    debit_amount=Decimal("0.0000"),
+                    credit_amount=allocated_amount,
+                    currency=invoice.currency,
+                ),
+            ],
+            human_in_the_loop_approved=True,
+            agent_id="CUSTOMER_ADVANCE_ALLOCATION",
+            verification_context={"reference_note": allocation.reference_note or ""},
+        )
+        await self.ledger_engine.commit_transaction(session, proposal)
+        allocation.ledger_posted = True
+
+        new_outstanding = outstanding - allocated_amount
+        if new_outstanding <= Decimal("0"):
             invoice.status = "PAID"
         else:
-            invoice.status = "PARTIAL"
+            # Open balance remains authoritative; keep lifecycle in the
+            # supported ISSUED state so remaining receivables stay matchable.
+            invoice.status = "ISSUED"
 
         await session.flush()
         return allocation

@@ -21,6 +21,7 @@ from erp.db.models.purchasing import (
     SupplierQuotation,
     SupplierQuotationItem,
 )
+from erp.workflows.commercial.calculation_service import CommercialCalculationService
 
 
 class SourcingService:
@@ -147,6 +148,15 @@ class SourcingService:
         items: list[dict[str, Any]] | None = None,
     ) -> SupplierQuotation:
         """Submits or registers a vendor supplier quotation."""
+        supplier = await session.scalar(select(Supplier).where(
+            Supplier.tenant_id == tenant_id, Supplier.supplier_id == supplier_id, Supplier.is_active.is_(True)))
+        if supplier is None:
+            raise ValueError("Supplier quotation must reference an active supplier in this workspace.")
+        if rfq_id and await session.scalar(select(RequestForQuotation.rfq_id).where(
+            RequestForQuotation.tenant_id == tenant_id, RequestForQuotation.rfq_id == rfq_id)) is None:
+            raise ValueError("Supplier quotation RFQ must belong to this workspace.")
+        if not items:
+            raise ValueError("Supplier quotation must contain at least one item.")
         if not quotation_date:
             quotation_date = date.today()
         if not valid_until:
@@ -177,7 +187,18 @@ class SourcingService:
             for it in items:
                 qty = Decimal(str(it["quantity"]))
                 rate = Decimal(str(it["unit_price"]))
+                if qty <= 0 or rate < 0:
+                    raise ValueError("Supplier quotation quantities must be positive and rates cannot be negative.")
+                item_id = uuid.UUID(str(it["item_id"])) if isinstance(it["item_id"], str) else it["item_id"]
+                item = await session.scalar(select(Item).where(
+                    Item.tenant_id == tenant_id, Item.item_id == item_id, Item.is_active.is_(True), Item.is_purchase_item.is_(True)))
+                if item is None:
+                    raise ValueError("Every supplier quotation line must reference an active purchasable item in this workspace.")
+                uom_id = uuid.UUID(str(it["uom_id"])) if it.get("uom_id") and isinstance(it["uom_id"], str) else it.get("uom_id")
+                factor = await CommercialCalculationService.resolve_uom_factor(session, tenant_id, item, uom_id)
                 discount = Decimal(str(it.get("discount_pct", "0.00")))
+                if discount < 0 or discount > 100:
+                    raise ValueError("Supplier quotation discount must be between 0 and 100 percent.")
                 discounted_rate = rate * (Decimal("1.00") - (discount / Decimal("100.00")))
                 line_total = qty * discounted_rate
                 subtotal += line_total
@@ -185,12 +206,15 @@ class SourcingService:
                 sq_item = SupplierQuotationItem(
                     tenant_id=tenant_id,
                     sq_id=sq.sq_id,
-                    item_id=uuid.UUID(str(it["item_id"])) if isinstance(it["item_id"], str) else it["item_id"],
+                    item_id=item_id,
                     quantity=qty,
                     unit_price=rate,
                     discount_pct=discount,
                     line_total=line_total,
                     lead_time_days=int(it.get("lead_time_days", lead_time_days)),
+                    uom_id=uom_id,
+                    conversion_factor=factor,
+                    stock_quantity=qty * factor,
                 )
                 session.add(sq_item)
 
@@ -353,6 +377,12 @@ class SourcingService:
         quote = await self.get_supplier_quotation(session, tenant_id, sq_id)
         if not quote:
             raise ValueError(f"Supplier Quotation {sq_id} not found.")
+        if quote.status != "SUBMITTED":
+            raise ValueError("Only a submitted supplier quotation can be awarded, and a quotation can be awarded only once.")
+        if quote.valid_until and quote.valid_until < date.today():
+            raise ValueError("An expired supplier quotation cannot be awarded.")
+        if not quote.items:
+            raise ValueError("Supplier quotation has no lines to award.")
 
         # Update quotation status
         quote.status = "AWARDED"
@@ -384,6 +414,7 @@ class SourcingService:
             tax_amount=quote.tax_amount,
             total_amount=quote.grand_total,
             status="SUBMITTED",
+            supplier_quotation_id=quote.sq_id,
             submitted_at=datetime.now(UTC),
         )
         session.add(po)
@@ -414,7 +445,9 @@ class SourcingService:
                 line_total=it.line_total,
                 rfq_item_id=rfq_items_by_item_id.get(it.item_id).rfq_item_id if it.item_id in rfq_items_by_item_id else None,
                 supplier_quotation_item_id=it.sq_item_id,
-                stock_quantity=it.quantity,
+                uom_id=it.uom_id,
+                conversion_factor=it.conversion_factor,
+                stock_quantity=it.stock_quantity,
             )
             session.add(po_item)
 

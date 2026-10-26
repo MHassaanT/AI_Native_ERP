@@ -149,6 +149,12 @@ def get_standard_gaap_tree(country: str, currency: str) -> list[dict[str, Any]]:
             "parent_account_code": None,
         },
         {
+            "account_code": "2150-CUSTOMER-ADVANCES",
+            "account_name": "Customer Advances and Deposits",
+            "account_type": "LIABILITY",
+            "parent_account_code": None,
+        },
+        {
             "account_code": "2200-TAX-PAYABLE",
             "account_name": f"Output VAT / Sales Tax Payable ({country})",
             "account_type": "LIABILITY",

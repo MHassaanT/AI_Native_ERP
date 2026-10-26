@@ -3,8 +3,9 @@
 import uuid
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,24 @@ class LedgerLineProposal(BaseModel):
     credit_amount: Decimal = Field(default=Decimal("0.0000"))
     currency: str = Field(default="USD", max_length=3)
     exchange_rate: Decimal = Field(default=Decimal("1.000000"))
+    party_type: Literal["CUSTOMER", "SUPPLIER"] | None = None
+    party_id: uuid.UUID | None = None
+    against_document_type: Literal["SALES_INVOICE", "SUPPLIER_INVOICE"] | None = None
+    against_document_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_party_reference(self):
+        if (self.party_type is None) != (self.party_id is None):
+            raise ValueError("Party type and party ID must be supplied together.")
+        if (self.against_document_type is None) != (self.against_document_id is None):
+            raise ValueError("Against-document type and ID must be supplied together.")
+        if self.against_document_id and not self.party_id:
+            raise ValueError("Invoice settlement references require a party.")
+        if self.against_document_type and self.against_document_type != (
+            "SALES_INVOICE" if self.party_type == "CUSTOMER" else "SUPPLIER_INVOICE"
+        ):
+            raise ValueError("Settlement invoice type must match the party type.")
+        return self
 
 
 def validate_zero_sum(entries: list[LedgerLineProposal]) -> Decimal:
@@ -167,4 +186,3 @@ async def validate_chart_of_accounts(
             )
             session.add(new_cc)
             found_cc.add(cc)
-

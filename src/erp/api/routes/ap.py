@@ -1,7 +1,7 @@
 """Accounts Payable 3-Way Matching and Procurement API Endpoints."""
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -207,6 +207,7 @@ class CreateInvoiceRequest(BaseModel):
     po_id: uuid.UUID | None = None
     grn_id: uuid.UUID | None = None
     invoice_date: date
+    due_date: date | None = None
     currency: str = "USD"
     purchase_tax_template_id: uuid.UUID | None = None
     subtotal: Decimal
@@ -413,6 +414,7 @@ async def create_purchase_order(
 
     calculation = await commercial_calculation_service.calculate(
         db, tenant_id=tenant_id, context="BUYING", currency=req.currency.upper(),
+        use_tenant_default=True,
         shipping_rule_id=req.shipping_rule_id,
         destination_country=addresses_by_id.get(req.shipping_address_id).country if req.shipping_address_id else None,
         destination_state=addresses_by_id.get(req.shipping_address_id).state if req.shipping_address_id else None,
@@ -1269,6 +1271,8 @@ async def create_supplier_invoice(
         if req.subtotal > allowed_subtotal:
             raise HTTPException(status_code=409, detail=f"Invoice subtotal exceeds the purchase-order over-billing tolerance ({tolerance}%).")
     invoice_tax_template_id = req.purchase_tax_template_id or (po.purchase_tax_template_id if po else None)
+    if req.due_date and req.due_date < req.invoice_date:
+        raise HTTPException(status_code=422, detail="Invoice due date cannot precede invoice date.")
     inv = SupplierInvoice(
         tenant_id=tenant_id,
         invoice_number=req.invoice_number,
@@ -1276,6 +1280,7 @@ async def create_supplier_invoice(
         po_id=req.po_id,
         grn_id=grn_id,
         invoice_date=req.invoice_date,
+        due_date=req.due_date or (req.invoice_date + timedelta(days=supplier.payment_terms_days)),
         currency=req.currency,
         subtotal=req.subtotal,
         tax_amount=Decimal("0"),
@@ -1439,7 +1444,7 @@ async def create_supplier_invoice(
                 SupplierInvoice, SupplierInvoice.invoice_id == SupplierInvoiceItem.invoice_id,
             ).where(
                 SupplierInvoice.tenant_id == tenant_id, SupplierInvoice.po_id == req.po_id,
-                SupplierInvoice.status != "CANCELLED", SupplierInvoiceItem.tenant_id == tenant_id,
+                SupplierInvoice.matching_status != "CANCELLED", SupplierInvoiceItem.tenant_id == tenant_id,
                 SupplierInvoiceItem.po_item_id == po_item.item_line_id,
             ))
             remaining = max(Decimal("0"), po_item.quantity * (Decimal("1") + tolerance_pct / Decimal("100")) - Decimal(str(billed_before or 0)))
@@ -1449,7 +1454,7 @@ async def create_supplier_invoice(
                 SupplierInvoice, SupplierInvoice.invoice_id == SupplierInvoiceItem.invoice_id,
             ).where(
                 SupplierInvoice.tenant_id == tenant_id, SupplierInvoice.po_id == req.po_id,
-                SupplierInvoice.status != "CANCELLED", SupplierInvoiceItem.tenant_id == tenant_id,
+                SupplierInvoice.matching_status != "CANCELLED", SupplierInvoiceItem.tenant_id == tenant_id,
                 SupplierInvoiceItem.po_item_id == po_item.item_line_id,
             ))
             full_remaining_qty = max(Decimal("0"), po_item.quantity - Decimal(str(billed_before or 0)))

@@ -78,6 +78,8 @@ def build_invoice_ledger_lines(invoice: SupplierInvoice) -> list[LedgerLinePropo
     entries.extend(tax_entries)
     entries.append(LedgerLineProposal(
         account_code="2100-AP-VENDORS", cost_center="CORP-FINANCE",
+        party_type="SUPPLIER", party_id=invoice.supplier_id,
+        against_document_type="SUPPLIER_INVOICE", against_document_id=invoice.invoice_id,
         debit_amount=Decimal("0.0000"), credit_amount=invoice.total_amount,
         currency=invoice.currency,
     ))

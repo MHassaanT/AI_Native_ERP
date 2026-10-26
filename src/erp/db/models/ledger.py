@@ -67,6 +67,11 @@ class GeneralLedgerEntry(Base, TenantMixin):
         UUID(as_uuid=True),
         nullable=False,
     )
+    party_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    party_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    party_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    against_document_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    against_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     period_closing_locked: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -79,6 +84,18 @@ class GeneralLedgerEntry(Base, TenantMixin):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "(party_type IS NULL AND party_id IS NULL AND party_name_snapshot IS NULL) OR "
+            "(party_type IS NOT NULL AND party_type IN ('CUSTOMER','SUPPLIER') AND party_id IS NOT NULL AND party_name_snapshot IS NOT NULL)",
+            name="ck_gl_party_complete",
+        ),
+        CheckConstraint(
+            "(against_document_type IS NULL AND against_document_id IS NULL) OR "
+            "(against_document_type IS NOT NULL AND against_document_type IN ('SALES_INVOICE','SUPPLIER_INVOICE') AND against_document_id IS NOT NULL AND party_id IS NOT NULL)",
+            name="ck_gl_against_complete",
+        ),
+        Index("ix_gl_tenant_party_date", "tenant_id", "party_type", "party_id", "posting_date", "entry_id"),
+        Index("ix_gl_tenant_against", "tenant_id", "against_document_type", "against_document_id"),
         CheckConstraint("debit_amount >= 0", name="chk_positive_debit"),
         CheckConstraint("credit_amount >= 0", name="chk_positive_credit"),
         CheckConstraint(

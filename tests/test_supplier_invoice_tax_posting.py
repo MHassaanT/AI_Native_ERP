@@ -1,5 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
+import uuid
 
 from erp.workflows.accounts_payable.three_way_matcher import build_invoice_ledger_lines
 
@@ -13,6 +14,7 @@ def _totals(entries):
 
 def test_inclusive_recoverable_tax_is_split_from_inventory_and_balanced():
     invoice = SimpleNamespace(
+        supplier_id=uuid.uuid4(), invoice_id=uuid.uuid4(),
         currency="USD", total_amount=Decimal("110.0000"),
         tax_snapshot=[{"account_head": "2200-INPUT-VAT", "amount": "10.0000", "included_in_rate": True, "add_deduct": "ADD", "consider_for_valuation": False}],
     )
@@ -23,10 +25,14 @@ def test_inclusive_recoverable_tax_is_split_from_inventory_and_balanced():
         ("2100-AP-VENDORS", Decimal("0.0000"), Decimal("110.0000")),
     ]
     assert _totals(entries) == (Decimal("110.0000"), Decimal("110.0000"))
+    assert entries[-1].party_id == invoice.supplier_id
+    assert entries[-1].against_document_id == invoice.invoice_id
+    assert all(line.party_id is None for line in entries[:-1])
 
 
 def test_deducted_tax_posts_to_liability_without_reducing_expense():
     invoice = SimpleNamespace(
+        supplier_id=uuid.uuid4(), invoice_id=uuid.uuid4(),
         currency="USD", total_amount=Decimal("90.0000"),
         tax_snapshot=[{"account_head": "2250-WITHHOLDING", "amount": "10.0000", "included_in_rate": False, "add_deduct": "DEDUCT", "consider_for_valuation": False}],
     )
@@ -38,6 +44,7 @@ def test_deducted_tax_posts_to_liability_without_reducing_expense():
 
 def test_valuation_tax_is_capitalized_into_inventory():
     invoice = SimpleNamespace(
+        supplier_id=uuid.uuid4(), invoice_id=uuid.uuid4(),
         currency="USD", total_amount=Decimal("110.0000"),
         tax_snapshot=[{"account_head": "2200-INPUT-VAT", "amount": "10.0000", "included_in_rate": False, "add_deduct": "ADD", "consider_for_valuation": True}],
     )

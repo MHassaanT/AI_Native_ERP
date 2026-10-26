@@ -352,7 +352,7 @@ export const api = {
     fetchWithTenant("/iot/telemetry", { method: "POST", body: JSON.stringify(frame) }),
 
   // --- General Ledger ---
-  getGLEntries: () => fetchWithTenant("/ledger/entries"),
+  getGLEntries: (transactionId?: string) => fetchWithTenant(`/ledger/entries${transactionId ? `?transaction_id=${encodeURIComponent(transactionId)}` : ""}`),
   getAccounts: () => fetchWithTenant("/ledger/accounts"),
   stageTransaction: (data: any) =>
     fetchWithTenant("/ledger/stage", { method: "POST", body: JSON.stringify(data) }),
@@ -550,6 +550,7 @@ export const api = {
 
   // --- Phase 2: Buying, Strategic Sourcing, Landed Costs & Subcontracting ---
   getWarehouses: () => fetchWithTenant("/procurement/warehouses"),
+  getProcurementCostCenters: () => fetchWithTenant("/procurement/cost-centers"),
   // Material Requests (Requisitions)
   getMaterialRequests: (params?: { status?: string; type?: string }) => {
     const q = new URLSearchParams();
@@ -560,6 +561,10 @@ export const api = {
   },
   createMaterialRequest: (data: any) =>
     fetchWithTenant("/procurement/material-requests", { method: "POST", body: JSON.stringify(data) }),
+  updateMaterialRequest: (mrId: string, data: any) =>
+    fetchWithTenant(`/procurement/material-requests/${mrId}`, { method: "PUT", body: JSON.stringify(data) }),
+  amendMaterialRequest: (mrId: string, mr_number: string) =>
+    fetchWithTenant(`/procurement/material-requests/${mrId}/amend`, { method: "POST", body: JSON.stringify({ mr_number }) }),
   getProcurementTracker: () => fetchWithTenant("/procurement/tracker"),
   getMaterialRequest: (mrId: string) =>
     fetchWithTenant(`/procurement/material-requests/${mrId}`),
