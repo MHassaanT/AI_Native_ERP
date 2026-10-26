@@ -13,7 +13,7 @@ import pytest_asyncio
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from pydantic import ValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import func, inspect as sa_inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -83,7 +83,8 @@ async def party_db():
                  "sales_quotations", "sales_quotation_items", "product_bundles", "product_bundle_items",
                  "sales_partners", "sales_teams", "pos_invoices", "pos_invoice_items", "pos_invoice_payments", "pos_profiles", "pos_opening_entries",
                  "tenant_settings", "price_lists", "item_prices", "pricing_rules", "promotional_schemes",
-                 "uoms", "uom_conversions", "projects", "cost_centers", "warehouses", "stock_levels", "document_audit_batches"}
+                 "uoms", "uom_conversions", "projects", "cost_centers", "warehouses", "stock_levels", "document_audit_batches",
+                 "work_orders"}
         tables = {Base.metadata.tables[name] for name in names}
         pending = list(tables)
         while pending:
@@ -715,6 +716,35 @@ async def test_056_pos_cost_and_return_lineage_migration_executes(party_db):
 
     await connection.run_sync(run_migration, migration.downgrade)
     await connection.run_sync(run_migration, migration.upgrade)
+
+
+@pytest.mark.asyncio
+async def test_057_work_order_production_plan_link_migration_executes(party_db):
+    filename = Path(__file__).resolve().parents[1] / "alembic/versions/057_work_order_production_plan_link.py"
+    spec = importlib.util.spec_from_file_location("migration_057", filename)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    connection = await party_db.connection()
+
+    def run_migration(sync_connection, operation):
+        with Operations.context(MigrationContext.configure(sync_connection)):
+            operation()
+
+    await connection.run_sync(run_migration, migration.downgrade)
+    await connection.run_sync(run_migration, migration.upgrade)
+    columns, foreign_keys = await connection.run_sync(
+        lambda sync_connection: (
+            {column["name"] for column in sa_inspect(sync_connection).get_columns("work_orders")},
+            sa_inspect(sync_connection).get_foreign_keys("work_orders"),
+        )
+    )
+    assert "production_plan_id" in columns
+    assert any(
+        fk["name"] == "fk_work_order_production_plan"
+        and fk["constrained_columns"] == ["production_plan_id"]
+        and fk["referred_table"] == "production_plans"
+        for fk in foreign_keys
+    )
 
 
 @pytest.mark.asyncio

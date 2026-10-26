@@ -348,7 +348,9 @@ class WorkOrder(Base, TenantMixin, TimestampMixin):
     )
     work_order_number: Mapped[str] = mapped_column(String(64), nullable=False)
     production_plan_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("production_plans.plan_id"), nullable=True
+        UUID(as_uuid=True), ForeignKey(
+            "production_plans.plan_id", name="fk_work_order_production_plan",
+        ), nullable=True
     )
     item_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=False
