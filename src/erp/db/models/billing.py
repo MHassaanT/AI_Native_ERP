@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -83,12 +84,19 @@ class CreditNoteItem(Base, TenantMixin, TimestampMixin):
     item_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=False
     )
+    sales_invoice_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sales_invoice_items.invoice_item_id"), nullable=True
+    )
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
 
     credit_note = relationship("CreditNote", back_populates="items")
     item = relationship("Item")
+
+    __table_args__ = (
+        Index("ix_credit_note_item_tenant_sales_invoice_item", "tenant_id", "sales_invoice_item_id"),
+    )
 
 
 class DebitNote(Base, TenantMixin, TimestampMixin):
@@ -662,8 +670,17 @@ class SalesTaxesAndChargesTemplateDetail(Base, TenantMixin, TimestampMixin):
     account_head: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g., 2200-OUTPUT-VAT, 5100-FREIGHT
     description: Mapped[str] = mapped_column(String(255), nullable=False)
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0.0000"))
+    reference_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    included_in_rate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    add_deduct: Mapped[str] = mapped_column(String(8), nullable=False, default="ADD")
+    consider_for_valuation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     template = relationship("SalesTaxesAndChargesTemplate", back_populates="taxes")
+    __table_args__ = (
+        CheckConstraint("rate >= 0", name="ck_sales_tax_rate_nonnegative"),
+        CheckConstraint("charge_type IN ('Actual','On Net Total','On Previous Row Amount','On Previous Row Total','On Item Quantity')", name="ck_sales_tax_charge_type"),
+        CheckConstraint("add_deduct IN ('ADD','DEDUCT')", name="ck_sales_tax_add_deduct"),
+    )
 
 
 # ==========================================

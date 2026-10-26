@@ -38,7 +38,7 @@ from erp.db.models.billing import (
     SubscriptionPlan,
     TaxWithholdingCategory,
 )
-from erp.db.models.sales import Customer, SalesInvoice
+from erp.db.models.sales import Customer, SalesInvoice, SalesInvoiceItem
 from erp.workflows.billing.budget_service import BudgetService
 from erp.workflows.billing.dunning_service import DunningService
 from erp.workflows.billing.pos_service import POSService
@@ -165,11 +165,15 @@ class ApplyPaymentTermsRequest(BaseModel):
 
 
 class TaxTemplateDetailSchema(BaseModel):
-    charge_type: str = "On Net Total"  # Actual, On Net Total, On Previous Row Amount
+    charge_type: str = "On Net Total"
     row_id: int | None = None
     account_head: str
     description: str
-    rate: Decimal = Decimal("0.0000")
+    rate: Decimal = Field(default=Decimal("0.0000"), ge=0)
+    reference_row: int | None = Field(default=None, ge=1)
+    included_in_rate: bool = False
+    add_deduct: str = Field(default="ADD", pattern="^(ADD|DEDUCT)$")
+    consider_for_valuation: bool = False
 
 
 class CreateTaxTemplateRequest(BaseModel):
@@ -216,8 +220,9 @@ class BudgetCheckRequest(BaseModel):
 
 class ReturnItemLine(BaseModel):
     item_id: uuid.UUID
+    sales_invoice_item_id: uuid.UUID | None = None
     quantity: Decimal
-    unit_price: Decimal
+    unit_price: Decimal | None = None
 
 
 class CreateCreditNoteRequest(BaseModel):
@@ -1333,15 +1338,18 @@ async def create_credit_note(
     tenant_id: TenantIdDep,
 ):
     items_dicts = [it.model_dump() for it in payload.items]
-    credit_note = await returns_service.issue_credit_note(
-        session=session,
-        tenant_id=tenant_id,
-        customer_id=payload.customer_id,
-        reason=payload.reason,
-        items=items_dicts,
-        invoice_id=payload.invoice_id,
-        warehouse_id=payload.warehouse_id,
-    )
+    try:
+        credit_note = await returns_service.issue_credit_note(
+            session=session,
+            tenant_id=tenant_id,
+            customer_id=payload.customer_id,
+            reason=payload.reason,
+            items=items_dicts,
+            invoice_id=payload.invoice_id,
+            warehouse_id=payload.warehouse_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     await session.commit()
     return {
         "message": "Credit Note issued successfully",

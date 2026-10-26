@@ -1,7 +1,7 @@
 """Procurement, Sourcing, Landed Costs, and Subcontracting API Router."""
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -11,14 +11,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from erp.api.deps import DbSessionDep, TenantIdDep
-from erp.db.models.inventory import StockLedgerEntry, StockLevel, Warehouse
+from erp.db.models.inventory import Item, StockLedgerEntry, StockLevel, Warehouse
+from erp.db.models.hr import Employee
 from erp.db.models.purchasing import (
     GoodsReceiptNote,
     GoodsReceiptNoteItem,
+    MaterialRequest,
     PurchaseOrder,
     PurchaseOrderItem,
     Supplier,
+    SupplierInvoice,
 )
+from erp.db.models.shared_master import TermsAndConditionsTemplate
 from erp.workflows.procurement import (
     blanket_order_service,
     landed_cost_service,
@@ -38,7 +42,7 @@ router = APIRouter(prefix="/procurement", tags=["Procurement & Sourcing"])
 
 class MaterialRequestItemSchema(BaseModel):
     item_id: uuid.UUID
-    quantity: Decimal
+    quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
     target_warehouse_id: uuid.UUID | None = None
     uom: str = "Nos"
 
@@ -48,6 +52,10 @@ class CreateMaterialRequestSchema(BaseModel):
     material_request_type: str = "PURCHASE"  # PURCHASE, MATERIAL_TRANSFER, MATERIAL_ISSUE, MANUFACTURE
     schedule_date: date | None = None
     notes: str | None = None
+    requester_employee_id: uuid.UUID | None = None
+    external_reference: str | None = Field(default=None, max_length=255)
+    terms_template_id: uuid.UUID | None = None
+    terms_text: str | None = None
     items: list[MaterialRequestItemSchema] = Field(default_factory=list)
 
 
@@ -194,13 +202,13 @@ class CreateSubcontractingReceiptSchema(BaseModel):
 
 class InspectGRNItemSchema(BaseModel):
     grn_item_id: uuid.UUID
-    quantity_accepted: Decimal
-    quantity_rejected: Decimal = Decimal("0.0000")
+    quantity_accepted: Decimal = Field(ge=0, max_digits=18, decimal_places=4)
+    quantity_rejected: Decimal = Field(default=Decimal("0.0000"), ge=0, max_digits=18, decimal_places=4)
     rejected_warehouse_id: uuid.UUID | None = None
 
 
 class InspectGRNSchema(BaseModel):
-    items: list[InspectGRNItemSchema]
+    items: list[InspectGRNItemSchema] = Field(min_length=1)
 
 
 # =========================================================================
@@ -239,6 +247,37 @@ async def list_material_requests(
     )
 
 
+@router.get("/tracker", summary="Trace procurement documents through source-line links")
+async def procurement_lineage_tracker(tenant_id: TenantIdDep, db: DbSessionDep):
+    """Returns tenant-scoped procurement documents with persisted parent-line IDs."""
+    material_requests = (await db.scalars(
+        select(MaterialRequest).options(selectinload(MaterialRequest.items))
+        .where(MaterialRequest.tenant_id == tenant_id)
+        .order_by(MaterialRequest.created_at.desc())
+    )).all()
+    purchase_orders = (await db.scalars(
+        select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.tenant_id == tenant_id)
+        .order_by(PurchaseOrder.created_at.desc())
+    )).all()
+    goods_receipts = (await db.scalars(
+        select(GoodsReceiptNote).options(selectinload(GoodsReceiptNote.items))
+        .where(GoodsReceiptNote.tenant_id == tenant_id)
+        .order_by(GoodsReceiptNote.created_at.desc())
+    )).all()
+    supplier_invoices = (await db.scalars(
+        select(SupplierInvoice).options(selectinload(SupplierInvoice.items))
+        .where(SupplierInvoice.tenant_id == tenant_id)
+        .order_by(SupplierInvoice.created_at.desc())
+    )).all()
+    return {
+        "material_requests": material_requests,
+        "purchase_orders": purchase_orders,
+        "goods_receipts": goods_receipts,
+        "supplier_invoices": supplier_invoices,
+    }
+
+
 @router.post("/material-requests", status_code=status.HTTP_201_CREATED, summary="Create Material Request")
 async def create_material_request(
     req: CreateMaterialRequestSchema,
@@ -247,6 +286,44 @@ async def create_material_request(
 ):
     """Creates a new Material Request (Requisition)."""
     try:
+        if req.items:
+            item_ids = {line.item_id for line in req.items}
+            found_item_ids = set((await db.scalars(select(Item.item_id).where(
+                Item.tenant_id == tenant_id,
+                Item.item_id.in_(item_ids),
+                Item.is_active.is_(True),
+            ))).all())
+            if found_item_ids != item_ids:
+                raise HTTPException(status_code=422, detail="Every material-request line must reference an active item in this workspace.")
+            warehouse_ids = {line.target_warehouse_id for line in req.items if line.target_warehouse_id}
+            if warehouse_ids:
+                found_warehouse_ids = set((await db.scalars(select(Warehouse.warehouse_id).where(
+                    Warehouse.tenant_id == tenant_id,
+                    Warehouse.warehouse_id.in_(warehouse_ids),
+                    Warehouse.is_active.is_(True),
+                ))).all())
+                if found_warehouse_ids != warehouse_ids:
+                    raise HTTPException(status_code=422, detail="Every target warehouse must be active in this workspace.")
+        if req.requester_employee_id:
+            requester = await db.scalar(select(Employee.employee_id).where(
+                Employee.tenant_id == tenant_id,
+                Employee.employee_id == req.requester_employee_id,
+                Employee.is_active.is_(True),
+            ))
+            if requester is None:
+                raise HTTPException(status_code=422, detail="Requester must be an active employee in this workspace.")
+        terms_text = req.terms_text
+        if req.terms_template_id:
+            template = await db.scalar(select(TermsAndConditionsTemplate).where(
+                TermsAndConditionsTemplate.tenant_id == tenant_id,
+                TermsAndConditionsTemplate.terms_template_id == req.terms_template_id,
+                TermsAndConditionsTemplate.is_active.is_(True),
+                TermsAndConditionsTemplate.applicable_to.in_(("BUYING", "BOTH")),
+            ))
+            if template is None:
+                raise HTTPException(status_code=422, detail="Terms template must be an active buying template in this workspace.")
+            if terms_text is None:
+                terms_text = template.terms
         mr = await requisition_service.create_material_request(
             session=db,
             tenant_id=tenant_id,
@@ -254,6 +331,10 @@ async def create_material_request(
             material_request_type=req.material_request_type,
             schedule_date=req.schedule_date,
             notes=req.notes,
+            requester_employee_id=req.requester_employee_id,
+            external_reference=req.external_reference,
+            terms_template_id=req.terms_template_id,
+            terms_text=terms_text,
             items=[i.model_dump() for i in req.items],
         )
         return mr
@@ -840,21 +921,23 @@ async def inspect_grn(
     db: DbSessionDep,
 ):
     """Inspects received goods in a GRN, splitting accepted and rejected quantities."""
-    grn_stmt = (
-        select(GoodsReceiptNote)
-        .options(selectinload(GoodsReceiptNote.items))
-        .where(
-            GoodsReceiptNote.tenant_id == tenant_id,
-            GoodsReceiptNote.grn_id == grn_id,
-        )
-    )
+    grn_stmt = select(GoodsReceiptNote).where(
+        GoodsReceiptNote.tenant_id == tenant_id, GoodsReceiptNote.grn_id == grn_id,
+    ).with_for_update()
     grn = (await db.execute(grn_stmt)).scalar_one_or_none()
     if not grn:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="GRN not found.")
-
-    items_by_id = {item.grn_item_id: item for item in grn.items}
+    grn_items = (await db.scalars(select(GoodsReceiptNoteItem).where(
+        GoodsReceiptNoteItem.tenant_id == tenant_id,
+        GoodsReceiptNoteItem.grn_id == grn_id,
+    ).order_by(GoodsReceiptNoteItem.grn_item_id).with_for_update())).all()
+    items_by_id = {item.grn_item_id: item for item in grn_items}
+    seen: set[uuid.UUID] = set()
 
     for insp in req.items:
+        if insp.grn_item_id in seen:
+            raise HTTPException(status_code=422, detail="A receipt line may appear only once in an inspection.")
+        seen.add(insp.grn_item_id)
         grn_item = items_by_id.get(insp.grn_item_id)
         if not grn_item:
             raise HTTPException(
@@ -862,61 +945,74 @@ async def inspect_grn(
                 detail=f"Item {insp.grn_item_id} not found in GRN {grn.grn_number}",
             )
 
-        if (insp.quantity_accepted + insp.quantity_rejected) > grn_item.quantity_received:
+        if grn_item.inspection_completed:
+            raise HTTPException(status_code=409, detail="This receipt line has already been inspected; use a return or stock adjustment to correct it.")
+        if insp.quantity_accepted + insp.quantity_rejected != grn_item.quantity_received:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Accepted ({insp.quantity_accepted}) + Rejected ({insp.quantity_rejected}) cannot exceed received quantity ({grn_item.quantity_received}).",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Accepted ({insp.quantity_accepted}) plus rejected ({insp.quantity_rejected}) must equal received quantity ({grn_item.quantity_received}).",
             )
+        source_warehouse_id = grn_item.warehouse_id
+        if insp.quantity_rejected > 0:
+            if not source_warehouse_id or not insp.rejected_warehouse_id:
+                raise HTTPException(status_code=422, detail="Rejected goods require both the receipt warehouse and a quarantine warehouse.")
+            quarantine = await db.scalar(select(Warehouse).where(
+                Warehouse.tenant_id == tenant_id,
+                Warehouse.warehouse_id == insp.rejected_warehouse_id,
+                Warehouse.is_active.is_(True),
+                Warehouse.is_quarantine.is_(True),
+            ))
+            if quarantine is None:
+                raise HTTPException(status_code=422, detail="Rejected goods must be transferred to an active quarantine warehouse in this workspace.")
+            if insp.rejected_warehouse_id == source_warehouse_id:
+                raise HTTPException(status_code=422, detail="The quarantine warehouse must differ from the receiving warehouse.")
+            rejected_stock_qty = insp.quantity_rejected * grn_item.conversion_factor
+            source_stock = await db.scalar(select(StockLevel).where(
+                StockLevel.tenant_id == tenant_id, StockLevel.item_id == grn_item.item_id,
+                StockLevel.warehouse_id == source_warehouse_id,
+            ).with_for_update())
+            if source_stock is None or source_stock.available_qty < rejected_stock_qty:
+                raise HTTPException(status_code=409, detail="Rejected stock is no longer available in the receiving warehouse; reconcile deliveries/reservations before inspection.")
+            quarantine_stock = await db.scalar(select(StockLevel).where(
+                StockLevel.tenant_id == tenant_id, StockLevel.item_id == grn_item.item_id,
+                StockLevel.warehouse_id == quarantine.warehouse_id,
+            ).with_for_update())
+            if quarantine_stock is None:
+                quarantine_stock = StockLevel(
+                    tenant_id=tenant_id, item_id=grn_item.item_id, warehouse_id=quarantine.warehouse_id,
+                    current_qty=Decimal("0"), reserved_qty=Decimal("0"), available_qty=Decimal("0"),
+                    valuation_rate=grn_item.unit_price / grn_item.conversion_factor,
+                    is_quarantined=True,
+                )
+                db.add(quarantine_stock)
+                await db.flush()
+            if quarantine_stock.reserved_qty > quarantine_stock.current_qty:
+                raise HTTPException(status_code=409, detail="Quarantine warehouse has inconsistent reservations.")
+            quarantine_stock.is_quarantined = True
+            source_stock.current_qty -= rejected_stock_qty
+            source_stock.available_qty = source_stock.current_qty - source_stock.reserved_qty
+            quarantine_stock.current_qty += rejected_stock_qty
+            quarantine_stock.available_qty = quarantine_stock.current_qty - quarantine_stock.reserved_qty
+            unit_cost = grn_item.unit_price / grn_item.conversion_factor
+            now = datetime.now(UTC)
+            db.add(StockLedgerEntry(
+                tenant_id=tenant_id, posting_datetime=now, item_id=grn_item.item_id,
+                warehouse_id=source_warehouse_id, actual_qty=-rejected_stock_qty,
+                qty_after_transaction=source_stock.current_qty, valuation_rate=source_stock.valuation_rate,
+                source_document_type="GRN_QUARANTINE_REJECT_OUT", source_document_id=grn.grn_id,
+            ))
+            db.add(StockLedgerEntry(
+                tenant_id=tenant_id, posting_datetime=now, item_id=grn_item.item_id,
+                warehouse_id=quarantine.warehouse_id, actual_qty=rejected_stock_qty,
+                qty_after_transaction=quarantine_stock.current_qty, incoming_rate=unit_cost,
+                valuation_rate=unit_cost, stock_value_difference=rejected_stock_qty * unit_cost,
+                source_document_type="GRN_QUARANTINE_REJECT_IN", source_document_id=grn.grn_id,
+            ))
+            grn_item.rejected_warehouse_id = quarantine.warehouse_id
 
         grn_item.quantity_accepted = insp.quantity_accepted
         grn_item.quantity_rejected = insp.quantity_rejected
-        if insp.rejected_warehouse_id:
-            grn_item.rejected_warehouse_id = insp.rejected_warehouse_id
-
-            # Move rejected stock into quarantine warehouse if rejected quantity > 0
-            if insp.quantity_rejected > Decimal("0.0000"):
-                rej_stk = (
-                    await db.execute(
-                        select(StockLevel).where(
-                            StockLevel.tenant_id == tenant_id,
-                            StockLevel.item_id == grn_item.item_id,
-                            StockLevel.warehouse_id == insp.rejected_warehouse_id,
-                        )
-                    )
-                ).scalar_one_or_none()
-
-                rate = grn_item.unit_price or Decimal("0.0000")
-                if rej_stk:
-                    rej_stk.current_qty += insp.quantity_rejected
-                    rej_stk.available_qty = rej_stk.current_qty - rej_stk.reserved_qty
-                    qty_after = rej_stk.current_qty
-                else:
-                    rej_stk = StockLevel(
-                        tenant_id=tenant_id,
-                        item_id=grn_item.item_id,
-                        warehouse_id=insp.rejected_warehouse_id,
-                        current_qty=insp.quantity_rejected,
-                        reserved_qty=Decimal("0.0000"),
-                        available_qty=insp.quantity_rejected,
-                        valuation_rate=rate,
-                    )
-                    db.add(rej_stk)
-                    qty_after = insp.quantity_rejected
-
-                db.add(
-                    StockLedgerEntry(
-                        tenant_id=tenant_id,
-                        posting_datetime=datetime.now(),
-                        item_id=grn_item.item_id,
-                        warehouse_id=insp.rejected_warehouse_id,
-                        actual_qty=insp.quantity_rejected,
-                        qty_after_transaction=qty_after,
-                        incoming_rate=rate,
-                        valuation_rate=rate,
-                        source_document_type="GRN_QUARANTINE_REJECT",
-                        source_document_id=grn.grn_id,
-                    )
-                )
+        grn_item.inspection_completed = True
 
     await db.flush()
     return {"message": "GRN inspection completed successfully.", "grn_id": str(grn.grn_id)}

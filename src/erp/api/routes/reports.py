@@ -188,10 +188,14 @@ _ENTERPRISE_REPORTS = {
     "purchase-invoice-trends": "Purchase Invoice Trends",
     "purchase-analytics": "Purchase Analytics by Supplier and Item",
     "purchase-order-analytics": "Purchase Order Status and Overdue Analysis",
-    "supplier-wise-sales-analytics": "Supplier-Wise Sales Analytics",
+    "supplier-wise-sales-analytics": "Supplier Sourcing Analysis (legacy URL)",
     "procurement-tracker": "Material Request to Purchase Order to Receipt Tracker",
+    "subcontracting-materials": "Subcontractor Raw Material Supply, Consumption and Ageing",
+    "subcontracting-finished-goods": "Subcontracted Finished Goods Receipt and Pending Quantity",
+    "item-wise-purchase-history": "Item-wise Purchase History",
     "items-to-be-requested": "Items Below Reorder Level",
     "sales-analytics": "Sales Analytics by Item, Customer, and Territory",
+    "item-wise-sales-history": "Item-wise Sales History",
     "sales-order-analysis": "Pending Delivery and Billing Analysis",
     "quotation-trends": "Quotation Trends",
     "sales-order-trends": "Sales Order Trends",
@@ -219,10 +223,16 @@ def _make_enterprise_report(report_name: str, summary: str):
         as_of_date: Optional[date] = Query(None),
         month: Optional[int] = Query(None, ge=1, le=12),
         fiscal_year: Optional[int] = Query(None, ge=2000, le=2200),
+        item_id: Optional[uuid.UUID] = Query(None),
+        party_id: Optional[uuid.UUID] = Query(None),
+        currency: Optional[str] = Query(None, min_length=3, max_length=3),
+        territory: Optional[str] = Query(None, min_length=1, max_length=128),
     ) -> Any:
         return await enterprise_reports_service.run(
             report_name, session, tenant_id, from_date=from_date, to_date=to_date,
             as_of_date=as_of_date, month=month, fiscal_year=fiscal_year,
+            item_id=item_id, party_id=party_id, currency=currency,
+            territory=territory,
         )
 
     endpoint.__name__ = f"get_{report_name.replace('-', '_')}"

@@ -1,20 +1,24 @@
 """Purchasing and Accounts Payable Domain Models."""
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
     Numeric,
     String,
     Text,
+    UniqueConstraint,
+    func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from erp.db.models.base import Base, TenantMixin, TimestampMixin
@@ -71,13 +75,65 @@ class PurchaseOrder(Base, TenantMixin, TimestampMixin):
         nullable=False,
         default="DRAFT",  # DRAFT, SUBMITTED, PARTIALLY_RECEIVED, COMPLETED, CANCELLED
     )
+    amended_from_po_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("purchase_orders.po_id"), nullable=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Commercial snapshot fields are intentionally copied onto the document.
+    # A future master-data edit must never alter a submitted purchase order.
+    material_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("material_requests.mr_id"), nullable=True
+    )
+    supplier_contact_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contacts.contact_id"), nullable=True
+    )
+    supplier_contact_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    supplier_address_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("addresses.address_id"), nullable=True
+    )
+    supplier_address_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    shipping_address_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("addresses.address_id"), nullable=True
+    )
+    shipping_address_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    terms_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("terms_and_conditions_templates.terms_template_id"), nullable=True
+    )
+    purchase_tax_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("purchase_taxes_and_charges_templates.template_id"), nullable=True)
+    tax_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    terms_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_terms: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    incoterm: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    shipping_rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("shipping_rules.shipping_rule_id"), nullable=True
+    )
+    exchange_rate: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8), nullable=False, default=Decimal("1.00000000")
+    )
+    target_warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=True
+    )
+    discount_amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0.0000")
+    )
+    taxes_and_charges: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0.0000")
+    )
+    shipping_charge: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    calculation_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     items: Mapped[list["PurchaseOrderItem"]] = relationship(
         back_populates="purchase_order", cascade="all, delete-orphan"
     )
     supplier = relationship("Supplier")
 
-    __table_args__ = (Index("idx_po_tenant_number", "tenant_id", "po_number", unique=True),)
+    __table_args__ = (
+        Index("idx_po_tenant_number", "tenant_id", "po_number", unique=True),
+        Index("ix_purchase_order_tenant_material_request", "tenant_id", "material_request_id"),
+        CheckConstraint("exchange_rate > 0", name="ck_purchase_order_exchange_rate_positive"),
+        CheckConstraint("discount_amount >= 0", name="ck_purchase_order_discount_nonnegative"),
+    )
 
 
 class PurchaseOrderItem(Base, TenantMixin, TimestampMixin):
@@ -97,9 +153,49 @@ class PurchaseOrderItem(Base, TenantMixin, TimestampMixin):
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    material_request_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("material_request_items.mr_item_id"), nullable=True
+    )
+    rfq_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rfq_items.rfq_item_id"), nullable=True
+    )
+    supplier_quotation_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("supplier_quotation_items.sq_item_id"), nullable=True
+    )
+    uom_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("uoms.uom_id"), nullable=True
+    )
+    conversion_factor: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8), nullable=False, default=Decimal("1.00000000")
+    )
+    stock_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=Decimal("0.0000")
+    )
+    target_warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=True
+    )
+    price_list_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("price_lists.price_list_id"), nullable=True
+    )
+    item_price_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("item_prices.item_price_id"), nullable=True
+    )
+    price_list_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("pricing_rules.pricing_rule_id"), nullable=True)
+    promotion_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("promotional_schemes.scheme_id"), nullable=True)
+    is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     purchase_order: Mapped["PurchaseOrder"] = relationship(back_populates="items")
     item = relationship("Item")
+
+    __table_args__ = (
+        Index("ix_purchase_order_item_tenant_mr_item", "tenant_id", "material_request_item_id"),
+        Index("ix_purchase_order_item_tenant_sq_item", "tenant_id", "supplier_quotation_item_id"),
+        CheckConstraint("conversion_factor > 0", name="ck_purchase_order_item_conversion_positive"),
+        CheckConstraint("stock_quantity >= 0", name="ck_purchase_order_item_stock_quantity_nonnegative"),
+        CheckConstraint("discount_amount >= 0", name="ck_purchase_order_item_discount_nonnegative"),
+    )
 
 
 class GoodsReceiptNote(Base, TenantMixin, TimestampMixin):
@@ -145,6 +241,10 @@ class GoodsReceiptNoteItem(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=False
     )
     quantity_received: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    conversion_factor: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("1"))
+    stock_quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    warehouse_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=True)
+    inspection_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     quantity_accepted: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
@@ -157,10 +257,22 @@ class GoodsReceiptNoteItem(Base, TenantMixin, TimestampMixin):
     unit_price: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
+    material_request_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("material_request_items.mr_item_id"), nullable=True
+    )
+    supplier_quotation_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("supplier_quotation_items.sq_item_id"), nullable=True
+    )
 
     grn: Mapped["GoodsReceiptNote"] = relationship(back_populates="items")
     item = relationship("Item")
     rejected_warehouse = relationship("Warehouse", foreign_keys=[rejected_warehouse_id])
+    warehouse = relationship("Warehouse", foreign_keys=[warehouse_id])
+
+    __table_args__ = (
+        CheckConstraint("conversion_factor > 0", name="ck_grn_item_conversion_positive"),
+        CheckConstraint("stock_quantity >= 0", name="ck_grn_item_stock_quantity_nonnegative"),
+    )
 
 
 class SupplierInvoice(Base, TenantMixin, TimestampMixin):
@@ -183,6 +295,8 @@ class SupplierInvoice(Base, TenantMixin, TimestampMixin):
     )
     invoice_date: Mapped[date] = mapped_column(Date, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    purchase_tax_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("purchase_taxes_and_charges_templates.template_id"), nullable=True)
+    tax_snapshot: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     subtotal: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
@@ -223,8 +337,46 @@ class SupplierInvoiceItem(Base, TenantMixin, TimestampMixin):
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    po_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("purchase_order_items.item_line_id"), nullable=True
+    )
+    grn_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("goods_receipt_note_items.grn_item_id"), nullable=True
+    )
 
     invoice: Mapped["SupplierInvoice"] = relationship(back_populates="items")
+
+    __table_args__ = (
+        Index("ix_supplier_invoice_item_tenant_po_item", "tenant_id", "po_item_id"),
+        Index("ix_supplier_invoice_item_tenant_grn_item", "tenant_id", "grn_item_id"),
+    )
+
+
+class DocumentAuditBatch(Base, TenantMixin):
+    """Idempotent audit container for lineage backfills and bulk document actions."""
+
+    __tablename__ = "document_audit_batches"
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+    )
+    input_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    result_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "operation", "idempotency_key", name="uq_document_audit_batch_idempotency"),
+        CheckConstraint("status IN ('PENDING','RUNNING','COMPLETED','FAILED')", name="ck_document_audit_batch_status"),
+        Index("ix_document_audit_batch_tenant_operation", "tenant_id", "operation", "created_at"),
+    )
 
 
 # =========================================================================
@@ -249,6 +401,14 @@ class MaterialRequest(Base, TenantMixin, TimestampMixin):
         String(32), nullable=False, default="DRAFT"  # DRAFT, SUBMITTED, ORDERED, PARTIALLY_ORDERED, CANCELLED
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requester_employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employees.employee_id"), nullable=True
+    )
+    external_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    terms_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("terms_and_conditions_templates.terms_template_id"), nullable=True
+    )
+    terms_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     items: Mapped[list["MaterialRequestItem"]] = relationship(
         back_populates="material_request", cascade="all, delete-orphan"
@@ -554,5 +714,3 @@ class SupplierScorecardCriteria(Base, TenantMixin, TimestampMixin):
     weighted_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("33.33"))
 
     scorecard: Mapped["SupplierScorecard"] = relationship(back_populates="criteria")
-
-

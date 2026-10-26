@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Response, status
@@ -26,6 +26,7 @@ from erp.commercial.quote_invalidator import (
 )
 from erp.db.models.inventory import Item, StockLedgerEntry, StockLevel, Warehouse
 from erp.db.models.ledger import GeneralLedgerEntry
+from erp.db.models.purchasing import DocumentAuditBatch
 from erp.db.models.sales import (
     Customer,
     DeliveryNote,
@@ -35,16 +36,88 @@ from erp.db.models.sales import (
     SalesOrder,
     SalesOrderItem,
     SalesQuotation,
+    SalesQuotationItem,
 )
+from erp.db.models.shared_master import Address, Contact, PriceList, TermsAndConditionsTemplate
+from erp.db.models.phase_b import SalesPartner, SalesTeam, ShippingRule
+from erp.db.models.billing import SalesTaxesAndChargesTemplate
 from erp.db.models.tenant import Tenant
 from erp.db.models.user import User
 from erp.ledger.sales_posting import (
     SalesPostingConfigurationError,
     resolve_sales_posting_configuration,
 )
+from erp.workflows.commercial.calculation_service import (
+    CalculationLineInput,
+    TaxRowInput,
+    calculate_tax_rows,
+    commercial_calculation_service,
+)
+from erp.workflows.commercial.sales_team_service import invoice_sales_team_snapshot
 
 router = APIRouter(prefix="/commercial", tags=["Commercial & Dynamic Pricing Agent"])
 controller_review_dep = require_roles("CONTROLLER")
+
+
+class CalculationLineSchema(BaseModel):
+    item_id: uuid.UUID
+    quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
+    unit_price: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=4)
+    uom_id: uuid.UUID | None = None
+    price_list_id: uuid.UUID | None = None
+
+
+class CalculationTaxRowSchema(BaseModel):
+    row_id: int = Field(ge=1)
+    charge_type: str
+    rate: Decimal = Field(ge=0, max_digits=18, decimal_places=4)
+    description: str
+    account_head: str
+    reference_row: int | None = Field(default=None, ge=1)
+    actual_amount: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=4)
+    included_in_rate: bool = False
+    add_deduct: str = "ADD"
+    consider_for_valuation: bool = False
+
+
+class CalculationPreviewRequest(BaseModel):
+    context: str = Field(pattern="^(BUYING|SELLING|buying|selling)$")
+    currency: str = Field(min_length=3, max_length=3)
+    price_list_id: uuid.UUID | None = None
+    shipping_rule_id: uuid.UUID | None = None
+    destination_country: str | None = None
+    destination_state: str | None = None
+    calculation_date: date | None = None
+    lines: list[CalculationLineSchema] = Field(min_length=1, max_length=100)
+    tax_rows: list[CalculationTaxRowSchema] = Field(default_factory=list, max_length=100)
+
+
+@router.post("/calculations/preview", summary="Preview tenant-scoped buying/selling prices and charges")
+async def preview_commercial_calculation(req: CalculationPreviewRequest, tenant_id: TenantIdDep, db: DbSessionDep):
+    try:
+        calculation = await commercial_calculation_service.calculate(
+            db,
+            tenant_id=tenant_id,
+            context=req.context,
+            currency=req.currency.upper(),
+            price_list_id=req.price_list_id,
+            shipping_rule_id=req.shipping_rule_id,
+            destination_country=req.destination_country,
+            destination_state=req.destination_state,
+            calculation_date=req.calculation_date,
+            lines=[CalculationLineInput(**line.model_dump()) for line in req.lines],
+        )
+        tax_result = None
+        if req.tax_rows:
+            tax_inputs = [TaxRowInput(**row.model_dump()) for row in req.tax_rows]
+            tax_result = calculate_tax_rows(
+                calculation.subtotal + calculation.shipping_charge,
+                sum((line.entered_quantity for line in calculation.lines), Decimal("0")),
+                tax_inputs,
+            )
+        return {"calculation": calculation, "tax_calculation": tax_result}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 class CreateCustomerRequest(BaseModel):
@@ -55,14 +128,27 @@ class CreateCustomerRequest(BaseModel):
     payment_terms_days: int = Field(default=30, ge=0, le=3650)
 
 
+class SalesQuoteLineSpec(BaseModel):
+    item_id: uuid.UUID
+    quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
+    unit_price: Decimal = Field(ge=0, max_digits=18, decimal_places=4)
+    uom_id: uuid.UUID | None = None
+    price_list_id: uuid.UUID | None = None
+
+
 class CreateSalesQuoteRequest(BaseModel):
     quotation_number: str = Field(..., min_length=2, max_length=64)
     customer_id: uuid.UUID
     quotation_date: date
     valid_until: date
-    subtotal: Decimal
+    subtotal: Decimal | None = None
     tax_amount: Decimal = Decimal("0.00")
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    price_list_id: uuid.UUID | None = None
+    shipping_rule_id: uuid.UUID | None = None
+    sales_tax_template_id: uuid.UUID | None = None
     contribution_margin_pct: Decimal = Decimal("25.00")
+    items: list[SalesQuoteLineSpec] = Field(default_factory=list, max_length=100)
 
 
 @router.get("/customers", summary="List customers")
@@ -112,6 +198,7 @@ async def list_sales_quotes(tenant_id: TenantIdDep, db: DbSessionDep):
     """Returns dynamic commercial quotations for the tenant."""
     stmt = (
         select(SalesQuotation)
+        .options(selectinload(SalesQuotation.items))
         .where(SalesQuotation.tenant_id == tenant_id)
         .order_by(SalesQuotation.created_at.desc())
     )
@@ -123,28 +210,139 @@ async def create_sales_quote(
     req: CreateSalesQuoteRequest, tenant_id: TenantIdDep, db: DbSessionDep
 ):
     """Records a new evaluated commercial sales quotation."""
-    total = req.subtotal + req.tax_amount
+    customer_exists = await db.scalar(select(Customer.customer_id).where(
+        Customer.tenant_id == tenant_id,
+        Customer.customer_id == req.customer_id,
+        Customer.is_active.is_(True),
+    ))
+    if customer_exists is None:
+        raise HTTPException(status_code=422, detail="Customer must be active and belong to this workspace.")
+    if req.items:
+        quote_item_ids = {line.item_id for line in req.items}
+        active_items = set((await db.scalars(select(Item.item_id).where(
+            Item.tenant_id == tenant_id, Item.item_id.in_(quote_item_ids),
+            Item.is_active.is_(True), Item.is_sales_item.is_(True),
+        ))).all())
+        if active_items != quote_item_ids:
+            raise HTTPException(status_code=422, detail="Every quotation line must reference an active sales item in this workspace.")
+    if not req.items:
+        raise HTTPException(status_code=422, detail="A sales quotation requires persisted line items.")
+    tax_template = None
+    if req.sales_tax_template_id:
+        tax_template = await db.scalar(select(SalesTaxesAndChargesTemplate).options(
+            selectinload(SalesTaxesAndChargesTemplate.taxes),
+        ).where(
+            SalesTaxesAndChargesTemplate.tenant_id == tenant_id,
+            SalesTaxesAndChargesTemplate.template_id == req.sales_tax_template_id,
+            SalesTaxesAndChargesTemplate.disabled.is_(False),
+        ))
+        if tax_template is None:
+            raise HTTPException(status_code=422, detail="Sales tax template must be active and belong to this workspace.")
+    try:
+        calculation = await commercial_calculation_service.calculate(
+            db, tenant_id=tenant_id, context="SELLING", currency=req.currency.upper(),
+            price_list_id=req.price_list_id, shipping_rule_id=req.shipping_rule_id,
+            lines=[CalculationLineInput(
+                item_id=line.item_id, quantity=line.quantity, unit_price=line.unit_price,
+                uom_id=line.uom_id, price_list_id=line.price_list_id,
+            ) for line in req.items],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    calculated_main = [line for line in calculation.lines if not line.is_free]
+    gross_subtotal = sum((line.base_rate * line.entered_quantity for line in calculated_main), Decimal("0"))
+    tax_result = None
+    tax_snapshot = None
+    if tax_template:
+        details = sorted(tax_template.taxes, key=lambda row: row.row_id or 0)
+        tax_inputs = []
+        prior_row_id = None
+        for index, detail in enumerate(details, start=1):
+            row_id = detail.row_id or index
+            tax_inputs.append(TaxRowInput(
+                row_id=row_id, charge_type=detail.charge_type, rate=Decimal(detail.rate),
+                description=detail.description, account_head=detail.account_head,
+                reference_row=detail.reference_row or (prior_row_id if "Previous Row" in detail.charge_type else None),
+                actual_amount=Decimal(detail.rate) if detail.charge_type == "Actual" else None,
+                included_in_rate=detail.included_in_rate, add_deduct=detail.add_deduct,
+                consider_for_valuation=detail.consider_for_valuation,
+            ))
+            prior_row_id = row_id
+        tax_result = calculate_tax_rows(calculation.subtotal + calculation.shipping_charge,
+            sum((line.entered_quantity for line in calculation.lines), Decimal("0")), tax_inputs)
+        tax_snapshot = [{
+            "row_id": row.row_id,
+            "charge_type": row.charge_type,
+            "description": row.description,
+            "account_head": row.account_head,
+            "calculation_base": str(row.calculation_base),
+            "amount": str(row.amount),
+            "running_total": str(row.running_total),
+            "included_in_rate": row.included_in_rate,
+            "add_deduct": row.add_deduct,
+            "consider_for_valuation": row.consider_for_valuation,
+            "source_template_id": str(req.sales_tax_template_id),
+        } for row in tax_result.rows]
+    elif req.tax_amount:
+        raise HTTPException(status_code=422, detail="Tax amount must come from a tenant-owned sales tax template; client-supplied tax totals are not accepted.")
+    tax_amount = tax_result.tax_total if tax_result else Decimal("0")
+    total = (tax_result.grand_total if tax_result else calculation.subtotal + calculation.shipping_charge)
     quote = SalesQuotation(
         tenant_id=tenant_id,
         quotation_number=req.quotation_number,
         customer_id=req.customer_id,
         quotation_date=req.quotation_date,
         valid_until=req.valid_until,
-        subtotal=req.subtotal,
-        tax_amount=req.tax_amount,
+        subtotal=gross_subtotal,
+        tax_amount=tax_amount,
         total_amount=total,
+        currency=req.currency.upper(),
+        price_list_id=req.price_list_id,
+        shipping_rule_id=req.shipping_rule_id,
+        sales_tax_template_id=req.sales_tax_template_id,
+        tax_snapshot=tax_snapshot,
+        discount_amount=calculation.discount_total,
+        shipping_charge=calculation.shipping_charge,
+        calculation_hash=calculation.calculation_hash,
         contribution_margin_pct=req.contribution_margin_pct,
         status="OFFICIAL",
     )
     db.add(quote)
+    await db.flush()
+    for calculated in calculation.lines:
+        db.add(SalesQuotationItem(
+            tenant_id=tenant_id,
+            quotation_id=quote.quotation_id,
+            item_id=calculated.item_id,
+            quantity=calculated.entered_quantity,
+            unit_price=calculated.base_rate,
+            line_total=calculated.line_total,
+            uom_id=calculated.uom_id,
+            conversion_factor=calculated.conversion_factor,
+            stock_quantity=calculated.stock_quantity,
+            price_list_id=calculated.price_list_id,
+            item_price_id=calculated.item_price_id,
+            price_list_rate=calculated.price_list_rate,
+            discount_amount=calculated.discount_amount,
+            pricing_rule_id=calculated.pricing_rule_id,
+            promotion_id=calculated.promotion_id,
+            is_free=calculated.is_free,
+        ))
     await db.flush()
     return quote
 
 
 class QuoteItemSpec(BaseModel):
     item_id: uuid.UUID
+    quotation_item_id: uuid.UUID | None = None
     quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
-    unit_price: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
+    unit_price: Decimal = Field(ge=0, max_digits=18, decimal_places=4)
+
+
+class SalesTeamAssignmentInput(BaseModel):
+    partner_id: uuid.UUID
+    contribution_pct: Decimal = Field(gt=0, le=100, max_digits=7, decimal_places=4)
+    commission_rate: Decimal | None = Field(default=None, ge=0, le=100, max_digits=7, decimal_places=4)
 
 
 class ConvertQuoteToOrderRequest(BaseModel):
@@ -152,15 +350,35 @@ class ConvertQuoteToOrderRequest(BaseModel):
     delivery_date: date | None = None
     items: list[QuoteItemSpec] = Field(min_length=1, max_length=100)
     warehouse_id: uuid.UUID | None = None
+    customer_contact_id: uuid.UUID | None = None
+    billing_address_id: uuid.UUID | None = None
+    shipping_address_id: uuid.UUID | None = None
+    terms_template_id: uuid.UUID | None = None
+    terms_text: str | None = None
+    price_list_id: uuid.UUID | None = None
+    shipping_rule_id: uuid.UUID | None = None
+    payment_terms: str | None = None
+    exchange_rate: Decimal = Field(default=Decimal("1"), gt=0, max_digits=18, decimal_places=8)
+    sales_team: list[SalesTeamAssignmentInput] = Field(default_factory=list, max_length=20)
+
+
+class FulfillOrderItemRequest(BaseModel):
+    order_item_id: uuid.UUID
+    quantity: Decimal = Field(gt=0, max_digits=18, decimal_places=4)
 
 
 class FulfillOrderRequest(BaseModel):
     warehouse_id: uuid.UUID | None = None
     delivery_date: date | None = None
+    items: list[FulfillOrderItemRequest] | None = Field(default=None, min_length=1, max_length=100)
 
 
 class ConfirmSalesOrderRequest(BaseModel):
     warehouse_id: uuid.UUID | None = None
+
+
+class AmendSalesOrderRequest(BaseModel):
+    order_number: str = Field(..., min_length=2, max_length=64)
 
 
 class CreateSalesInvoiceRequest(BaseModel):
@@ -180,6 +398,7 @@ async def convert_quote_to_order(
     quote = (
         await db.execute(
             select(SalesQuotation)
+            .options(selectinload(SalesQuotation.items))
             .where(
                 SalesQuotation.tenant_id == tenant_id,
                 SalesQuotation.quotation_id == quotation_id,
@@ -208,9 +427,79 @@ async def convert_quote_to_order(
     ).scalar_one_or_none()
     if customer is None:
         raise HTTPException(status_code=409, detail="Quotation customer is no longer active in this tenant.")
+    requested_team_ids = [assignment.partner_id for assignment in req.sales_team]
+    if len(requested_team_ids) != len(set(requested_team_ids)):
+        raise HTTPException(status_code=422, detail="A sales partner can only appear once on a sales team.")
+    if req.sales_team and sum((row.contribution_pct for row in req.sales_team), Decimal("0")) != Decimal("100"):
+        raise HTTPException(status_code=422, detail="Sales team contribution percentages must total exactly 100%.")
+    sales_partners = (await db.scalars(select(SalesPartner).where(
+        SalesPartner.tenant_id == tenant_id,
+        SalesPartner.sales_partner_id.in_(requested_team_ids) if requested_team_ids else SalesPartner.sales_partner_id.is_(None),
+        SalesPartner.is_active.is_(True),
+    ))).all()
+    sales_partners_by_id = {partner.sales_partner_id: partner for partner in sales_partners}
+    if len(sales_partners_by_id) != len(requested_team_ids):
+        raise HTTPException(status_code=422, detail="Every sales partner must be active and belong to this workspace.")
+    contact = None
+    if req.customer_contact_id:
+        contact = await db.scalar(select(Contact).where(
+            Contact.tenant_id == tenant_id, Contact.contact_id == req.customer_contact_id,
+            Contact.is_active.is_(True),
+        ))
+        if contact is None:
+            raise HTTPException(status_code=422, detail="Customer contact must be active and belong to this workspace.")
+    addresses: dict[uuid.UUID, Address] = {}
+    selected_addresses = {value for value in (req.billing_address_id, req.shipping_address_id) if value}
+    if selected_addresses:
+        addresses = {row.address_id: row for row in (await db.scalars(select(Address).where(
+            Address.tenant_id == tenant_id, Address.address_id.in_(selected_addresses),
+        ))).all()}
+        if set(addresses) != selected_addresses:
+            raise HTTPException(status_code=422, detail="Billing and shipping addresses must belong to this workspace.")
+    if req.terms_template_id:
+        terms_template = await db.scalar(select(TermsAndConditionsTemplate).where(
+            TermsAndConditionsTemplate.tenant_id == tenant_id,
+            TermsAndConditionsTemplate.terms_template_id == req.terms_template_id,
+            TermsAndConditionsTemplate.is_active.is_(True),
+            TermsAndConditionsTemplate.applicable_to.in_(("SELLING", "BOTH")),
+        ))
+        if terms_template is None:
+            raise HTTPException(status_code=422, detail="Terms template must be an active selling template in this workspace.")
+    else:
+        terms_template = None
+    if req.price_list_id:
+        price_list = await db.scalar(select(PriceList.price_list_id).where(
+            PriceList.tenant_id == tenant_id, PriceList.price_list_id == req.price_list_id,
+            PriceList.selling.is_(True), PriceList.is_active.is_(True),
+        ))
+        if price_list is None:
+            raise HTTPException(status_code=422, detail="Price list must be active and enabled for selling.")
+    if req.shipping_rule_id:
+        shipping_rule = await db.scalar(select(ShippingRule.shipping_rule_id).where(
+            ShippingRule.tenant_id == tenant_id, ShippingRule.shipping_rule_id == req.shipping_rule_id,
+            ShippingRule.is_active.is_(True),
+        ))
+        if shipping_rule is None:
+            raise HTTPException(status_code=422, detail="Shipping rule must be active and belong to this workspace.")
     order_num = req.order_number or f"SO-{quote.quotation_number.replace('QT-', '')}"
-    if len({line.item_id for line in req.items}) != len(req.items):
-        raise HTTPException(status_code=422, detail="Combine duplicate item lines before converting the quote.")
+    source_quote_lines: list[SalesQuotationItem | None]
+    if quote.items:
+        quote_items_by_id = {line.quotation_item_id: line for line in quote.items}
+        requested_quote_line_ids = [line.quotation_item_id for line in req.items]
+        if any(requested_quote_line_ids):
+            if any(line_id is None for line_id in requested_quote_line_ids) or len(set(requested_quote_line_ids)) != len(req.items):
+                raise HTTPException(status_code=422, detail="Each converted line must identify a unique source quotation line.")
+            if set(requested_quote_line_ids) != set(quote_items_by_id):
+                raise HTTPException(status_code=409, detail="Converted lines must include every source quotation line exactly once.")
+            source_quote_lines = [quote_items_by_id[line_id] for line_id in requested_quote_line_ids]
+        else:
+            # Compatibility for older clients only works where each item appears once.
+            quote_items_by_item = {line.item_id: line for line in quote.items}
+            if len(quote_items_by_item) != len(quote.items) or len({line.item_id for line in req.items}) != len(req.items):
+                raise HTTPException(status_code=422, detail="This quotation has repeated items; refresh the client to convert its individual source lines.")
+            source_quote_lines = [quote_items_by_item.get(line.item_id) for line in req.items]
+    else:
+        source_quote_lines = [None] * len(req.items)
     duplicate = (
         await db.execute(
             select(SalesOrder.order_id).where(
@@ -235,13 +524,20 @@ async def convert_quote_to_order(
             .with_for_update()
         )
     ).scalars().all()
-    if len(items) != len(item_ids):
+    if len(items) != len(set(item_ids)):
         raise HTTPException(status_code=422, detail="Every order line must reference an active tenant-owned sales item.")
     total_amt = sum((line.quantity * line.unit_price for line in req.items), Decimal("0.0000"))
     if total_amt <= 0 or total_amt >= Decimal("100000000000000"):
         raise HTTPException(status_code=422, detail="Order total is outside the supported monetary range.")
-    if total_amt != quote.total_amount:
-        raise HTTPException(status_code=409, detail="Order line total must match the accepted quotation total.")
+    expected_line_total = quote.subtotal if quote.items else quote.total_amount
+    if total_amt != expected_line_total:
+        raise HTTPException(status_code=409, detail="Order line amount must match the accepted quotation subtotal.")
+    if quote.items and any(
+        source is None or source.item_id != line.item_id
+        or source.quantity != line.quantity or source.unit_price != line.unit_price
+        for line, source in zip(req.items, source_quote_lines, strict=True)
+    ):
+        raise HTTPException(status_code=409, detail="Sales order lines must match the accepted quotation line snapshots.")
     open_invoice_total = (
         await db.execute(
             select(func.coalesce(func.sum(SalesInvoice.total_amount), 0)).where(
@@ -256,11 +552,11 @@ async def convert_quote_to_order(
             select(func.coalesce(func.sum(SalesOrder.total_amount), 0)).where(
                 SalesOrder.tenant_id == tenant_id,
                 SalesOrder.customer_id == customer.customer_id,
-                SalesOrder.status.in__(("PENDING_CONFIRMATION", "CONFIRMED", "BACKORDERED")),
+                SalesOrder.status.in__(("PENDING_CONFIRMATION", "CONFIRMED", "BACKORDERED", "PARTIALLY_DELIVERED")),
             )
         )
     ).scalar_one()
-    credit_exposure = Decimal(str(open_invoice_total)) + Decimal(str(other_open_order_total)) + total_amt
+    credit_exposure = Decimal(str(open_invoice_total)) + Decimal(str(other_open_order_total)) + quote.total_amount
     if credit_exposure > customer.credit_limit:
         raise HTTPException(status_code=409, detail="Order exceeds available customer credit; finance review is required.")
     if req.delivery_date and req.delivery_date < date.today():
@@ -291,12 +587,22 @@ async def convert_quote_to_order(
         ).scalars().all()
         stock_by_item = {stock.item_id: stock for stock in stocks}
         candidate: list[tuple[StockLevel, Decimal]] = []
-        for line in sorted(req.items, key=lambda value: str(value.item_id)):
-            stock = stock_by_item.get(line.item_id)
-            if stock is None or stock.is_quarantined or stock.current_qty - stock.reserved_qty < line.quantity:
+        required_by_item: dict[uuid.UUID, Decimal] = {}
+        for line, source_quote_line in zip(req.items, source_quote_lines, strict=True):
+            required_stock = (
+                source_quote_line.stock_quantity
+                if source_quote_line and source_quote_line.stock_quantity > 0
+                else line.quantity * source_quote_line.conversion_factor
+                if source_quote_line
+                else line.quantity
+            )
+            required_by_item[line.item_id] = required_by_item.get(line.item_id, Decimal("0")) + required_stock
+        for required_item_id, required_stock in sorted(required_by_item.items(), key=lambda pair: str(pair[0])):
+            stock = stock_by_item.get(required_item_id)
+            if stock is None or stock.is_quarantined or stock.current_qty - stock.reserved_qty < required_stock:
                 break
-            candidate.append((stock, line.quantity))
-        if len(candidate) == len(req.items):
+            candidate.append((stock, required_stock))
+        if len(candidate) == len(required_by_item):
             chosen_warehouse = warehouse
             reservation_rows = candidate
             break
@@ -307,28 +613,80 @@ async def convert_quote_to_order(
         tenant_id=tenant_id,
         order_number=order_num,
         customer_id=quote.customer_id,
+        source_quotation_id=quote.quotation_id,
         order_date=date.today(),
         delivery_date=req.delivery_date or quote.valid_until,
-        total_amount=total_amt,
+        subtotal=quote.subtotal,
+        tax_amount=quote.tax_amount,
+        total_amount=quote.total_amount,
         status="CONFIRMED",
         fulfillment_warehouse_id=chosen_warehouse.warehouse_id,
+        customer_contact_id=req.customer_contact_id,
+        customer_contact_snapshot=({key: getattr(contact, key) for key in ("full_name", "email", "phone", "designation")} if contact else None),
+        billing_address_id=req.billing_address_id,
+        billing_address_snapshot=({key: getattr(addresses[req.billing_address_id], key) for key in ("address_title", "address_type", "address_line1", "address_line2", "city", "state", "postal_code", "country")} if req.billing_address_id else None),
+        shipping_address_id=req.shipping_address_id,
+        shipping_address_snapshot=({key: getattr(addresses[req.shipping_address_id], key) for key in ("address_title", "address_type", "address_line1", "address_line2", "city", "state", "postal_code", "country")} if req.shipping_address_id else None),
+        terms_template_id=req.terms_template_id,
+        terms_text=req.terms_text if req.terms_text is not None else (terms_template.terms if terms_template else None),
+        price_list_id=quote.price_list_id or req.price_list_id,
+        shipping_rule_id=quote.shipping_rule_id or req.shipping_rule_id,
+        payment_terms=req.payment_terms or f"Net {customer.payment_terms_days} days",
+        exchange_rate=req.exchange_rate,
+        discount_amount=quote.discount_amount,
+        taxes_and_charges=quote.tax_amount,
+        shipping_charge=quote.shipping_charge,
+        sales_tax_template_id=quote.sales_tax_template_id,
+        tax_snapshot=quote.tax_snapshot,
+        calculation_hash=quote.calculation_hash,
+        submitted_at=datetime.now(UTC),
     )
     db.add(order)
     await db.flush()
-    for it in req.items:
+    for assignment in req.sales_team:
+        partner = sales_partners_by_id[assignment.partner_id]
+        db.add(SalesTeam(
+            tenant_id=tenant_id,
+            document_type="SALES_ORDER",
+            document_id=order.order_id,
+            sales_partner_id=partner.sales_partner_id,
+            contribution_pct=assignment.contribution_pct,
+            commission_rate=assignment.commission_rate if assignment.commission_rate is not None else partner.commission_rate,
+        ))
+    for it, source_quote_line in zip(req.items, source_quote_lines, strict=True):
         so_item = SalesOrderItem(
             tenant_id=tenant_id,
             order_id=order.order_id,
             item_id=it.item_id,
             quantity=it.quantity,
             unit_price=it.unit_price,
-            line_total=it.quantity * it.unit_price,
+            line_total=source_quote_line.line_total if source_quote_line else it.quantity * it.unit_price,
+            stock_quantity=source_quote_line.stock_quantity if source_quote_line else it.quantity,
+            uom_id=source_quote_line.uom_id if source_quote_line else None,
+            conversion_factor=source_quote_line.conversion_factor if source_quote_line else Decimal("1"),
+            price_list_id=source_quote_line.price_list_id if source_quote_line else quote.price_list_id,
+            item_price_id=source_quote_line.item_price_id if source_quote_line else None,
+            price_list_rate=source_quote_line.price_list_rate if source_quote_line else it.unit_price,
+            discount_amount=source_quote_line.discount_amount if source_quote_line else Decimal("0"),
+            pricing_rule_id=source_quote_line.pricing_rule_id if source_quote_line else None,
+            promotion_id=source_quote_line.promotion_id if source_quote_line else None,
+            is_free=source_quote_line.is_free if source_quote_line else False,
+            source_quotation_item_id=(source_quote_line.quotation_item_id if source_quote_line else None),
         )
         db.add(so_item)
     for stock, quantity in reservation_rows:
         stock.reserved_qty += quantity
         stock.available_qty = stock.current_qty - stock.reserved_qty
     quote.status = "ACCEPTED"
+    db.add(DocumentAuditBatch(
+        tenant_id=tenant_id,
+        operation="SALES_ORDER_SUBMITTED",
+        idempotency_key=str(order.order_id),
+        status="COMPLETED",
+        input_snapshot={"quotation_id": str(quote.quotation_id)},
+        result_snapshot={"order_number": order.order_number, "status": order.status},
+        completed_at=datetime.now(UTC),
+    ))
     await db.flush()
     return order
 
@@ -374,6 +732,12 @@ async def confirm_pending_sales_order(
         }
     if order.status != "PENDING_CONFIRMATION":
         raise HTTPException(status_code=409, detail="Only pending-confirmation orders can be confirmed.")
+    if order.amended_from_order_id:
+        original = await db.scalar(select(SalesOrder).where(
+            SalesOrder.tenant_id == tenant_id, SalesOrder.order_id == order.amended_from_order_id,
+        ).with_for_update())
+        if original is None or original.status != "CANCELLED":
+            raise HTTPException(status_code=409, detail="Cancel the original sales order before confirming its amendment.")
 
     customer = (
         await db.execute(
@@ -429,6 +793,10 @@ async def confirm_pending_sales_order(
     if req.warehouse_id:
         warehouse_query = warehouse_query.where(Warehouse.warehouse_id == req.warehouse_id)
     warehouses = (await db.execute(warehouse_query.order_by(Warehouse.warehouse_code))).scalars().all()
+    stock_requirements: dict[uuid.UUID, Decimal] = {}
+    for line in lines:
+        required_stock = line.stock_quantity or (line.quantity * line.conversion_factor)
+        stock_requirements[line.item_id] = stock_requirements.get(line.item_id, Decimal("0")) + required_stock
     reservations: list[tuple[StockLevel, Decimal]] | None = None
     chosen_warehouse: Warehouse | None = None
     for warehouse in warehouses:
@@ -438,7 +806,7 @@ async def confirm_pending_sales_order(
                 .where(
                     StockLevel.tenant_id == tenant_id,
                     StockLevel.warehouse_id == warehouse.warehouse_id,
-                    StockLevel.item_id.in_([line.item_id for line in lines]),
+                    StockLevel.item_id.in_(stock_requirements),
                 )
                 .order_by(StockLevel.item_id)
                 .with_for_update()
@@ -446,15 +814,15 @@ async def confirm_pending_sales_order(
         ).scalars().all()
         stock_by_item = {stock.item_id: stock for stock in stocks}
         candidate: list[tuple[StockLevel, Decimal]] = []
-        for line in lines:
-            stock = stock_by_item.get(line.item_id)
+        for item_id, required_stock in stock_requirements.items():
+            stock = stock_by_item.get(item_id)
             if stock is None or stock.is_quarantined:
                 break
             available = stock.current_qty - stock.reserved_qty
-            if available < line.quantity:
+            if available < required_stock:
                 break
-            candidate.append((stock, line.quantity))
-        if len(candidate) == len(lines):
+            candidate.append((stock, required_stock))
+        if len(candidate) == len(stock_requirements):
             reservations = candidate
             chosen_warehouse = warehouse
             break
@@ -466,6 +834,16 @@ async def confirm_pending_sales_order(
         stock.available_qty = stock.current_qty - stock.reserved_qty
     order.fulfillment_warehouse_id = chosen_warehouse.warehouse_id
     order.status = "CONFIRMED"
+    order.submitted_at = datetime.now(UTC)
+    db.add(DocumentAuditBatch(
+        tenant_id=tenant_id,
+        operation="SALES_ORDER_SUBMITTED",
+        idempotency_key=str(order.order_id),
+        status="COMPLETED",
+        input_snapshot={"order_id": str(order.order_id)},
+        result_snapshot={"order_number": order.order_number, "status": order.status},
+        completed_at=datetime.now(UTC),
+    ))
     await db.flush()
     return {
         "order_id": str(order.order_id),
@@ -473,6 +851,146 @@ async def confirm_pending_sales_order(
         "warehouse_id": str(chosen_warehouse.warehouse_id),
         "stock_reserved": True,
     }
+
+
+@router.post("/orders/{order_id}/cancel", summary="Cancel an unfulfilled sales order")
+async def cancel_sales_order(order_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep):
+    order = (await db.execute(select(SalesOrder).options(selectinload(SalesOrder.items)).where(
+        SalesOrder.tenant_id == tenant_id, SalesOrder.order_id == order_id,
+    ).with_for_update())).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Sales order not found.")
+    if order.status == "CANCELLED":
+        return order
+    if order.status not in {"PENDING_CONFIRMATION", "CONFIRMED", "BACKORDERED"}:
+        raise HTTPException(status_code=409, detail="Orders with delivered quantities cannot be cancelled; record a return or credit note.")
+    downstream = await db.scalar(select(DeliveryNote.delivery_note_id).where(
+        DeliveryNote.tenant_id == tenant_id, DeliveryNote.order_id == order.order_id,
+    ).limit(1).with_for_update())
+    if downstream or any(line.delivered_quantity > 0 or line.invoiced_quantity > 0 for line in order.items):
+        raise HTTPException(status_code=409, detail="Orders with delivery or invoice activity cannot be cancelled directly.")
+    if order.status == "CONFIRMED" and order.fulfillment_warehouse_id:
+        quantities: dict[uuid.UUID, Decimal] = {}
+        for line in order.items:
+            remaining_entered = line.quantity - line.delivered_quantity
+            remaining_stock = remaining_entered * line.conversion_factor
+            quantities[line.item_id] = quantities.get(line.item_id, Decimal("0")) + (
+                line.stock_quantity - line.delivered_quantity * line.conversion_factor
+                if line.stock_quantity > 0
+                else remaining_stock
+            )
+        stocks = (await db.scalars(select(StockLevel).where(
+            StockLevel.tenant_id == tenant_id,
+            StockLevel.warehouse_id == order.fulfillment_warehouse_id,
+            StockLevel.item_id.in_(quantities),
+        ).order_by(StockLevel.item_id).with_for_update())).all()
+        stock_by_item = {row.item_id: row for row in stocks}
+        for item_id, quantity in quantities.items():
+            stock = stock_by_item.get(item_id)
+            if stock is None or stock.reserved_qty < quantity:
+                raise HTTPException(status_code=409, detail="Reserved inventory changed; reconcile stock before cancelling the order.")
+        for item_id, quantity in quantities.items():
+            stock = stock_by_item[item_id]
+            stock.reserved_qty -= quantity
+            stock.available_qty = stock.current_qty - stock.reserved_qty
+    order.status = "CANCELLED"
+    order.cancelled_at = datetime.now(UTC)
+    db.add(DocumentAuditBatch(
+        tenant_id=tenant_id, operation="SALES_ORDER_CANCELLED", idempotency_key=str(order.order_id),
+        status="COMPLETED", input_snapshot={"order_id": str(order.order_id)},
+        result_snapshot={"order_number": order.order_number, "status": order.status}, completed_at=datetime.now(UTC),
+    ))
+    await db.flush()
+    return order
+
+
+@router.post("/orders/{order_id}/amend", status_code=status.HTTP_201_CREATED, summary="Create a draft amendment of a sales order")
+async def amend_sales_order(
+    order_id: uuid.UUID,
+    req: AmendSalesOrderRequest,
+    tenant_id: TenantIdDep,
+    db: DbSessionDep,
+    reviewer: User = controller_review_dep,
+):
+    if reviewer.tenant_id != tenant_id:
+        raise HTTPException(status_code=403, detail="Reviewer is not a member of this tenant.")
+    original = (await db.execute(select(SalesOrder).options(selectinload(SalesOrder.items)).where(
+        SalesOrder.tenant_id == tenant_id, SalesOrder.order_id == order_id,
+    ).with_for_update())).scalar_one_or_none()
+    if original is None:
+        raise HTTPException(status_code=404, detail="Sales order not found.")
+    if original.status not in {"PENDING_CONFIRMATION", "CONFIRMED"}:
+        raise HTTPException(status_code=409, detail="Only an unfulfilled sales order can be amended.")
+    duplicate = await db.scalar(select(SalesOrder.order_id).where(
+        SalesOrder.tenant_id == tenant_id, SalesOrder.order_number == req.order_number,
+    ))
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Sales-order number already exists in this workspace.")
+    downstream = await db.scalar(select(DeliveryNote.delivery_note_id).where(
+        DeliveryNote.tenant_id == tenant_id, DeliveryNote.order_id == original.order_id,
+    ).limit(1))
+    if downstream or any(line.delivered_quantity or line.invoiced_quantity for line in original.items):
+        raise HTTPException(status_code=409, detail="An order with delivery or invoice activity cannot be amended.")
+    revision = SalesOrder(
+        tenant_id=tenant_id, order_number=req.order_number, customer_id=original.customer_id,
+        order_date=date.today(), delivery_date=original.delivery_date, total_amount=original.total_amount,
+        status="PENDING_CONFIRMATION", amended_from_order_id=original.order_id,
+        source_quotation_id=original.source_quotation_id, customer_contact_id=original.customer_contact_id,
+        customer_contact_snapshot=original.customer_contact_snapshot,
+        billing_address_id=original.billing_address_id, billing_address_snapshot=original.billing_address_snapshot,
+        shipping_address_id=original.shipping_address_id, shipping_address_snapshot=original.shipping_address_snapshot,
+        terms_template_id=original.terms_template_id, terms_text=original.terms_text,
+        price_list_id=original.price_list_id, shipping_rule_id=original.shipping_rule_id,
+        payment_terms=original.payment_terms, exchange_rate=original.exchange_rate,
+        subtotal=original.subtotal, tax_amount=original.tax_amount,
+        discount_amount=original.discount_amount, taxes_and_charges=original.taxes_and_charges,
+    )
+    db.add(revision)
+    await db.flush()
+    for line in original.items:
+        db.add(SalesOrderItem(
+            tenant_id=tenant_id, order_id=revision.order_id, item_id=line.item_id,
+            source_quotation_item_id=line.source_quotation_item_id, quantity=line.quantity,
+            unit_price=line.unit_price, line_total=line.line_total, uom_id=line.uom_id,
+            conversion_factor=line.conversion_factor, stock_quantity=line.stock_quantity,
+            price_list_id=line.price_list_id, item_price_id=line.item_price_id,
+            price_list_rate=line.price_list_rate,
+        ))
+    db.add(DocumentAuditBatch(
+        tenant_id=tenant_id, operation="SALES_ORDER_AMENDMENT_CREATED", idempotency_key=str(revision.order_id),
+        status="COMPLETED", input_snapshot={"original_order_id": str(original.order_id)},
+        result_snapshot={"order_number": revision.order_number, "status": revision.status}, completed_at=datetime.now(UTC),
+    ))
+    await db.flush()
+    return revision
+
+
+@router.get("/orders/{order_id}/timeline", summary="Sales order source links and audit timeline")
+async def sales_order_timeline(order_id: uuid.UUID, tenant_id: TenantIdDep, db: DbSessionDep):
+    order = (await db.execute(select(SalesOrder).options(selectinload(SalesOrder.items)).where(
+        SalesOrder.tenant_id == tenant_id, SalesOrder.order_id == order_id,
+    ))).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Sales order not found.")
+    deliveries = (await db.scalars(select(DeliveryNote).where(
+        DeliveryNote.tenant_id == tenant_id, DeliveryNote.order_id == order_id,
+    ).order_by(DeliveryNote.delivery_date))).all()
+    invoices = (await db.scalars(select(SalesInvoice).where(
+        SalesInvoice.tenant_id == tenant_id, SalesInvoice.order_id == order_id,
+    ).order_by(SalesInvoice.invoice_date))).all()
+    events = (await db.scalars(select(DocumentAuditBatch).where(
+        DocumentAuditBatch.tenant_id == tenant_id,
+        DocumentAuditBatch.idempotency_key == str(order_id),
+        DocumentAuditBatch.operation.like("SALES_ORDER_%"),
+    ).order_by(DocumentAuditBatch.created_at))).all()
+    return {"document": order,
+        "source_links": {"source_quotation_id": str(order.source_quotation_id) if order.source_quotation_id else None,
+            "amended_from_order_id": str(order.amended_from_order_id) if order.amended_from_order_id else None,
+            "lines": [{"order_item_id": str(line.order_item_id), "source_quotation_item_id": str(line.source_quotation_item_id) if line.source_quotation_item_id else None,
+                "delivered_quantity": line.delivered_quantity, "invoiced_quantity": line.invoiced_quantity,
+                "remaining_to_deliver": line.quantity - line.delivered_quantity,
+                "remaining_to_invoice": line.delivered_quantity - line.invoiced_quantity} for line in order.items]},
+        "delivery_notes": deliveries, "sales_invoices": invoices, "audit_events": events}
 
 
 @router.post("/orders/{order_id}/fulfill", status_code=status.HTTP_201_CREATED, summary="Fulfill order and generate Delivery Note")
@@ -496,21 +1014,11 @@ async def fulfill_sales_order(
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sales order not found.")
 
-    if order.status not in {"CONFIRMED", "BACKORDERED"}:
+    if order.status not in {"CONFIRMED", "BACKORDERED", "PARTIALLY_DELIVERED"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Sales order must be confirmed before fulfillment.",
+            detail="Sales order must be confirmed and have undelivered quantities before fulfillment.",
         )
-
-    existing_dn = (
-        await db.execute(
-            select(DeliveryNote)
-            .where(DeliveryNote.tenant_id == tenant_id, DeliveryNote.order_id == order.order_id)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if existing_dn:
-        return existing_dn
 
     wh_id = order.fulfillment_warehouse_id
     if wh_id and req.warehouse_id and req.warehouse_id != wh_id:
@@ -530,9 +1038,33 @@ async def fulfill_sales_order(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No active warehouse found.")
         wh_id = wh.warehouse_id
 
+    order_items_by_id = {line.order_item_id: line for line in order.items}
+    if req.items is None:
+        fulfill_quantities = {
+            line.order_item_id: line.quantity - line.delivered_quantity
+            for line in order.items
+            if line.quantity > line.delivered_quantity
+        }
+    else:
+        fulfill_quantities = {}
+        for requested in req.items:
+            if requested.order_item_id in fulfill_quantities:
+                raise HTTPException(status_code=422, detail="A sales order line may appear only once per delivery note.")
+            line = order_items_by_id.get(requested.order_item_id)
+            if line is None:
+                raise HTTPException(status_code=422, detail="Every fulfillment line must belong to this sales order.")
+            remaining = line.quantity - line.delivered_quantity
+            if requested.quantity > remaining:
+                raise HTTPException(status_code=409, detail="Fulfillment quantity exceeds the undelivered order quantity.")
+            fulfill_quantities[requested.order_item_id] = requested.quantity
+    if not fulfill_quantities:
+        raise HTTPException(status_code=409, detail="No undelivered quantities remain on this sales order.")
     order_quantities: dict[uuid.UUID, Decimal] = {}
-    for line in order.items:
-        order_quantities[line.item_id] = order_quantities.get(line.item_id, Decimal("0.0000")) + line.quantity
+    for order_item_id, quantity in fulfill_quantities.items():
+        order_line = order_items_by_id[order_item_id]
+        item_id = order_line.item_id
+        stock_quantity = quantity * order_line.conversion_factor
+        order_quantities[item_id] = order_quantities.get(item_id, Decimal("0.0000")) + stock_quantity
     stock_rows = (
         await db.execute(
             select(StockLevel)
@@ -556,7 +1088,12 @@ async def fulfill_sales_order(
         if order.fulfillment_warehouse_id and stock.reserved_qty < quantity:
             raise HTTPException(status_code=409, detail=f"Reserved stock for item {item_id} is no longer available.")
 
-    dn_number = f"DN-{order.order_number}"
+    delivery_count = await db.scalar(
+        select(func.count(DeliveryNote.delivery_note_id)).where(
+            DeliveryNote.tenant_id == tenant_id, DeliveryNote.order_id == order.order_id
+        )
+    )
+    dn_number = f"DN-{order.order_number}" if not delivery_count else f"DN-{order.order_number}-{delivery_count + 1}"
     dn = DeliveryNote(
         tenant_id=tenant_id,
         delivery_note_number=dn_number,
@@ -570,20 +1107,24 @@ async def fulfill_sales_order(
 
     from datetime import UTC, datetime
 
-    for itm in order.items:
+    for order_item_id, quantity in fulfill_quantities.items():
+        itm = order_items_by_id[order_item_id]
         dn_item = DeliveryNoteItem(
             tenant_id=tenant_id,
             delivery_note_id=dn.delivery_note_id,
             order_item_id=itm.order_item_id,
             item_id=itm.item_id,
             warehouse_id=wh_id,
-            quantity=itm.quantity,
+            quantity=quantity,
         )
         db.add(dn_item)
 
+        itm.delivered_quantity += quantity
+
         stk = stock_by_item[itm.item_id]
-        stk.current_qty -= itm.quantity
-        stk.reserved_qty = max(Decimal("0.0000"), stk.reserved_qty - itm.quantity)
+        stock_quantity = quantity * itm.conversion_factor
+        stk.current_qty -= stock_quantity
+        stk.reserved_qty = max(Decimal("0.0000"), stk.reserved_qty - stock_quantity)
         stk.available_qty = stk.current_qty - stk.reserved_qty
         rate = stk.valuation_rate
         qty_after = stk.current_qty
@@ -593,16 +1134,16 @@ async def fulfill_sales_order(
             posting_datetime=datetime.now(UTC),
             item_id=itm.item_id,
             warehouse_id=wh_id,
-            actual_qty=-itm.quantity,
+            actual_qty=-stock_quantity,
             qty_after_transaction=qty_after,
             valuation_rate=rate,
-            stock_value_difference=-itm.quantity * rate,
+            stock_value_difference=-stock_quantity * rate,
             source_document_type="DELIVERY_NOTE",
             source_document_id=dn.delivery_note_id,
         )
         db.add(sle)
 
-    order.status = "DELIVERED"
+    order.status = "DELIVERED" if all(line.delivered_quantity >= line.quantity for line in order.items) else "PARTIALLY_DELIVERED"
     await db.flush()
     return dn
 
@@ -664,9 +1205,8 @@ async def create_sales_invoice_from_delivery(
         )
     ).scalar_one_or_none()
 
-    if order is None or order.status != "DELIVERED":
-        raise HTTPException(status_code=409, detail="A delivered sales order is required before invoicing.")
-    total_amt = order.total_amount
+    if order is None or order.status not in {"PARTIALLY_DELIVERED", "DELIVERED"}:
+        raise HTTPException(status_code=409, detail="A partially or fully delivered sales order is required before invoicing.")
     customer = (
         await db.execute(
             select(Customer).where(
@@ -689,6 +1229,24 @@ async def create_sales_invoice_from_delivery(
     ).scalar_one_or_none()
     if not tenant_currency:
         raise HTTPException(status_code=409, detail="Tenant currency configuration is required before invoicing.")
+    order_items_by_id = {item.order_item_id: item for item in order.items}
+    validated_lines: list[tuple[DeliveryNoteItem, SalesOrderItem, Decimal, Decimal]] = []
+    total_amt = Decimal("0.0000")
+    for dn_item in dn.items:
+        order_item = order_items_by_id.get(dn_item.order_item_id)
+        if order_item is None or order_item.item_id != dn_item.item_id:
+            raise HTTPException(status_code=409, detail="Delivery note lines do not match the tenant sales order.")
+        if order_item.invoiced_quantity + dn_item.quantity > order_item.delivered_quantity:
+            raise HTTPException(status_code=409, detail="Delivery note includes quantities already invoiced or not yet delivered.")
+        line_discount = (
+            order_item.discount_amount * dn_item.quantity / order_item.quantity
+            if order_item.quantity else Decimal("0.0000")
+        ).quantize(Decimal("0.0001"))
+        line_total = dn_item.quantity * order_item.unit_price - line_discount
+        total_amt += line_total
+        validated_lines.append((dn_item, order_item, line_discount, line_total))
+    if not validated_lines:
+        raise HTTPException(status_code=409, detail="An empty delivery note cannot be invoiced.")
     invoice = SalesInvoice(
         tenant_id=tenant_id,
         invoice_number=inv_number,
@@ -703,17 +1261,27 @@ async def create_sales_invoice_from_delivery(
         total_amount=total_amt,
         status="ISSUED",
     )
+    source_team = (await db.scalars(select(SalesTeam).where(
+        SalesTeam.tenant_id == tenant_id,
+        SalesTeam.document_id == order.order_id,
+        SalesTeam.document_type.in_(("SALES_ORDER", "Sales Order")),
+    ))).all()
+    partner_ids = {assignment.sales_partner_id for assignment in source_team}
+    partners = (await db.scalars(select(SalesPartner).where(
+        SalesPartner.tenant_id == tenant_id,
+        SalesPartner.sales_partner_id.in_(partner_ids) if partner_ids else SalesPartner.sales_partner_id.is_(None),
+    ))).all()
+    try:
+        invoice_team = invoice_sales_team_snapshot(
+            source_team, {partner.sales_partner_id: partner for partner in partners}, tenant_id, invoice.invoice_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.add(invoice)
+    db.add_all(invoice_team)
     await db.flush()
 
-    order_items_by_id = {item.order_item_id: item for item in order.items}
-    invoice_line_total = Decimal("0.0000")
-    for itm in dn.items:
-        order_item = order_items_by_id.get(itm.order_item_id)
-        if order_item is None or order_item.item_id != itm.item_id or order_item.quantity != itm.quantity:
-            raise HTTPException(status_code=409, detail="Delivery note lines do not match the tenant sales order.")
-        line_total = itm.quantity * order_item.unit_price
-        invoice_line_total += line_total
+    for itm, order_item, line_discount, line_total in validated_lines:
         sinv_item = SalesInvoiceItem(
             tenant_id=tenant_id,
             invoice_id=invoice.invoice_id,
@@ -721,11 +1289,12 @@ async def create_sales_invoice_from_delivery(
             quantity=itm.quantity,
             unit_price=order_item.unit_price,
             line_total=line_total,
+            discount_amount=line_discount,
+            order_item_id=order_item.order_item_id,
+            delivery_note_item_id=itm.dn_item_id,
         )
         db.add(sinv_item)
-
-    if invoice_line_total != total_amt:
-        raise HTTPException(status_code=409, detail="Invoice lines do not reconcile to the sales order total.")
+        order_item.invoiced_quantity += itm.quantity
 
     # Post through the canonical ledger engine using unambiguous tenant mappings.
     from erp.ledger.engine import TransactionProposal, ledger_engine

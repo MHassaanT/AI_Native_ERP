@@ -24,6 +24,8 @@ export default function AccountsPayablePage() {
   const [goodsReceipts, setGoodsReceipts] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [supplierGroups, setSupplierGroups] = useState<any[]>([]);
+  const [poMasterData, setPoMasterData] = useState<{ contacts: any[]; addresses: any[]; terms: any[]; warehouses: any[]; shippingRules: any[]; purchaseTaxTemplates: any[] }>({ contacts: [], addresses: [], terms: [], warehouses: [], shippingRules: [], purchaseTaxTemplates: [] });
+  const [poDetails, setPoDetails] = useState({ supplier_contact_id: "", supplier_address_id: "", shipping_address_id: "", target_warehouse_id: "", terms_template_id: "", terms_text: "", payment_terms: "", incoterm: "", shipping_rule_id: "", purchase_tax_template_id: "", exchange_rate: "1", discount_amount: "0", taxes_and_charges: "0" });
   const [newSupplierGroupId, setNewSupplierGroupId] = useState("");
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,12 +46,16 @@ export default function AccountsPayablePage() {
   const [invoiceModalError, setInvoiceModalError] = useState<string | null>(null);
 
   const [showCreatePoModal, setShowCreatePoModal] = useState(false);
+  const [editingPoId, setEditingPoId] = useState<string | null>(null);
   const [newPoNumber, setNewPoNumber] = useState("");
   const [selectedSupplierId, setSelectedSupplierId] = useState("");
   const [selectedItemId, setSelectedItemId] = useState("");
   const [poQty, setPoQty] = useState("100");
   const [poUnitPrice, setPoUnitPrice] = useState("147.00");
   const [creatingPo, setCreatingPo] = useState(false);
+  const [poTimeline, setPoTimeline] = useState<any | null>(null);
+  const [poLifecycleBusy, setPoLifecycleBusy] = useState("");
+  const [submitPoOnCreate, setSubmitPoOnCreate] = useState(true);
 
   const [showCreateGrnModal, setShowCreateGrnModal] = useState(false);
   const [newGrnNumber, setNewGrnNumber] = useState("");
@@ -68,13 +74,19 @@ export default function AccountsPayablePage() {
     setLoading(true);
     setError(null);
     try {
-      const [invs, pos, grns, sups, itms, groups] = await Promise.all([
+      const [invs, pos, grns, sups, itms, groups, contacts, addresses, terms, warehouses, shippingRules, purchaseTaxTemplates] = await Promise.all([
         api.getInvoices().catch(() => []),
         api.getPurchaseOrders().catch(() => []),
         api.getGoodsReceipts().catch(() => []),
         api.getSuppliers().catch(() => []),
         api.getItems().catch(() => []),
         api.getMasterData("supplier-groups").catch(() => []),
+        api.getMasterData("contacts").catch(() => []),
+        api.getMasterData("addresses").catch(() => []),
+        api.getMasterData("terms-templates").catch(() => []),
+        api.getWarehouses().catch(() => []),
+        api.getMasterData("shipping-rules").catch(() => []),
+        api.getMasterData("purchase-tax-templates").catch(() => []),
       ]);
       setInvoices(invs || []);
       setPurchaseOrders(pos || []);
@@ -82,6 +94,7 @@ export default function AccountsPayablePage() {
       setSuppliers(sups || []);
       setItems(itms || []);
       setSupplierGroups((groups || []).filter((group: any) => group.is_active && !group.is_group));
+      setPoMasterData({ contacts: contacts || [], addresses: addresses || [], terms: (terms || []).filter((row: any) => row.is_active && ["BUYING", "BOTH"].includes(row.applicable_to)), warehouses: warehouses || [], shippingRules: (shippingRules || []).filter((row: any) => row.is_active), purchaseTaxTemplates: (purchaseTaxTemplates || []).filter((row: any) => !row.disabled) });
 
       if (pos && pos.length > 0 && !selectedPoId) {
         setSelectedPoId(pos[0].po_id);
@@ -218,6 +231,7 @@ export default function AccountsPayablePage() {
         po_id: po.po_id,
         grn_id: matchingGrn ? matchingGrn.grn_id : null,
         invoice_date: new Date().toISOString().split("T")[0],
+        currency: po.currency || "USD",
         subtotal: parseFloat(newSubtotal),
         tax_amount: 0,
       });
@@ -245,21 +259,50 @@ export default function AccountsPayablePage() {
     setError(null);
     try {
       const poNum = newPoNumber.trim() || `PO-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
-      await api.createPurchaseOrder({
+      const editingPo = editingPoId ? purchaseOrders.find((row) => row.po_id === editingPoId) : null;
+      const editingLine = editingPo?.items?.[0];
+      const payload = {
         po_number: poNum,
         supplier_id: selectedSupplierId,
         order_date: new Date().toISOString().split("T")[0],
         currency: "USD",
+        material_request_id: editingPo?.material_request_id || undefined,
+        supplier_contact_id: poDetails.supplier_contact_id || undefined,
+        supplier_address_id: poDetails.supplier_address_id || undefined,
+        shipping_address_id: poDetails.shipping_address_id || undefined,
+        target_warehouse_id: poDetails.target_warehouse_id || undefined,
+        terms_template_id: poDetails.terms_template_id || undefined,
+        terms_text: poDetails.terms_text || undefined,
+        payment_terms: poDetails.payment_terms || undefined,
+        incoterm: poDetails.incoterm || undefined,
+        shipping_rule_id: poDetails.shipping_rule_id || undefined,
+        purchase_tax_template_id: poDetails.purchase_tax_template_id || undefined,
+        exchange_rate: Number(poDetails.exchange_rate || "1"),
+        discount_amount: Number(poDetails.discount_amount || "0"),
+        taxes_and_charges: Number(poDetails.taxes_and_charges || "0"),
+        submit: submitPoOnCreate,
         items: [
           {
             item_id: selectedItemId,
             quantity: parseFloat(poQty),
             unit_price: parseFloat(poUnitPrice),
+            material_request_item_id: editingLine?.material_request_item_id || undefined,
+            rfq_item_id: editingLine?.rfq_item_id || undefined,
+            supplier_quotation_item_id: editingLine?.supplier_quotation_item_id || undefined,
+            uom_id: editingLine?.uom_id || undefined,
+            conversion_factor: Number(editingLine?.conversion_factor || 1),
+            target_warehouse_id: editingLine?.target_warehouse_id || undefined,
+            price_list_id: editingLine?.price_list_id || undefined,
+            item_price_id: editingLine?.item_price_id || undefined,
+            price_list_rate: editingLine?.price_list_rate || undefined,
           },
         ],
-      });
+      };
+      if (editingPoId) await api.updatePurchaseOrderDraft(editingPoId, payload);
+      else await api.createPurchaseOrder(payload);
 
       setShowCreatePoModal(false);
+      setEditingPoId(null);
       setNewPoNumber("");
       setActiveTab("pos");
       await loadData();
@@ -268,6 +311,50 @@ export default function AccountsPayablePage() {
     } finally {
       setCreatingPo(false);
     }
+  };
+
+  const editPurchaseOrderDraft = (po: any) => {
+    if ((po.items?.length || 0) !== 1) { setError("Editing multi-line drafts is not yet supported in this form; no changes were made."); return; }
+    const line = po.items?.[0];
+    if (!line) { setError("This draft has no lines to edit."); return; }
+    setEditingPoId(po.po_id);
+    setNewPoNumber(po.po_number);
+    setSelectedSupplierId(po.supplier_id);
+    setSelectedItemId(line.item_id);
+    setPoQty(String(line.quantity));
+    setPoUnitPrice(String(line.unit_price));
+    setPoDetails({
+      supplier_contact_id: po.supplier_contact_id || "", supplier_address_id: po.supplier_address_id || "",
+      shipping_address_id: po.shipping_address_id || "", target_warehouse_id: po.target_warehouse_id || "",
+      terms_template_id: po.terms_template_id || "", terms_text: po.terms_text || "",
+      payment_terms: po.payment_terms || "", incoterm: po.incoterm || "", shipping_rule_id: po.shipping_rule_id || "",
+      purchase_tax_template_id: po.purchase_tax_template_id || "",
+      exchange_rate: String(po.exchange_rate || "1"), discount_amount: String(po.discount_amount || "0"),
+      taxes_and_charges: String(po.taxes_and_charges || "0"),
+    });
+    setSubmitPoOnCreate(false);
+    setShowCreatePoModal(true);
+  };
+
+  const inspectPurchaseOrder = async (poId: string) => {
+    try { setPoTimeline(await api.getPurchaseOrderTimeline(poId)); }
+    catch (err: any) { setError(err.message || "Could not load purchase-order audit timeline."); }
+  };
+
+  const runPurchaseOrderAction = async (action: "submit" | "cancel" | "amend", po: any) => {
+    setPoLifecycleBusy(po.po_id); setError(null);
+    try {
+      if (action === "submit") await api.submitPurchaseOrder(po.po_id);
+      if (action === "cancel") await api.cancelPurchaseOrder(po.po_id);
+      if (action === "amend") {
+        const poNumber = window.prompt("Enter the new amendment PO number", `${po.po_number}-REV1`);
+        if (!poNumber) return;
+        await api.amendPurchaseOrder(po.po_id, poNumber);
+      }
+      await loadData();
+      if (poTimeline?.document?.po_id === po.po_id) await inspectPurchaseOrder(po.po_id);
+    } catch (err: any) { setError(err.message || `Could not ${action} purchase order.`); }
+    finally { setPoLifecycleBusy(""); }
   };
 
   const handleCreateGrn = async (e: React.FormEvent) => {
@@ -785,7 +872,7 @@ export default function AccountsPayablePage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-xs text-cream-700">Contractual purchase commitments approved by procurement.</p>
-            <button
+            <div className="flex items-center gap-3"><label className="flex items-center gap-2 text-xs text-cream-700"><input type="checkbox" checked={submitPoOnCreate} onChange={(e) => setSubmitPoOnCreate(e.target.checked)} />Submit immediately</label><button
               onClick={() => {
                 setNewPoNumber(`PO-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
                 setShowCreatePoModal(true);
@@ -794,7 +881,7 @@ export default function AccountsPayablePage() {
             >
               <Plus className="h-3.5 w-3.5" />
               <span>Create Purchase Order</span>
-            </button>
+            </button></div>
           </div>
 
           {purchaseOrders.length === 0 ? (
@@ -839,24 +926,33 @@ export default function AccountsPayablePage() {
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right space-x-2">
+                        <button onClick={() => void inspectPurchaseOrder(po.po_id)} className="text-[11px] font-medium underline">Timeline</button>
+                        {po.status === "DRAFT" && <><button onClick={() => editPurchaseOrderDraft(po)} className="text-[11px] font-medium underline">Edit</button><button disabled={poLifecycleBusy === po.po_id} onClick={() => void runPurchaseOrderAction("submit", po)} className="text-[11px] font-medium underline disabled:opacity-50">Submit</button></>}
+                        {po.status === "SUBMITTED" && <button disabled={poLifecycleBusy === po.po_id} onClick={() => void runPurchaseOrderAction("amend", po)} className="text-[11px] font-medium underline disabled:opacity-50">Amend</button>}
+                        {["DRAFT", "SUBMITTED"].includes(po.status) && <button disabled={poLifecycleBusy === po.po_id} onClick={() => void runPurchaseOrderAction("cancel", po)} className="text-[11px] font-medium text-red-700 underline disabled:opacity-50">Cancel</button>}
                         <button
+                          disabled={["DRAFT", "CANCELLED"].includes(po.status)}
                           onClick={() => {
                             setSelectedGrnPoId(po.po_id);
                             setNewGrnNumber(`GRN-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
                             setShowCreateGrnModal(true);
                           }}
-                          className="text-[11px] font-medium text-cream-800 hover:text-cream-900 underline"
+                          className="text-[11px] font-medium text-cream-800 hover:text-cream-900 underline disabled:opacity-40"
                         >
                           Receive (GRN)
                         </button>
                         <button
+                          disabled={["DRAFT", "CANCELLED"].includes(po.status)}
                           onClick={() => {
                             setSelectedPoId(po.po_id);
                             setNewInvNumber(`INV-${po.po_number.replace("PO-", "")}`);
-                            setNewSubtotal(parseFloat(po.total_amount).toFixed(2));
+                            const alreadyBilled = invoices
+                              .filter((invoice) => invoice.po_id === po.po_id && invoice.matching_status !== "CANCELLED")
+                              .reduce((sum, invoice) => sum + Number(invoice.subtotal || 0), 0);
+                            setNewSubtotal(Math.max(0, Number(po.subtotal || 0) - Number(po.discount_amount || 0) - alreadyBilled).toFixed(2));
                             setShowCreateInvoiceModal(true);
                           }}
-                          className="text-[11px] font-medium text-cream-900 font-semibold underline"
+                          className="text-[11px] font-medium text-cream-900 font-semibold underline disabled:opacity-40"
                         >
                           Create Invoice
                         </button>
@@ -867,6 +963,7 @@ export default function AccountsPayablePage() {
               </table>
             </div>
           )}
+          {poTimeline && <section className="rounded-xl border border-cream-300 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><div><h3 className="font-semibold">{poTimeline.document.po_number} · Timeline & source links</h3><p className="mt-1 text-xs text-cream-600">{poTimeline.document.status} · {poTimeline.document.currency} · {poTimeline.document.total_amount}</p></div><button onClick={() => setPoTimeline(null)} className="text-sm text-cream-600">Close</button></div><div className="mt-4 grid gap-4 md:grid-cols-2"><div><h4 className="text-xs font-semibold uppercase text-cream-500">Source links and progress</h4><p className="mt-2 text-xs">Material Request: {poTimeline.source_links.material_request_id || "None"}</p><p className="text-xs">Amended from: {poTimeline.source_links.amended_from_po_id || "None"}</p><ul className="mt-2 space-y-2 text-xs">{poTimeline.source_links.lines.map((line: any) => <li key={line.po_item_id}>Line {line.po_item_id.slice(0, 8)} · MR {line.material_request_item_id?.slice(0, 8) || "—"} · RFQ {line.rfq_item_id?.slice(0, 8) || "—"} · Quote {line.supplier_quotation_item_id?.slice(0, 8) || "—"}<br/>Ordered {line.quantity} · received {line.received_quantity} ({line.remaining_to_receive} remaining) · billed {line.billed_quantity} ({line.remaining_to_bill} remaining)</li>)}</ul></div><div><h4 className="text-xs font-semibold uppercase text-cream-500">Copied document terms</h4><p className="mt-2 whitespace-pre-wrap text-xs">{poTimeline.document.terms_text || "No terms snapshot"}</p><p className="mt-2 text-xs">Supplier address: {poTimeline.document.supplier_address_snapshot ? `${poTimeline.document.supplier_address_snapshot.address_title}, ${poTimeline.document.supplier_address_snapshot.city}` : "None"}</p><p className="text-xs">Receiving address: {poTimeline.document.shipping_address_snapshot ? `${poTimeline.document.shipping_address_snapshot.address_title}, ${poTimeline.document.shipping_address_snapshot.city}` : "None"}</p><h4 className="mt-3 text-xs font-semibold uppercase text-cream-500">Audit events</h4><ul className="mt-2 space-y-1 text-xs">{poTimeline.audit_events.map((event: any) => <li key={event.batch_id}>{event.operation.replaceAll("_", " ")} · {new Date(event.created_at).toLocaleString()}</li>)}</ul><p className="mt-2 text-xs">{poTimeline.goods_receipts.length} receipt(s) · {poTimeline.supplier_invoices.length} supplier invoice(s)</p></div></div></section>}
         </div>
       )}
 
@@ -1156,9 +1253,9 @@ export default function AccountsPayablePage() {
       {/* Modal 2: Create Purchase Order */}
       {showCreatePoModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-xl space-y-4">
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl border border-cream-300 bg-cream-100 p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between border-b border-cream-300 pb-3">
-              <h3 className="font-semibold text-sm text-cream-900">Issue Purchase Order (PO)</h3>
+              <h3 className="font-semibold text-sm text-cream-900">{editingPoId ? "Edit Purchase Order Draft" : "Issue Purchase Order (PO)"}</h3>
               <button onClick={() => setShowCreatePoModal(false)} className="text-cream-600 hover:text-cream-900">&times;</button>
             </div>
 
@@ -1258,6 +1355,19 @@ export default function AccountsPayablePage() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-2 gap-3 border-t border-cream-300 pt-3">
+                <label className="block">Supplier Contact<select value={poDetails.supplier_contact_id} onChange={(e) => setPoDetails({ ...poDetails, supplier_contact_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">Choose contact</option>{poMasterData.contacts.filter((row) => row.is_active).map((row) => <option key={row.contact_id} value={row.contact_id}>{row.full_name}</option>)}</select></label>
+                <label className="block">Supplier Address<select value={poDetails.supplier_address_id} onChange={(e) => setPoDetails({ ...poDetails, supplier_address_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">Choose address</option>{poMasterData.addresses.map((row) => <option key={row.address_id} value={row.address_id}>{row.address_title}</option>)}</select></label>
+                <label className="block">Receiving / Shipping Address<select value={poDetails.shipping_address_id} onChange={(e) => setPoDetails({ ...poDetails, shipping_address_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">Choose address</option>{poMasterData.addresses.map((row) => <option key={row.address_id} value={row.address_id}>{row.address_title}</option>)}</select></label>
+                <label className="block">Target Warehouse<select value={poDetails.target_warehouse_id} onChange={(e) => setPoDetails({ ...poDetails, target_warehouse_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">Choose warehouse</option>{poMasterData.warehouses.map((row) => <option key={row.warehouse_id} value={row.warehouse_id}>{row.warehouse_name}</option>)}</select></label>
+                <label className="block">Terms Template<select value={poDetails.terms_template_id} onChange={(e) => { const template = poMasterData.terms.find((row) => row.terms_template_id === e.target.value); setPoDetails({ ...poDetails, terms_template_id: e.target.value, terms_text: template?.terms || poDetails.terms_text }); }} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">No template</option>{poMasterData.terms.map((row) => <option key={row.terms_template_id} value={row.terms_template_id}>{row.template_name}</option>)}</select></label>
+                <label className="block">Shipping Rule<select value={poDetails.shipping_rule_id} onChange={(e) => setPoDetails({ ...poDetails, shipping_rule_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">No rule</option>{poMasterData.shippingRules.map((row) => <option key={row.shipping_rule_id} value={row.shipping_rule_id}>{row.rule_name}</option>)}</select></label>
+                <label className="block">Purchase Tax Template<select value={poDetails.purchase_tax_template_id} onChange={(e) => setPoDetails({ ...poDetails, purchase_tax_template_id: e.target.value, taxes_and_charges: "0" })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5"><option value="">No template</option>{poMasterData.purchaseTaxTemplates.map((row) => <option key={row.template_id} value={row.template_id}>{row.title}</option>)}</select></label>
+                <label className="block">Payment Terms<input value={poDetails.payment_terms} onChange={(e) => setPoDetails({ ...poDetails, payment_terms: e.target.value })} placeholder="Net 30 days" className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5" /></label>
+                <label className="block">Incoterm<input value={poDetails.incoterm} onChange={(e) => setPoDetails({ ...poDetails, incoterm: e.target.value.toUpperCase() })} placeholder="FOB, CIF…" maxLength={32} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5" /></label>
+                <label className="col-span-2 block">Terms Snapshot<textarea rows={2} value={poDetails.terms_text} onChange={(e) => setPoDetails({ ...poDetails, terms_text: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 px-2 py-1.5" /></label>
+              </div>
+
               <div className="p-2.5 rounded bg-cream-200/60 font-mono text-xs flex justify-between">
                 <span>Calculated Total:</span>
                 <span className="font-bold text-cream-900">
@@ -1278,7 +1388,7 @@ export default function AccountsPayablePage() {
                   disabled={creatingPo}
                   className="rounded bg-cream-900 px-4 py-1.5 font-medium text-cream-50 hover:bg-cream-800 disabled:opacity-50"
                 >
-                  {creatingPo ? "Issuing..." : "Submit PO"}
+                  {creatingPo ? "Saving..." : editingPoId ? "Save Draft" : "Submit PO"}
                 </button>
               </div>
             </form>
@@ -1465,4 +1575,3 @@ export default function AccountsPayablePage() {
     </div>
   );
 }
-

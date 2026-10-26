@@ -10,8 +10,9 @@ import uuid
 
 from sqlalchemy import case, extract, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from erp.db.models.inventory import Item, StockLedgerEntry, StockLevel
+from erp.db.models.inventory import Item, StockLayerConsumption, StockLedgerEntry, StockLevel, StockValuationLayer, Warehouse
 from erp.db.models.purchasing import (
     GoodsReceiptNote, GoodsReceiptNoteItem, MaterialRequest, MaterialRequestItem,
     PurchaseOrder, PurchaseOrderItem, Supplier, SupplierInvoice, SupplierInvoiceItem,
@@ -21,12 +22,17 @@ from erp.db.models.sales import (
     SalesOrder, SalesOrderItem, SalesQuotation,
 )
 from erp.db.models.phase_b import SalesPartner, SalesTeam
+from erp.db.models.shared_master import UOM
 from erp.db.models.support import Issue
 from erp.db.models.hr import (
     Employee, EmployeeSeparation, LeaveAllocation, LeaveApplication, LeaveType,
 )
 from erp.db.models.recruitment import RecruitmentRole, CandidateApplication
 from erp.db.models.hr_deep import Interview
+from erp.db.models.subcontracting import (
+    SubcontractingOrder, SubcontractingOrderItem, SubcontractingReceipt,
+    SubcontractingReceiptItem, SubcontractingSuppliedItem,
+)
 
 
 class EnterpriseReportsService:
@@ -41,12 +47,157 @@ class EnterpriseReportsService:
             filters.append(model_date <= to_date)
         return filters
 
+    @staticmethod
+    def _sales_order_line_progress(line: SalesOrderItem, order_status: str) -> dict[str, Decimal]:
+        """Calculate outstanding quantities and values from persisted line counters."""
+        ordered = Decimal(line.quantity)
+        delivered = Decimal(line.delivered_quantity)
+        invoiced = Decimal(line.invoiced_quantity)
+        returned = Decimal(line.returned_quantity)
+        line_total = Decimal(line.line_total)
+        pending_delivery = Decimal("0") if order_status == "CANCELLED" else max(Decimal("0"), ordered - delivered)
+        pending_billing = Decimal("0") if order_status == "CANCELLED" else max(Decimal("0"), delivered - invoiced)
+        divisor = ordered if ordered > 0 else Decimal("1")
+        return {
+            "ordered_quantity": ordered,
+            "delivered_quantity": delivered,
+            "invoiced_quantity": invoiced,
+            "returned_quantity": returned,
+            "pending_delivery_quantity": pending_delivery,
+            "pending_billing_quantity": pending_billing,
+            "pending_delivery_amount": (line_total * pending_delivery / divisor).quantize(Decimal("0.0001")),
+            "pending_billing_amount": (line_total * pending_billing / divisor).quantize(Decimal("0.0001")),
+        }
+
     async def run(self, name: str, db: AsyncSession, tenant_id: uuid.UUID,
                   from_date: date | None = None, to_date: date | None = None,
                   as_of_date: date | None = None, month: int | None = None,
-                  fiscal_year: int | None = None) -> dict[str, Any] | list[dict[str, Any]]:
+                  fiscal_year: int | None = None, item_id: uuid.UUID | None = None,
+                  party_id: uuid.UUID | None = None, currency: str | None = None,
+                  territory: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
         as_of_date = as_of_date or to_date or date.today()
         period = (from_date, to_date)
+
+        if name == "item-wise-purchase-history":
+            receipts = select(
+                GoodsReceiptNoteItem.po_item_id.label("po_item_id"),
+                func.sum(GoodsReceiptNoteItem.quantity_accepted).label("accepted_qty"),
+                func.sum(GoodsReceiptNoteItem.quantity_rejected).label("rejected_qty"),
+                func.string_agg(func.distinct(GoodsReceiptNote.grn_number), ", ").label("receipt_numbers"),
+            ).join(GoodsReceiptNote, GoodsReceiptNote.grn_id == GoodsReceiptNoteItem.grn_id).where(
+                GoodsReceiptNote.tenant_id == tenant_id, GoodsReceiptNoteItem.tenant_id == tenant_id,
+                GoodsReceiptNote.status != "CANCELLED", GoodsReceiptNoteItem.po_item_id.is_not(None),
+            ).group_by(GoodsReceiptNoteItem.po_item_id).subquery()
+            invoices = select(
+                SupplierInvoiceItem.po_item_id.label("po_item_id"),
+                func.sum(SupplierInvoiceItem.quantity).label("invoiced_qty"),
+                func.sum(SupplierInvoiceItem.line_total).label("invoiced_amount"),
+                func.string_agg(func.distinct(SupplierInvoice.invoice_number), ", ").label("invoice_numbers"),
+            ).join(SupplierInvoice, SupplierInvoice.invoice_id == SupplierInvoiceItem.invoice_id).where(
+                SupplierInvoice.tenant_id == tenant_id, SupplierInvoiceItem.tenant_id == tenant_id,
+                SupplierInvoice.matching_status != "CANCELLED", SupplierInvoiceItem.po_item_id.is_not(None),
+            ).group_by(SupplierInvoiceItem.po_item_id).subquery()
+            stmt = select(
+                PurchaseOrder.po_id, PurchaseOrder.po_number, PurchaseOrder.order_date,
+                PurchaseOrder.currency, PurchaseOrder.status, Supplier.supplier_id, Supplier.supplier_name,
+                Item.item_id, Item.item_code, Item.item_name, PurchaseOrderItem.item_line_id,
+                PurchaseOrderItem.quantity, PurchaseOrderItem.stock_quantity, PurchaseOrderItem.unit_price,
+                PurchaseOrderItem.price_list_rate, PurchaseOrderItem.discount_amount,
+                UOM.uom_name, PurchaseOrderItem.conversion_factor,
+                func.coalesce(receipts.c.accepted_qty, 0).label("accepted_qty"),
+                func.coalesce(receipts.c.rejected_qty, 0).label("rejected_qty"), receipts.c.receipt_numbers,
+                func.coalesce(invoices.c.invoiced_qty, 0).label("invoiced_qty"),
+                func.coalesce(invoices.c.invoiced_amount, 0).label("invoiced_amount"), invoices.c.invoice_numbers,
+            ).join(PurchaseOrder, PurchaseOrder.po_id == PurchaseOrderItem.po_id)\
+             .join(Supplier, Supplier.supplier_id == PurchaseOrder.supplier_id)\
+             .join(Item, Item.item_id == PurchaseOrderItem.item_id)\
+             .outerjoin(UOM, (UOM.uom_id == PurchaseOrderItem.uom_id) & (UOM.tenant_id == tenant_id))\
+             .outerjoin(receipts, receipts.c.po_item_id == PurchaseOrderItem.item_line_id)\
+             .outerjoin(invoices, invoices.c.po_item_id == PurchaseOrderItem.item_line_id)\
+             .where(PurchaseOrder.tenant_id == tenant_id, PurchaseOrderItem.tenant_id == tenant_id,
+                    Supplier.tenant_id == tenant_id, Item.tenant_id == tenant_id,
+                    PurchaseOrder.status != "CANCELLED", *self._period(PurchaseOrder.order_date, *period))
+            if item_id:
+                stmt = stmt.where(Item.item_id == item_id)
+            if party_id:
+                stmt = stmt.where(Supplier.supplier_id == party_id)
+            if currency:
+                stmt = stmt.where(PurchaseOrder.currency == currency.upper())
+            rows = (await db.execute(stmt.order_by(PurchaseOrder.order_date.desc(), PurchaseOrder.po_number))).all()
+            return {"report_name": "Item-wise Purchase History",
+                    "tax_note": "Tax and landed cost are not available per PO line in legacy records; linked invoice totals are shown before tax.",
+                    "rows": [{"po_id": str(r.po_id), "po_number": r.po_number, "po_item_id": str(r.item_line_id),
+                              "date": r.order_date.isoformat(), "status": r.status, "currency": r.currency,
+                              "supplier_id": str(r.supplier_id), "supplier": r.supplier_name,
+                              "item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name,
+                              "quantity": r.quantity, "purchase_uom": r.uom_name or "Stock UOM",
+                              "conversion_factor": r.conversion_factor, "stock_quantity": r.stock_quantity,
+                              "rate": r.unit_price, "price_list_rate": r.price_list_rate,
+                              "discount_amount": r.discount_amount, "accepted_quantity": r.accepted_qty,
+                              "rejected_quantity": r.rejected_qty, "receipt_numbers": r.receipt_numbers,
+                              "invoiced_quantity": r.invoiced_qty, "invoiced_amount_before_tax": r.invoiced_amount,
+                              "invoice_numbers": r.invoice_numbers} for r in rows]}
+
+        if name == "item-wise-sales-history":
+            sales_territories = select(
+                SalesTeam.document_id.label("invoice_id"),
+                func.string_agg(func.distinct(SalesPartner.territory), ", ").label("territories"),
+            ).join(SalesPartner, (SalesPartner.sales_partner_id == SalesTeam.sales_partner_id) &
+                                  (SalesPartner.tenant_id == tenant_id)).where(
+                SalesTeam.tenant_id == tenant_id,
+                SalesTeam.document_type.in_(("Sales Invoice", "SALES_INVOICE")),
+            ).group_by(SalesTeam.document_id).subquery()
+            stmt = select(
+                SalesInvoice.invoice_id, SalesInvoice.invoice_number, SalesInvoice.invoice_date,
+                SalesInvoice.currency, SalesInvoice.status, Customer.customer_id, Customer.customer_name,
+                sales_territories.c.territories, Item.item_id, Item.item_code, Item.item_name, SalesInvoiceItem.invoice_item_id,
+                SalesInvoiceItem.quantity, SalesInvoiceItem.unit_price, SalesInvoiceItem.line_total,
+                SalesInvoiceItem.discount_amount, SalesOrderItem.uom_id, UOM.uom_name,
+                SalesOrderItem.conversion_factor,
+                SalesOrderItem.stock_quantity, SalesOrderItem.price_list_rate, SalesOrder.order_id,
+                SalesOrder.order_number, DeliveryNote.delivery_note_id, DeliveryNote.delivery_note_number,
+                DeliveryNoteItem.quantity.label("delivered_quantity"), SalesInvoice.tax_amount.label("invoice_tax_amount"),
+            ).join(SalesInvoiceItem, (SalesInvoiceItem.invoice_id == SalesInvoice.invoice_id) & (SalesInvoiceItem.tenant_id == tenant_id))\
+             .join(Customer, Customer.customer_id == SalesInvoice.customer_id)\
+             .join(Item, Item.item_id == SalesInvoiceItem.item_id)\
+             .outerjoin(sales_territories, sales_territories.c.invoice_id == SalesInvoice.invoice_id)\
+             .outerjoin(SalesOrderItem, (SalesOrderItem.order_item_id == SalesInvoiceItem.order_item_id) & (SalesOrderItem.tenant_id == tenant_id))\
+             .outerjoin(UOM, (UOM.uom_id == SalesOrderItem.uom_id) & (UOM.tenant_id == tenant_id))\
+             .outerjoin(SalesOrder, (SalesOrder.order_id == SalesOrderItem.order_id) & (SalesOrder.tenant_id == tenant_id))\
+             .outerjoin(DeliveryNoteItem, (DeliveryNoteItem.dn_item_id == SalesInvoiceItem.delivery_note_item_id) & (DeliveryNoteItem.tenant_id == tenant_id))\
+             .outerjoin(DeliveryNote, (DeliveryNote.delivery_note_id == DeliveryNoteItem.delivery_note_id) & (DeliveryNote.tenant_id == tenant_id))\
+             .where(SalesInvoice.tenant_id == tenant_id, Customer.tenant_id == tenant_id,
+                    Item.tenant_id == tenant_id, SalesInvoice.status != "CANCELLED",
+                    *self._period(SalesInvoice.invoice_date, *period))
+            if item_id:
+                stmt = stmt.where(Item.item_id == item_id)
+            if party_id:
+                stmt = stmt.where(Customer.customer_id == party_id)
+            if currency:
+                stmt = stmt.where(SalesInvoice.currency == currency.upper())
+            if territory:
+                stmt = stmt.where(sales_territories.c.territories.ilike(f"%{territory}%"))
+            rows = (await db.execute(stmt.order_by(SalesInvoice.invoice_date.desc(), SalesInvoice.invoice_number))).all()
+            return {"report_name": "Item-wise Sales History", "margin_snapshot_available": False,
+                    "tax_note": "Tax is stored at invoice level; no line-level allocation is inferred.",
+                    "territory_basis": "Territories are sales-partner assignments on the invoice; customer territory is not modeled.",
+                    "rows": [{"invoice_id": str(r.invoice_id), "invoice_number": r.invoice_number,
+                              "invoice_item_id": str(r.invoice_item_id), "date": r.invoice_date.isoformat(),
+                              "status": r.status, "currency": r.currency, "customer_id": str(r.customer_id),
+                              "customer": r.customer_name, "sales_partner_territories": r.territories,
+                              "item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name,
+                              "quantity": r.quantity, "sales_uom": r.uom_name or "Stock UOM",
+                              "sales_uom_id": str(r.uom_id) if r.uom_id else None,
+                              "conversion_factor": r.conversion_factor or Decimal("1"),
+                              "stock_quantity": r.stock_quantity or r.quantity,
+                              "unit_price": r.unit_price, "price_list_rate": r.price_list_rate,
+                              "discount_amount": r.discount_amount, "line_total": r.line_total,
+                              "invoice_tax_amount_unallocated": r.invoice_tax_amount,
+                              "sales_order_id": str(r.order_id) if r.order_id else None,
+                              "sales_order_number": r.order_number,
+                              "delivery_note_id": str(r.delivery_note_id) if r.delivery_note_id else None,
+                              "delivery_note_number": r.delivery_note_number,
+                              "delivered_quantity": r.delivered_quantity} for r in rows]}
 
         if name in {"customer-ledger-summary", "supplier-ledger-summary"}:
             if name.startswith("customer"):
@@ -128,9 +279,8 @@ class EnterpriseReportsService:
                        Supplier.tenant_id == tenant_id, Item.tenant_id == tenant_id, *self._period(PurchaseOrder.order_date, *period))\
                 .group_by(purchase_month, Supplier.supplier_id, Supplier.supplier_name, Item.item_id, Item.item_code, Item.item_name).order_by(purchase_month, func.sum(PurchaseOrderItem.line_total).desc())
             rows = (await db.execute(stmt)).all()
-            # F8 is represented as supplier/item sourced-sales context because the
-            # current Customer/Item model does not persist supplier attribution on sales.
-            return {"attribution_note": "Sales are not linked to suppliers in the current schema; rows show supplier-sourced purchase activity by item, not supplier-attributed revenue.",
+            # Keep the legacy endpoint as an alias, but never mislabel buying as sales.
+            return {"report_name": "Supplier Sourcing Analysis", "attribution_note": "Sales are not linked to suppliers in the current schema; rows show supplier-sourced purchase activity by item, not supplier-attributed revenue.",
                     "rows": [{"period": r.period.date().isoformat(), "supplier_id": str(r.supplier_id), "supplier_name": r.supplier_name, "item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name, "quantity": r.quantity, "purchase_amount": r.amount} for r in rows]}
 
         if name == "purchase-order-analytics":
@@ -139,14 +289,167 @@ class EnterpriseReportsService:
                 .join(Supplier, Supplier.supplier_id == PurchaseOrder.supplier_id).where(PurchaseOrder.tenant_id == tenant_id, Supplier.tenant_id == tenant_id, *self._period(PurchaseOrder.order_date, *period)).order_by(PurchaseOrder.order_date)
             return [{"po_id": str(r.po_id), "po_number": r.po_number, "supplier": r.supplier_name, "order_date": r.order_date, "status": r.status, "total_amount": r.total_amount, "overdue_after_days": 30, "overdue": bool(r.overdue and r.status not in ("COMPLETED", "CANCELLED"))} for r in (await db.execute(stmt)).all()]
 
+        if name == "subcontracting-materials":
+            source_warehouse = aliased(Warehouse)
+            supplier_warehouse = aliased(Warehouse)
+            first_transfer = select(
+                StockLedgerEntry.source_document_id.label("sco_id"),
+                StockLedgerEntry.item_id.label("item_id"),
+                StockLedgerEntry.warehouse_id.label("warehouse_id"),
+                func.min(StockLedgerEntry.posting_datetime).label("first_transferred_at"),
+            ).where(
+                StockLedgerEntry.tenant_id == tenant_id,
+                StockLedgerEntry.source_document_type == "SUBCONTRACTING_TRANSFER_IN",
+                StockLedgerEntry.is_cancelled.is_(False),
+            ).group_by(
+                StockLedgerEntry.source_document_id, StockLedgerEntry.item_id, StockLedgerEntry.warehouse_id,
+            ).subquery()
+            stmt = select(
+                SubcontractingOrder.sco_id, SubcontractingOrder.sco_number,
+                SubcontractingOrder.order_date, SubcontractingOrder.status,
+                Supplier.supplier_id, Supplier.supplier_name,
+                SubcontractingSuppliedItem.supplied_item_id, Item.item_id,
+                Item.item_code, Item.item_name, SubcontractingSuppliedItem.required_qty,
+                SubcontractingSuppliedItem.supplied_qty, SubcontractingSuppliedItem.consumed_qty,
+                SubcontractingSuppliedItem.source_warehouse_id,
+                source_warehouse.warehouse_name.label("source_warehouse_name"),
+                SubcontractingSuppliedItem.supplier_warehouse_id,
+                supplier_warehouse.warehouse_name.label("supplier_warehouse_name"),
+                first_transfer.c.first_transferred_at,
+            ).join(SubcontractingOrder, (SubcontractingOrder.sco_id == SubcontractingSuppliedItem.sco_id) &
+                   (SubcontractingOrder.tenant_id == tenant_id))\
+             .join(Supplier, (Supplier.supplier_id == SubcontractingOrder.supplier_id) &
+                   (Supplier.tenant_id == tenant_id))\
+             .join(Item, (Item.item_id == SubcontractingSuppliedItem.raw_item_id) &
+                   (Item.tenant_id == tenant_id))\
+             .outerjoin(source_warehouse, (source_warehouse.warehouse_id == SubcontractingSuppliedItem.source_warehouse_id) &
+                        (source_warehouse.tenant_id == tenant_id))\
+             .outerjoin(supplier_warehouse, (supplier_warehouse.warehouse_id == SubcontractingSuppliedItem.supplier_warehouse_id) &
+                        (supplier_warehouse.tenant_id == tenant_id))\
+             .outerjoin(first_transfer, (first_transfer.c.sco_id == SubcontractingOrder.sco_id) &
+                        (first_transfer.c.item_id == SubcontractingSuppliedItem.raw_item_id) &
+                        (first_transfer.c.warehouse_id == SubcontractingSuppliedItem.supplier_warehouse_id))\
+             .where(SubcontractingSuppliedItem.tenant_id == tenant_id,
+                    *self._period(SubcontractingOrder.order_date, *period))\
+             .order_by(SubcontractingOrder.order_date, SubcontractingOrder.sco_number, Item.item_code)
+            rows = (await db.execute(stmt)).all()
+            return {"report_name": "Subcontracted Raw Material Tracker", "rows": [{
+                "sco_id": str(r.sco_id), "sco_number": r.sco_number, "status": r.status,
+                "order_date": r.order_date.isoformat(), "supplier_id": str(r.supplier_id),
+                "supplier": r.supplier_name, "supplied_item_id": str(r.supplied_item_id),
+                "item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name,
+                "required_quantity": r.required_qty, "supplied_quantity": r.supplied_qty,
+                "consumed_quantity": r.consumed_qty,
+                "short_to_supply": max(Decimal("0"), r.required_qty - r.supplied_qty),
+                "currently_at_subcontractor": max(Decimal("0"), r.supplied_qty - r.consumed_qty),
+                "source_warehouse_id": str(r.source_warehouse_id) if r.source_warehouse_id else None,
+                "source_warehouse": r.source_warehouse_name,
+                "supplier_warehouse_id": str(r.supplier_warehouse_id) if r.supplier_warehouse_id else None,
+                "supplier_warehouse": r.supplier_warehouse_name,
+                "first_transfer_at": r.first_transferred_at.isoformat() if r.first_transferred_at else None,
+                "days_since_first_transfer": (as_of_date - r.first_transferred_at.date()).days if r.first_transferred_at else None,
+                "lineage_basis": "Explicit subcontracting order, supplied-item, and transfer stock-ledger references.",
+            } for r in rows]}
+
+        if name == "subcontracting-finished-goods":
+            receipts = select(
+                SubcontractingReceipt.sco_id.label("sco_id"),
+                SubcontractingReceiptItem.item_id.label("item_id"),
+                func.sum(SubcontractingReceiptItem.quantity_received).label("received_qty"),
+                func.string_agg(func.distinct(SubcontractingReceipt.scr_number), ", ").label("receipt_numbers"),
+            ).join(SubcontractingReceiptItem, (SubcontractingReceiptItem.scr_id == SubcontractingReceipt.scr_id) &
+                   (SubcontractingReceiptItem.tenant_id == tenant_id)).where(
+                SubcontractingReceipt.tenant_id == tenant_id,
+                SubcontractingReceipt.status != "CANCELLED",
+            ).group_by(SubcontractingReceipt.sco_id, SubcontractingReceiptItem.item_id).subquery()
+            stmt = select(
+                SubcontractingOrder.sco_id, SubcontractingOrder.sco_number,
+                SubcontractingOrder.order_date, SubcontractingOrder.status,
+                Supplier.supplier_id, Supplier.supplier_name,
+                SubcontractingOrderItem.sco_item_id, Item.item_id, Item.item_code, Item.item_name,
+                SubcontractingOrderItem.quantity.label("ordered_qty"),
+                func.coalesce(receipts.c.received_qty, 0).label("received_qty"),
+                receipts.c.receipt_numbers,
+            ).join(SubcontractingOrder, (SubcontractingOrder.sco_id == SubcontractingOrderItem.sco_id) &
+                   (SubcontractingOrder.tenant_id == tenant_id))\
+             .join(Supplier, (Supplier.supplier_id == SubcontractingOrder.supplier_id) &
+                   (Supplier.tenant_id == tenant_id))\
+             .join(Item, (Item.item_id == SubcontractingOrderItem.item_id) & (Item.tenant_id == tenant_id))\
+             .outerjoin(receipts, (receipts.c.sco_id == SubcontractingOrder.sco_id) &
+                        (receipts.c.item_id == SubcontractingOrderItem.item_id))\
+             .where(SubcontractingOrderItem.tenant_id == tenant_id,
+                    *self._period(SubcontractingOrder.order_date, *period))\
+             .order_by(SubcontractingOrder.order_date, SubcontractingOrder.sco_number, Item.item_code)
+            rows = (await db.execute(stmt)).all()
+            return {"report_name": "Subcontracting Finished Goods Receipt Tracker", "rows": [{
+                "sco_id": str(r.sco_id), "sco_number": r.sco_number, "status": r.status,
+                "order_date": r.order_date.isoformat(), "supplier_id": str(r.supplier_id),
+                "supplier": r.supplier_name, "sco_item_id": str(r.sco_item_id),
+                "item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name,
+                "ordered_quantity": r.ordered_qty, "received_quantity": r.received_qty,
+                "pending_receipt_quantity": max(Decimal("0"), r.ordered_qty - r.received_qty),
+                "over_received_quantity": max(Decimal("0"), r.received_qty - r.ordered_qty),
+                "receipt_numbers": r.receipt_numbers,
+                "lineage_basis": "Subcontracting receipt headers link directly to their subcontracting order.",
+            } for r in rows]}
+
         if name == "procurement-tracker":
-            stmt = select(MaterialRequest.mr_id, MaterialRequest.mr_number, MaterialRequest.schedule_date, MaterialRequest.status, Item.item_code, Item.item_name, MaterialRequestItem.quantity, MaterialRequestItem.ordered_qty, PurchaseOrder.po_number, GoodsReceiptNote.grn_number, func.coalesce(func.sum(GoodsReceiptNoteItem.quantity_accepted), 0).label("received"))\
-                .join(MaterialRequestItem, MaterialRequestItem.mr_id == MaterialRequest.mr_id).join(Item, Item.item_id == MaterialRequestItem.item_id)\
-                .outerjoin(PurchaseOrderItem, (PurchaseOrderItem.item_id == Item.item_id) & (PurchaseOrderItem.tenant_id == tenant_id)).outerjoin(PurchaseOrder, (PurchaseOrder.po_id == PurchaseOrderItem.po_id) & (PurchaseOrder.tenant_id == tenant_id) & (PurchaseOrder.order_date >= MaterialRequest.schedule_date))\
-                .outerjoin(GoodsReceiptNote, (GoodsReceiptNote.po_id == PurchaseOrder.po_id) & (GoodsReceiptNote.tenant_id == tenant_id) & (GoodsReceiptNote.receipt_date >= PurchaseOrder.order_date)).outerjoin(GoodsReceiptNoteItem, (GoodsReceiptNoteItem.grn_id == GoodsReceiptNote.grn_id) & (GoodsReceiptNoteItem.item_id == Item.item_id) & (GoodsReceiptNoteItem.tenant_id == tenant_id))\
-                .where(MaterialRequest.tenant_id == tenant_id, MaterialRequestItem.tenant_id == tenant_id, Item.tenant_id == tenant_id, *self._period(MaterialRequest.schedule_date, *period))\
-                .group_by(MaterialRequest.mr_id, MaterialRequest.mr_number, MaterialRequest.schedule_date, MaterialRequest.status, Item.item_code, Item.item_name, MaterialRequestItem.quantity, MaterialRequestItem.ordered_qty, PurchaseOrder.po_number, GoodsReceiptNote.grn_number).order_by(MaterialRequest.schedule_date)
-            return [{"mr_id": str(r.mr_id), "mr_number": r.mr_number, "schedule_date": r.schedule_date, "status": r.status, "item_code": r.item_code, "item_name": r.item_name, "requested_qty": r.quantity, "ordered_qty": r.ordered_qty, "po_number": r.po_number, "grn_number": r.grn_number, "accepted_qty": r.received} for r in (await db.execute(stmt)).all()]
+            receipts = select(
+                GoodsReceiptNoteItem.po_item_id.label("po_item_id"),
+                func.coalesce(func.sum(GoodsReceiptNoteItem.quantity_accepted), 0).label("accepted_qty"),
+                func.coalesce(func.sum(GoodsReceiptNoteItem.quantity_rejected), 0).label("rejected_qty"),
+                func.count(func.distinct(GoodsReceiptNoteItem.grn_id)).label("receipt_count"),
+            ).join(GoodsReceiptNote, GoodsReceiptNote.grn_id == GoodsReceiptNoteItem.grn_id).where(
+                GoodsReceiptNoteItem.tenant_id == tenant_id,
+                GoodsReceiptNote.tenant_id == tenant_id,
+                GoodsReceiptNote.status != "CANCELLED",
+                GoodsReceiptNoteItem.po_item_id.is_not(None),
+            ).group_by(GoodsReceiptNoteItem.po_item_id).subquery()
+            invoices = select(
+                SupplierInvoiceItem.po_item_id.label("po_item_id"),
+                func.coalesce(func.sum(SupplierInvoiceItem.quantity), 0).label("invoiced_qty"),
+                func.coalesce(func.sum(SupplierInvoiceItem.line_total), 0).label("invoiced_amount"),
+            ).join(SupplierInvoice, SupplierInvoice.invoice_id == SupplierInvoiceItem.invoice_id).where(
+                SupplierInvoiceItem.tenant_id == tenant_id,
+                SupplierInvoice.tenant_id == tenant_id,
+                SupplierInvoice.matching_status != "CANCELLED",
+                SupplierInvoiceItem.po_item_id.is_not(None),
+            ).group_by(SupplierInvoiceItem.po_item_id).subquery()
+            stmt = select(
+                MaterialRequest.mr_id, MaterialRequest.mr_number, MaterialRequest.schedule_date, MaterialRequest.status,
+                MaterialRequestItem.mr_item_id, Item.item_code, Item.item_name, MaterialRequestItem.quantity,
+                MaterialRequestItem.ordered_qty, PurchaseOrder.po_id, PurchaseOrder.po_number, PurchaseOrder.status.label("po_status"),
+                PurchaseOrderItem.item_line_id, PurchaseOrderItem.quantity.label("po_qty"),
+                PurchaseOrderItem.stock_quantity.label("po_stock_qty"), PurchaseOrderItem.rfq_item_id,
+                PurchaseOrderItem.supplier_quotation_item_id,
+                func.coalesce(receipts.c.accepted_qty, 0).label("accepted_qty"),
+                func.coalesce(receipts.c.rejected_qty, 0).label("rejected_qty"),
+                func.coalesce(receipts.c.receipt_count, 0).label("receipt_count"),
+                func.coalesce(invoices.c.invoiced_qty, 0).label("invoiced_qty"),
+                func.coalesce(invoices.c.invoiced_amount, 0).label("invoiced_amount"),
+            ).join(MaterialRequestItem, (MaterialRequestItem.mr_id == MaterialRequest.mr_id) & (MaterialRequestItem.tenant_id == tenant_id))\
+             .join(Item, (Item.item_id == MaterialRequestItem.item_id) & (Item.tenant_id == tenant_id))\
+             .outerjoin(PurchaseOrderItem, (PurchaseOrderItem.material_request_item_id == MaterialRequestItem.mr_item_id) & (PurchaseOrderItem.tenant_id == tenant_id))\
+             .outerjoin(PurchaseOrder, (PurchaseOrder.po_id == PurchaseOrderItem.po_id) & (PurchaseOrder.tenant_id == tenant_id))\
+             .outerjoin(receipts, receipts.c.po_item_id == PurchaseOrderItem.item_line_id)\
+             .outerjoin(invoices, invoices.c.po_item_id == PurchaseOrderItem.item_line_id)\
+             .where(MaterialRequest.tenant_id == tenant_id, *self._period(MaterialRequest.schedule_date, *period))\
+             .order_by(MaterialRequest.schedule_date, MaterialRequestItem.mr_item_id, PurchaseOrder.po_number)
+            rows = (await db.execute(stmt)).all()
+            return [{
+                "mr_id": str(r.mr_id), "mr_number": r.mr_number, "mr_item_id": str(r.mr_item_id),
+                "schedule_date": r.schedule_date, "status": r.status, "item_code": r.item_code,
+                "item_name": r.item_name, "requested_qty": r.quantity, "ordered_qty": r.ordered_qty,
+                "remaining_to_order": max(Decimal("0"), r.quantity - r.ordered_qty),
+                "po_id": str(r.po_id) if r.po_id else None, "po_number": r.po_number,
+                "po_status": r.po_status, "po_item_id": str(r.item_line_id) if r.item_line_id else None,
+                "po_qty": r.po_qty, "po_stock_qty": r.po_stock_qty,
+                "rfq_item_id": str(r.rfq_item_id) if r.rfq_item_id else None,
+                "supplier_quotation_item_id": str(r.supplier_quotation_item_id) if r.supplier_quotation_item_id else None,
+                "accepted_qty": r.accepted_qty, "rejected_qty": r.rejected_qty,
+                "receipt_count": r.receipt_count, "invoiced_qty": r.invoiced_qty,
+                "invoiced_amount": r.invoiced_amount,
+            } for r in rows]
 
         if name in {"items-to-be-requested", "item-shortage-report"}:
             stmt = select(Item.item_id, Item.item_code, Item.item_name, Item.reorder_level, func.coalesce(func.sum(StockLevel.current_qty), 0).label("on_hand"), func.coalesce(func.sum(StockLevel.reserved_qty), 0).label("reserved"))\
@@ -167,11 +470,32 @@ class EnterpriseReportsService:
             return [{"customer_id": str(r.customer_id), "customer_name": r.customer_name, "item_id": str(r.item_id), "item_code": r.item_code, "item_name": r.item_name, "territory": r.territory or "Unassigned", "quantity": r.quantity, "revenue": r.revenue} for r in rows]
 
         if name == "sales-order-analysis":
-            ordered = select(func.coalesce(func.sum(SalesOrderItem.quantity), 0)).where(SalesOrderItem.tenant_id == tenant_id, SalesOrderItem.order_id == SalesOrder.order_id).scalar_subquery()
-            shipped = select(func.coalesce(func.sum(DeliveryNoteItem.quantity), 0)).join(DeliveryNote, DeliveryNote.delivery_note_id == DeliveryNoteItem.delivery_note_id).where(DeliveryNote.tenant_id == tenant_id, DeliveryNoteItem.tenant_id == tenant_id, DeliveryNote.order_id == SalesOrder.order_id, DeliveryNote.status != "CANCELLED").scalar_subquery()
-            billed = select(func.coalesce(func.sum(SalesInvoice.total_amount), 0)).where(SalesInvoice.tenant_id == tenant_id, SalesInvoice.order_id == SalesOrder.order_id, SalesInvoice.status != "CANCELLED").scalar_subquery()
-            rows = (await db.execute(select(SalesOrder, Customer.customer_name, ordered.label("ordered_qty"), shipped.label("shipped_qty"), billed.label("billed_amount")).join(Customer, Customer.customer_id == SalesOrder.customer_id).where(SalesOrder.tenant_id == tenant_id, Customer.tenant_id == tenant_id, *self._period(SalesOrder.order_date, *period)))).all()
-            return [{"order_id": str(o.order_id), "order_number": o.order_number, "customer": c, "status": o.status, "delivery_date": o.delivery_date, "total_amount": o.total_amount, "ordered_qty": oq, "shipped_qty": sq, "pending_delivery_qty": max(Decimal("0"), oq - sq), "billed_amount": ba, "pending_billing_amount": max(Decimal("0"), o.total_amount - ba)} for o, c, oq, sq, ba in rows]
+            rows = (await db.execute(
+                select(SalesOrder, Customer.customer_name, SalesOrderItem, Item.item_code, Item.item_name,
+                       UOM.uom_name, SalesQuotation.currency)
+                .join(Customer, (Customer.customer_id == SalesOrder.customer_id) & (Customer.tenant_id == tenant_id))
+                .join(SalesOrderItem, (SalesOrderItem.order_id == SalesOrder.order_id) & (SalesOrderItem.tenant_id == tenant_id))
+                .join(Item, (Item.item_id == SalesOrderItem.item_id) & (Item.tenant_id == tenant_id))
+                .outerjoin(UOM, (UOM.uom_id == SalesOrderItem.uom_id) & (UOM.tenant_id == tenant_id))
+                .outerjoin(SalesQuotation, (SalesQuotation.quotation_id == SalesOrder.source_quotation_id) &
+                           (SalesQuotation.tenant_id == tenant_id))
+                .where(SalesOrder.tenant_id == tenant_id, *self._period(SalesOrder.order_date, *period))
+                .order_by(SalesOrder.order_date, SalesOrder.order_number, SalesOrderItem.order_item_id)
+            )).all()
+            result = []
+            for order, customer, line, item_code, item_name, uom_name, currency_code in rows:
+                progress = self._sales_order_line_progress(line, order.status)
+                result.append({
+                    "order_id": str(order.order_id), "order_number": order.order_number,
+                    "order_item_id": str(line.order_item_id), "customer": customer,
+                    "status": order.status, "order_date": order.order_date.isoformat(),
+                    "delivery_date": order.delivery_date.isoformat(), "currency": currency_code,
+                    "item_id": str(line.item_id), "item_code": item_code, "item_name": item_name,
+                    "uom": uom_name or "Stock UOM", "conversion_factor": line.conversion_factor,
+                    "stock_quantity_ordered": line.stock_quantity, "line_amount": line.line_total,
+                    **progress,
+                })
+            return {"basis": "Persisted sales-order-line ordered, delivered, invoiced, and returned quantity snapshots.", "rows": result}
 
         if name == "inactive-customers":
             last = select(func.max(SalesInvoice.invoice_date)).where(SalesInvoice.tenant_id == tenant_id, SalesInvoice.customer_id == Customer.customer_id, SalesInvoice.status != "CANCELLED").scalar_subquery()
@@ -187,12 +511,41 @@ class EnterpriseReportsService:
             return [{"item_id": str(i.item_id), "item_code": i.item_code, "item_name": i.item_name, "on_hand": on_hand, "reserved": reserved, "open_sales_qty": d, "open_purchase_qty": s, "projected_qty": on_hand - reserved - d + s} for i, on_hand, reserved, d, s in rows]
 
         if name == "stock-ageing":
-            # FIFO approximation from positive receipts that remain represented by
-            # current levels; exact layer depletion is unavailable in this schema.
-            current_stock = select(StockLevel.item_id.label("item_id"), func.sum(StockLevel.current_qty).label("current_qty")).where(StockLevel.tenant_id == tenant_id, StockLevel.is_quarantined.is_(False)).group_by(StockLevel.item_id).subquery()
-            stmt = select(Item.item_id, Item.item_code, Item.item_name, StockLedgerEntry.posting_datetime, StockLedgerEntry.actual_qty, StockLedgerEntry.incoming_rate, current_stock.c.current_qty).join(current_stock, current_stock.c.item_id == Item.item_id).join(StockLedgerEntry, (StockLedgerEntry.item_id == Item.item_id) & (StockLedgerEntry.tenant_id == tenant_id)).where(Item.tenant_id == tenant_id, StockLedgerEntry.actual_qty > 0, StockLedgerEntry.is_cancelled.is_(False), current_stock.c.current_qty > 0).order_by(StockLedgerEntry.posting_datetime)
+            cutoff = as_of_date + timedelta(days=1)
+            consumed_by_date = select(func.coalesce(func.sum(StockLayerConsumption.quantity), 0))\
+                .join(StockLedgerEntry, StockLedgerEntry.entry_id == StockLayerConsumption.outgoing_entry_id)\
+                .where(
+                    StockLayerConsumption.tenant_id == tenant_id,
+                    StockLayerConsumption.layer_id == StockValuationLayer.layer_id,
+                    StockLayerConsumption.is_reversed.is_(False),
+                    StockLedgerEntry.tenant_id == tenant_id,
+                    StockLedgerEntry.posting_datetime < cutoff,
+                    StockLedgerEntry.is_cancelled.is_(False),
+                ).correlate(StockValuationLayer).scalar_subquery()
+            remaining_as_of = StockValuationLayer.received_qty - consumed_by_date
+            stmt = select(
+                StockValuationLayer, Item.item_code, Item.item_name, remaining_as_of.label("remaining_as_of"),
+            ).join(Item, (Item.item_id == StockValuationLayer.item_id) & (Item.tenant_id == tenant_id)).where(
+                StockValuationLayer.tenant_id == tenant_id,
+                StockValuationLayer.is_cancelled.is_(False),
+                StockValuationLayer.received_at < cutoff,
+                remaining_as_of > 0,
+            ).order_by(StockValuationLayer.received_at, StockValuationLayer.layer_id)
             rows = (await db.execute(stmt)).all()
-            return {"method": "FIFO receipt chronology; remaining layer quantities are estimated because receipt-to-consumption layer balances are not persisted", "rows": [{"item_id": str(i), "item_code": code, "item_name": label, "receipt_date": dt.date(), "receipt_qty": qty, "incoming_rate": rate, "current_qty": current, "age_days": (as_of_date - dt.date()).days} for i, code, label, dt, qty, rate, current in rows]}
+            return {
+                "method": "Persisted FIFO layers; remaining quantities are depleted transactionally by stock issues.",
+                "rows": [{
+                    "layer_id": str(layer.layer_id), "item_id": str(layer.item_id),
+                    "item_code": code, "item_name": label,
+                    "warehouse_id": str(layer.warehouse_id), "receipt_date": layer.received_at.date(),
+                    "receipt_qty": layer.received_qty, "remaining_qty": remaining,
+                    "unit_cost": layer.unit_cost, "remaining_value": remaining * layer.unit_cost,
+                    "age_days": (as_of_date - layer.received_at.date()).days,
+                    "source_document_type": layer.source_document_type,
+                    "source_document_id": str(layer.source_document_id) if layer.source_document_id else None,
+                    "estimated_cost": layer.source_document_type == "OPENING_BALANCE",
+                } for layer, code, label, remaining in rows],
+            }
 
         if name == "stock-analytics":
             stmt = select(Item.item_id, Item.item_code, Item.item_name, Item.category, func.coalesce(func.sum(StockLevel.current_qty), 0).label("quantity"), func.coalesce(func.sum(StockLevel.current_qty * StockLevel.valuation_rate), 0).label("value"), func.coalesce(func.sum(StockLevel.reserved_qty), 0).label("reserved"))\

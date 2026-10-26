@@ -45,6 +45,47 @@ class ThreeWayMatchResult(BaseModel):
     dispute_notice: VendorDisputeNotice | None = None
 
 
+def build_invoice_ledger_lines(invoice: SupplierInvoice) -> list[LedgerLineProposal]:
+    """Build a balanced AP posting from persisted invoice and tax snapshots."""
+    tax_debits = Decimal("0")
+    tax_credits = Decimal("0")
+    tax_entries: list[LedgerLineProposal] = []
+    for row in invoice.tax_snapshot or []:
+        if row.get("consider_for_valuation"):
+            continue
+        amount = Decimal(str(row.get("amount", "0")))
+        if amount <= 0:
+            continue
+        is_deduction = row.get("add_deduct") == "DEDUCT"
+        debit = Decimal("0") if is_deduction else amount
+        credit = amount if is_deduction else Decimal("0")
+        tax_debits += debit
+        tax_credits += credit
+        tax_entries.append(LedgerLineProposal(
+            account_code=row["account_head"], cost_center="CORP-FINANCE",
+            debit_amount=debit, credit_amount=credit, currency=invoice.currency,
+        ))
+    inventory_debit = invoice.total_amount + tax_credits - tax_debits
+    if inventory_debit < 0:
+        raise ValueError("Tax snapshot produces a negative inventory/expense debit; review the supplier invoice tax configuration.")
+    entries = []
+    if inventory_debit > 0:
+        entries.append(LedgerLineProposal(
+            account_code="1300-RAW-MATERIALS", cost_center="PLANT-01",
+            debit_amount=inventory_debit, credit_amount=Decimal("0.0000"),
+            currency=invoice.currency,
+        ))
+    entries.extend(tax_entries)
+    entries.append(LedgerLineProposal(
+        account_code="2100-AP-VENDORS", cost_center="CORP-FINANCE",
+        debit_amount=Decimal("0.0000"), credit_amount=invoice.total_amount,
+        currency=invoice.currency,
+    ))
+    if sum((line.debit_amount for line in entries), Decimal("0")) != sum((line.credit_amount for line in entries), Decimal("0")):
+        raise ValueError("Supplier-invoice tax posting is not balanced.")
+    return entries
+
+
 class ThreeWayMatcher:
     """Executes automated 3-way matching across Supplier Invoices, Purchase Orders, and GRNs."""
 
@@ -297,24 +338,9 @@ class ThreeWayMatcher:
             invoice.variance_percentage = tolerance.overall_variance_percentage
             invoice.dispute_reason = None
 
-            # Stage AP Journal Entry to Ledger Engine
-            # Debit: 1300-RAW-MATERIALS, Credit: 2100-AP-VENDORS
-            entries = [
-                LedgerLineProposal(
-                    account_code="1300-RAW-MATERIALS",
-                    cost_center="PLANT-01",
-                    debit_amount=invoice.total_amount,
-                    credit_amount=Decimal("0.0000"),
-                    currency=invoice.currency,
-                ),
-                LedgerLineProposal(
-                    account_code="2100-AP-VENDORS",
-                    cost_center="CORP-FINANCE",
-                    debit_amount=Decimal("0.0000"),
-                    credit_amount=invoice.total_amount,
-                    currency=invoice.currency,
-                ),
-            ]
+            # Expense/inventory absorbs valuation charges; recoverable tax and
+            # withholding rows post to their configured accounts.
+            entries = build_invoice_ledger_lines(invoice)
 
             proposal = TransactionProposal(
                 tenant_id=tenant_id,

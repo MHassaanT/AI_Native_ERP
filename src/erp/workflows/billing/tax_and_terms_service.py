@@ -173,6 +173,10 @@ class TaxAndTermsService:
                     account_head=t["account_head"],
                     description=t["description"],
                     rate=Decimal(str(t.get("rate", "0.0000"))),
+                    reference_row=t.get("reference_row"),
+                    included_in_rate=t.get("included_in_rate", False),
+                    add_deduct=t.get("add_deduct", "ADD"),
+                    consider_for_valuation=t.get("consider_for_valuation", False),
                 )
                 session.add(detail)
 
@@ -197,44 +201,39 @@ class TaxAndTermsService:
         - On Net Total: Rate % applied to net_total
         - On Previous Row Amount: Rate % applied to the calculated tax/charge amount of reference row_id
         """
-        row_calculations = []
-        total_taxes = Decimal("0.0000")
+        from erp.workflows.commercial.calculation_service import TaxRowInput, calculate_tax_rows
 
-        for idx, t in enumerate(tax_details, start=1):
-            ctype = t.get("charge_type", "On Net Total")
-            rate = Decimal(str(t.get("rate", "0.0000")))
-            row_tax = Decimal("0.0000")
-
-            if ctype == "Actual":
-                row_tax = rate
-            elif ctype == "On Net Total":
-                row_tax = round(net_total * (rate / Decimal("100.00")), 4)
-            elif ctype == "On Previous Row Amount":
-                ref_row_id = t.get("row_id")
-                # Find matching row by 1-based index or index-1
-                ref_amount = Decimal("0.0000")
-                if ref_row_id is not None and 1 <= int(ref_row_id) <= len(row_calculations):
-                    ref_amount = row_calculations[int(ref_row_id) - 1]["tax_amount"]
-                row_tax = round(ref_amount * (rate / Decimal("100.00")), 4)
-
-            total_taxes += row_tax
-            row_calculations.append({
-                "row_id": idx,
-                "account_head": t.get("account_head", "TAX"),
-                "description": t.get("description", "Tax Head"),
-                "charge_type": ctype,
-                "rate": float(rate),
-                "tax_amount": row_tax,
-                "cumulative_total": net_total + total_taxes,
-            })
-
+        ordered = list(tax_details)
+        normalized = []
+        previous_id = None
+        for idx, detail in enumerate(ordered, start=1):
+            own_id = int(detail.get("row_id") or idx)
+            normalized.append(TaxRowInput(
+                row_id=own_id,
+                charge_type=detail.get("charge_type", "On Net Total"),
+                rate=Decimal(str(detail.get("rate", "0.0000"))),
+                description=detail.get("description", "Tax Head"),
+                account_head=detail.get("account_head", "TAX"),
+                reference_row=detail.get("reference_row") or (previous_id if "Previous Row" in detail.get("charge_type", "") else None),
+                actual_amount=Decimal(str(detail.get("rate", "0.0000"))) if detail.get("charge_type") == "Actual" else None,
+                included_in_rate=detail.get("included_in_rate", False),
+                add_deduct=detail.get("add_deduct", "ADD"),
+                consider_for_valuation=detail.get("consider_for_valuation", False),
+            ))
+            previous_id = own_id
+        result = calculate_tax_rows(net_total, Decimal("0"), normalized)
         return {
             "net_total": float(net_total),
-            "total_taxes_and_charges": float(total_taxes),
-            "grand_total": float(net_total + total_taxes),
+            "total_taxes_and_charges": float(result.tax_total),
+            "grand_total": float(result.grand_total),
+            "valuation_adjustment": float(result.valuation_adjustment),
             "rows": [
-                {**r, "tax_amount": float(r["tax_amount"]), "cumulative_total": float(r["cumulative_total"])}
-                for r in row_calculations
+                {"row_id": row.row_id, "account_head": row.account_head, "description": row.description,
+                 "charge_type": row.charge_type, "tax_amount": float(row.amount),
+                 "cumulative_total": float(row.running_total), "calculation_base": float(row.calculation_base),
+                 "included_in_rate": row.included_in_rate, "add_deduct": row.add_deduct,
+                 "consider_for_valuation": row.consider_for_valuation}
+                for row in result.rows
             ],
         }
 

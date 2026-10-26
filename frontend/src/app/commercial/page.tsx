@@ -38,6 +38,7 @@ interface SalesQuote {
   total_amount: number;
   contribution_margin_pct: number;
   status: string;
+  items?: Array<{ quotation_item_id: string; item_id: string; quantity: number; unit_price: number; is_free?: boolean; promotion_id?: string | null }>;
 }
 
 interface CatalogItem {
@@ -51,6 +52,11 @@ export default function CommercialPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [quotes, setQuotes] = useState<SalesQuote[]>([]);
   const [items, setItems] = useState<CatalogItem[]>([]);
+  const [salesMasters, setSalesMasters] = useState<{ contacts: any[]; addresses: any[]; terms: any[]; warehouses: any[]; shippingRules: any[]; partners: any[] }>({ contacts: [], addresses: [], terms: [], warehouses: [], shippingRules: [], partners: [] });
+  const [convertingQuote, setConvertingQuote] = useState<SalesQuote | null>(null);
+  const [conversionDetails, setConversionDetails] = useState({ customer_contact_id: "", billing_address_id: "", shipping_address_id: "", terms_template_id: "", terms_text: "", warehouse_id: "", shipping_rule_id: "", payment_terms: "" });
+  const [quoteLines, setQuoteLines] = useState<Array<{ item_id: string; quantity: string; unit_price: string }>>([]);
+  const [conversionSalesTeam, setConversionSalesTeam] = useState<Array<{ partner_id: string; contribution_pct: string }>>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,21 +94,27 @@ export default function CommercialPage() {
   const [showQuoteModal, setShowQuoteModal] = useState(false);
   const [newQuoteNumber, setNewQuoteNumber] = useState(`QT-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
-  const [quoteSubtotal, setQuoteSubtotal] = useState(12500);
   const [quoteMargin, setQuoteMargin] = useState(25.0);
 
   const loadData = async () => {
     try {
       setIsLoading(true);
       setError(null);
-      const [custList, quoteList, itemList] = await Promise.all([
+      const [custList, quoteList, itemList, contacts, addresses, terms, warehouses, shippingRules, partners] = await Promise.all([
         api.getCustomers().catch(() => []),
         api.getQuotes().catch(() => []),
         api.getItems().catch(() => []),
+        api.getMasterData("contacts").catch(() => []),
+        api.getMasterData("addresses").catch(() => []),
+        api.getMasterData("terms-templates").catch(() => []),
+        api.getWarehouses().catch(() => []),
+        api.getMasterData("shipping-rules").catch(() => []),
+        api.getMasterData("sales-partners").catch(() => []),
       ]);
       setCustomers(custList || []);
       setQuotes(quoteList || []);
       setItems(itemList || []);
+      setSalesMasters({ contacts: contacts || [], addresses: addresses || [], terms: (terms || []).filter((row: any) => row.is_active && ["SELLING", "BOTH"].includes(row.applicable_to)), warehouses: (warehouses || []).filter((row: any) => row.is_active && !row.is_quarantine), shippingRules: (shippingRules || []).filter((row: any) => row.is_active), partners: (partners || []).filter((row: any) => row.is_active) });
       if (custList && custList.length > 0) {
         setSelectedCustomerId(custList[0].customer_id);
         setInvCustomer(custList[0].customer_name);
@@ -201,28 +213,63 @@ export default function CommercialPage() {
   // Handle Sales Quote Creation
   const handleCreateQuote = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedCustomerId) {
+    if (!selectedCustomerId || !quoteLines.length || quoteLines.some((line) => !line.item_id || Number(line.quantity) <= 0 || Number(line.unit_price) < 0)) {
       alert("Please select a valid customer");
       return;
     }
     try {
       const today = new Date().toISOString().split("T")[0];
       const validUntil = new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0];
+      const subtotal = quoteLines.reduce((sum, line) => sum + Number(line.quantity) * Number(line.unit_price), 0);
       await api.createQuote({
         quotation_number: newQuoteNumber.trim(),
         customer_id: selectedCustomerId,
         quotation_date: today,
         valid_until: validUntil,
-        subtotal: Number(quoteSubtotal),
+        subtotal,
         tax_amount: 0,
         contribution_margin_pct: Number(quoteMargin),
+        items: quoteLines.map((line) => ({ item_id: line.item_id, quantity: Number(line.quantity), unit_price: Number(line.unit_price) })),
       });
       setShowQuoteModal(false);
+      setQuoteLines([]);
       setNewQuoteNumber(`QT-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
       await loadData();
     } catch (err: any) {
       alert("Failed to create quote: " + (err?.message || err));
     }
+  };
+
+  const handleConvertQuote = async (quote: SalesQuote) => {
+    if (!quote.items?.length) { alert("This quotation has no persisted item lines and cannot be converted."); return; }
+    setConversionDetails({ customer_contact_id: "", billing_address_id: "", shipping_address_id: "", terms_template_id: "", terms_text: "", warehouse_id: "", shipping_rule_id: "", payment_terms: "" });
+    setConversionSalesTeam([]);
+    setConvertingQuote(quote);
+  };
+
+  const submitQuoteConversion = async () => {
+    const quote = convertingQuote;
+    if (!quote?.items?.length) return;
+    try {
+      const today = new Date();
+      const result = await api.convertQuoteToOrder(quote.quotation_id, {
+        order_number: `SO-${quote.quotation_number.replace(/^QT-/, "")}`,
+        delivery_date: new Date(today.getTime() + 14 * 86400000).toISOString().split("T")[0],
+        items: quote.items.map((line) => ({ quotation_item_id: line.quotation_item_id, item_id: line.item_id, quantity: Number(line.quantity), unit_price: Number(line.unit_price) })),
+        customer_contact_id: conversionDetails.customer_contact_id || undefined,
+        billing_address_id: conversionDetails.billing_address_id || undefined,
+        shipping_address_id: conversionDetails.shipping_address_id || undefined,
+        terms_template_id: conversionDetails.terms_template_id || undefined,
+        terms_text: conversionDetails.terms_text || undefined,
+        warehouse_id: conversionDetails.warehouse_id || undefined,
+        shipping_rule_id: conversionDetails.shipping_rule_id || undefined,
+        payment_terms: conversionDetails.payment_terms || undefined,
+        sales_team: conversionSalesTeam.filter((assignment) => assignment.partner_id).map((assignment) => ({ partner_id: assignment.partner_id, contribution_pct: Number(assignment.contribution_pct) })),
+      });
+      alert(`Sales order ${result.order_number} created and stock reserved.`);
+      setConvertingQuote(null);
+      await loadData();
+    } catch (err: any) { alert("Could not convert quotation: " + (err?.message || err)); }
   };
 
   // Download PDF Quote
@@ -291,7 +338,7 @@ export default function CommercialPage() {
             <span>Add Customer</span>
           </button>
           <button
-            onClick={() => setShowQuoteModal(true)}
+            onClick={() => { setQuoteLines(items[0] ? [{ item_id: items[0].item_id, quantity: "1", unit_price: String(items[0].standard_rate || 0) }] : []); setShowQuoteModal(true); }}
             className="flex items-center gap-1.5 rounded-md border border-cream-400 bg-cream-100 px-3 py-1.5 text-xs font-medium text-cream-900 hover:bg-cream-200"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -685,13 +732,7 @@ export default function CommercialPage() {
                       </span>
                     </td>
                     <td className="py-2.5 px-3 text-right">
-                      <button
-                        onClick={() => handleDownloadPDF(q)}
-                        className="inline-flex items-center gap-1 text-[11px] font-medium text-cream-900 hover:text-cream-700 underline"
-                      >
-                        <Download className="h-3 w-3" />
-                        <span>PDF</span>
-                      </button>
+                      <div className="flex justify-end gap-3"><button onClick={() => handleDownloadPDF(q)} className="inline-flex items-center gap-1 text-[11px] font-medium text-cream-900 hover:text-cream-700 underline"><Download className="h-3 w-3"/><span>PDF</span></button>{["OFFICIAL", "SENT"].includes(q.status) && q.items?.length ? <button onClick={() => void handleConvertQuote(q)} className="text-[11px] font-semibold text-sage-800 underline">Convert to order</button> : null}</div>
                     </td>
                   </tr>
                 ))
@@ -865,17 +906,7 @@ export default function CommercialPage() {
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="block text-cream-700 font-medium mb-1">Subtotal ($)</label>
-                <input
-                  type="number"
-                  required
-                  step="100"
-                  value={quoteSubtotal}
-                  onChange={(e) => setQuoteSubtotal(Number(e.target.value))}
-                  className="w-full rounded border border-cream-300 bg-cream-100 px-3 py-1.5 font-mono text-cream-900"
-                />
-              </div>
+              <div className="space-y-2 rounded-lg border border-cream-200 bg-cream-50 p-3"><div className="flex items-center justify-between"><span className="font-semibold text-cream-800">Quotation items</span><button type="button" onClick={() => { const item = items[0]; if (item) setQuoteLines((current) => [...current, { item_id: item.item_id, quantity: "1", unit_price: String(item.standard_rate || 0) }]); }} className="text-[11px] font-semibold text-sage-800 underline">Add line</button></div>{quoteLines.map((line, index) => <div key={`${line.item_id}-${index}`} className="grid grid-cols-12 gap-2"><select required value={line.item_id} onChange={(e) => setQuoteLines((current) => current.map((row, i) => i === index ? { ...row, item_id: e.target.value, unit_price: String(items.find((item) => item.item_id === e.target.value)?.standard_rate || row.unit_price) } : row))} className="col-span-6 rounded border border-cream-300 bg-white px-2 py-1.5">{items.map((item) => <option key={item.item_id} value={item.item_id}>{item.item_code} · {item.item_name}</option>)}</select><input aria-label="Quoted quantity" type="number" required min="0.0001" step="0.0001" value={line.quantity} onChange={(e) => setQuoteLines((current) => current.map((row, i) => i === index ? { ...row, quantity: e.target.value } : row))} className="col-span-2 rounded border border-cream-300 bg-white px-2 py-1.5"/><input aria-label="Quoted unit price" type="number" required min="0" step="0.0001" value={line.unit_price} onChange={(e) => setQuoteLines((current) => current.map((row, i) => i === index ? { ...row, unit_price: e.target.value } : row))} className="col-span-3 rounded border border-cream-300 bg-white px-2 py-1.5"/><button type="button" aria-label="Remove quotation line" onClick={() => setQuoteLines((current) => current.filter((_, i) => i !== index))} className="col-span-1 text-red-700">×</button></div>)}<p className="text-right font-mono text-xs">Subtotal: ${quoteLines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unit_price || 0), 0).toFixed(2)}</p></div>
               <div>
                 <label className="block text-cream-700 font-medium mb-1">Guaranteed Margin % (&ge; 22.0%)</label>
                 <input
@@ -906,6 +937,25 @@ export default function CommercialPage() {
               </div>
             </form>
           </div>
+        </div>
+      )}
+      {convertingQuote && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <section className="w-full max-w-xl space-y-4 rounded-xl border border-cream-300 bg-white p-5 shadow-xl">
+            <div><h3 className="font-semibold">Convert {convertingQuote.quotation_number} to Sales Order</h3><p className="mt-1 text-xs text-cream-600">Choose tenant-scoped contact, addresses, warehouse, and terms to snapshot onto the order.</p></div>
+            <div className="grid gap-3 text-xs sm:grid-cols-2">
+              <label>Customer contact<select value={conversionDetails.customer_contact_id} onChange={(e) => setConversionDetails({ ...conversionDetails, customer_contact_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No contact</option>{salesMasters.contacts.filter((row) => row.is_active).map((row) => <option key={row.contact_id} value={row.contact_id}>{row.full_name}</option>)}</select></label>
+              <label>Billing address<select value={conversionDetails.billing_address_id} onChange={(e) => setConversionDetails({ ...conversionDetails, billing_address_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No address</option>{salesMasters.addresses.map((row) => <option key={row.address_id} value={row.address_id}>{row.address_title} · {row.city}</option>)}</select></label>
+              <label>Shipping address<select value={conversionDetails.shipping_address_id} onChange={(e) => setConversionDetails({ ...conversionDetails, shipping_address_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No address</option>{salesMasters.addresses.map((row) => <option key={row.address_id} value={row.address_id}>{row.address_title} · {row.city}</option>)}</select></label>
+              <label>Fulfillment warehouse<select value={conversionDetails.warehouse_id} onChange={(e) => setConversionDetails({ ...conversionDetails, warehouse_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">Choose automatically</option>{salesMasters.warehouses.map((row) => <option key={row.warehouse_id} value={row.warehouse_id}>{row.warehouse_name}</option>)}</select></label>
+              <label>Terms template<select value={conversionDetails.terms_template_id} onChange={(e) => { const selected = salesMasters.terms.find((row) => row.terms_template_id === e.target.value); setConversionDetails({ ...conversionDetails, terms_template_id: e.target.value, terms_text: selected?.terms || "" }); }} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No template</option>{salesMasters.terms.map((row) => <option key={row.terms_template_id} value={row.terms_template_id}>{row.template_name}</option>)}</select></label>
+              <label>Shipping rule<select value={conversionDetails.shipping_rule_id} onChange={(e) => setConversionDetails({ ...conversionDetails, shipping_rule_id: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2"><option value="">No rule</option>{salesMasters.shippingRules.map((row) => <option key={row.shipping_rule_id} value={row.shipping_rule_id}>{row.rule_name}</option>)}</select></label>
+              <label className="sm:col-span-2">Payment terms<input value={conversionDetails.payment_terms} onChange={(e) => setConversionDetails({ ...conversionDetails, payment_terms: e.target.value })} placeholder="Default from customer" className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2" /></label>
+              <div className="sm:col-span-2 rounded-lg border border-cream-200 p-3"><div className="flex items-center justify-between"><span className="font-semibold">Sales partners / representatives</span><button type="button" onClick={() => setConversionSalesTeam((rows) => { const count = rows.length + 1; const share = Math.floor((100 / count) * 10000) / 10000; return [...rows.map((row) => ({ ...row, contribution_pct: share.toFixed(4) })), { partner_id: "", contribution_pct: (100 - share * rows.length).toFixed(4) }]; })} className="text-[11px] font-semibold text-sage-800 underline">Add partner</button></div>{conversionSalesTeam.length === 0 && <p className="mt-2 text-[11px] text-cream-600">Optional. If assigned, contribution shares must total 100%; commission rates are snapshotted from partner settings.</p>}<div className="mt-2 space-y-2">{conversionSalesTeam.map((assignment, index) => { const partner = salesMasters.partners.find((row) => row.sales_partner_id === assignment.partner_id); return <div key={index} className="grid grid-cols-12 items-center gap-2"><select aria-label={`Sales partner ${index + 1}`} value={assignment.partner_id} onChange={(e) => setConversionSalesTeam((rows) => rows.map((row, i) => i === index ? { ...row, partner_id: e.target.value } : row))} className="col-span-7 rounded border border-cream-300 bg-cream-50 p-2"><option value="">Choose partner</option>{salesMasters.partners.map((row) => <option key={row.sales_partner_id} value={row.sales_partner_id}>{row.partner_name}</option>)}</select><label className="col-span-4 flex items-center gap-1 text-[11px]">Share %<input aria-label={`Contribution percentage ${index + 1}`} type="number" min="0.0001" max="100" step="0.0001" value={assignment.contribution_pct} onChange={(e) => setConversionSalesTeam((rows) => rows.map((row, i) => i === index ? { ...row, contribution_pct: e.target.value } : row))} className="w-full rounded border border-cream-300 bg-cream-50 p-2" /></label><button type="button" aria-label={`Remove sales partner ${index + 1}`} onClick={() => setConversionSalesTeam((rows) => rows.filter((_, i) => i !== index))} className="col-span-1 text-red-700">×</button>{partner && <p className="col-span-12 text-[10px] text-cream-600">Commission rate snapshot: {partner.commission_rate}%</p>}</div>; })}</div>{conversionSalesTeam.length > 0 && <p className={`mt-2 text-right text-[11px] ${conversionSalesTeam.reduce((sum, row) => sum + Number(row.contribution_pct || 0), 0) === 100 ? "text-green-700" : "text-amber-700"}`}>Contribution total: {conversionSalesTeam.reduce((sum, row) => sum + Number(row.contribution_pct || 0), 0).toFixed(4)}%</p>}</div>
+              <label className="sm:col-span-2">Terms snapshot<textarea rows={3} value={conversionDetails.terms_text} onChange={(e) => setConversionDetails({ ...conversionDetails, terms_text: e.target.value })} className="mt-1 w-full rounded border border-cream-300 bg-cream-50 p-2" /></label>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-cream-200 pt-3"><button onClick={() => setConvertingQuote(null)} className="rounded px-3 py-2 text-cream-700">Cancel</button><button onClick={() => void submitQuoteConversion()} className="rounded bg-cream-900 px-4 py-2 font-medium text-white">Create Sales Order</button></div>
+          </section>
         </div>
       )}
     </div>

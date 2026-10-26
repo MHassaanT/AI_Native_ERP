@@ -163,6 +163,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ warehouse_id: warehouseId || null }),
     }),
+  getSalesOrders: () => fetchWithTenant("/commercial/orders"),
+  fulfillSalesOrder: (orderId: string, items?: Array<{ order_item_id: string; quantity: string }>) =>
+    fetchWithTenant(`/commercial/orders/${encodeURIComponent(orderId)}/fulfill`, {
+      method: "POST",
+      body: JSON.stringify({ items: items?.length ? items : null }),
+    }),
+  cancelSalesOrder: (orderId: string) => fetchWithTenant(`/commercial/orders/${encodeURIComponent(orderId)}/cancel`, { method: "POST" }),
+  amendSalesOrder: (orderId: string, orderNumber: string) => fetchWithTenant(`/commercial/orders/${encodeURIComponent(orderId)}/amend`, { method: "POST", body: JSON.stringify({ order_number: orderNumber }) }),
+  getSalesOrderTimeline: (orderId: string) => fetchWithTenant(`/commercial/orders/${encodeURIComponent(orderId)}/timeline`),
   getEmailSent: () => fetchWithTenant("/webhooks/email/sent"),
   simulateInboundEmail: (data: { sender: string; recipient?: string; subject: string; body_text: string; attachments?: string[] }) =>
     fetchWithTenant("/webhooks/email/inbound", { method: "POST", body: JSON.stringify(data) }),
@@ -174,6 +183,13 @@ export const api = {
   getPurchaseOrders: () => fetchWithTenant("/ap/purchase-orders"),
   createPurchaseOrder: (data: any) =>
     fetchWithTenant("/ap/purchase-orders", { method: "POST", body: JSON.stringify(data) }),
+  updatePurchaseOrderDraft: (poId: string, data: any) =>
+    fetchWithTenant(`/ap/purchase-orders/${encodeURIComponent(poId)}/draft`, { method: "PUT", body: JSON.stringify(data) }),
+  submitPurchaseOrder: (poId: string) => fetchWithTenant(`/ap/purchase-orders/${encodeURIComponent(poId)}/submit`, { method: "POST" }),
+  cancelPurchaseOrder: (poId: string) => fetchWithTenant(`/ap/purchase-orders/${encodeURIComponent(poId)}/cancel`, { method: "POST" }),
+  amendPurchaseOrder: (poId: string, poNumber: string) => fetchWithTenant(`/ap/purchase-orders/${encodeURIComponent(poId)}/amend`, { method: "POST", body: JSON.stringify({ po_number: poNumber }) }),
+  recalculatePurchaseOrder: (poId: string) => fetchWithTenant(`/ap/purchase-orders/${encodeURIComponent(poId)}/recalculate`, { method: "POST" }),
+  getPurchaseOrderTimeline: (poId: string) => fetchWithTenant(`/ap/purchase-orders/${encodeURIComponent(poId)}/timeline`),
   getGoodsReceipts: () => fetchWithTenant("/ap/goods-receipts"),
   createGoodsReceipt: (data: any) =>
     fetchWithTenant("/ap/goods-receipts", { method: "POST", body: JSON.stringify(data) }),
@@ -195,6 +211,8 @@ export const api = {
   getDeliveryNotes: () => fetchWithTenant("/commercial/delivery-notes"),
   createDeliveryInvoice: (deliveryNoteId: string, data: { invoice_number?: string }) =>
     fetchWithTenant(`/commercial/delivery-notes/${encodeURIComponent(deliveryNoteId)}/create-invoice`, { method: "POST", body: JSON.stringify(data) }),
+  convertQuoteToOrder: (quotationId: string, data: any) => fetchWithTenant(`/commercial/quotes/${encodeURIComponent(quotationId)}/convert-to-order`, { method: "POST", body: JSON.stringify(data) }),
+  previewCommercialCalculation: (data: any) => fetchWithTenant("/commercial/calculations/preview", { method: "POST", body: JSON.stringify(data) }),
   createItem: (data: any) =>
     fetchWithTenant("/inventory/items", { method: "POST", body: JSON.stringify(data) }),
   importItems: (file: File) => {
@@ -542,6 +560,7 @@ export const api = {
   },
   createMaterialRequest: (data: any) =>
     fetchWithTenant("/procurement/material-requests", { method: "POST", body: JSON.stringify(data) }),
+  getProcurementTracker: () => fetchWithTenant("/procurement/tracker"),
   getMaterialRequest: (mrId: string) =>
     fetchWithTenant(`/procurement/material-requests/${mrId}`),
   submitMaterialRequest: (mrId: string) =>

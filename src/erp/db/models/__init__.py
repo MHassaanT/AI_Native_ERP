@@ -108,7 +108,9 @@ from erp.db.models.inventory import (
     StockEntry,
     StockEntryItem,
     StockLedgerEntry,
+    StockLayerConsumption,
     StockLevel,
+    StockValuationLayer,
     StockReconciliation,
     StockReconciliationItem,
     StockReservationEntry,
@@ -184,6 +186,7 @@ from erp.db.models.projects import (
 from erp.db.models.purchasing import (
     BlanketOrder,
     BlanketOrderItem,
+    DocumentAuditBatch,
     GoodsReceiptNote,
     GoodsReceiptNoteItem,
     MaterialRequest,
@@ -219,6 +222,7 @@ from erp.db.models.sales import (
     SalesOrder,
     SalesOrderItem,
     SalesQuotation,
+    SalesQuotationItem,
 )
 from erp.db.models.saas_subscription import SafePayWebhookEvent, SaaSSubscription
 from erp.db.models.subcontracting import (
@@ -273,6 +277,8 @@ __all__ = [
     "ItemTodo",
     "Warehouse",
     "StockLedgerEntry",
+    "StockValuationLayer",
+    "StockLayerConsumption",
     "StockLevel",
     "Supplier",
     "PurchaseOrder",
@@ -290,6 +296,7 @@ __all__ = [
     "SupplierQuotationItem",
     "BlanketOrder",
     "BlanketOrderItem",
+    "DocumentAuditBatch",
     "SupplierScorecard",
     "SupplierScorecardCriteria",
     "LandedCostVoucher",
@@ -317,6 +324,7 @@ __all__ = [
     "MaintenanceTicket",
     "Customer",
     "SalesQuotation",
+    "SalesQuotationItem",
     "SalesOrder",
     "SalesOrderItem",
     "Employee",

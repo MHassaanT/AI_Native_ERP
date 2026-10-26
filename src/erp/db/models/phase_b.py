@@ -43,7 +43,11 @@ class PurchaseTaxesAndChargesTemplateDetail(Base, TenantMixin, TimestampMixin):
     account_head: Mapped[str] = mapped_column(String(64), nullable=False)
     description: Mapped[str] = mapped_column(String(255), nullable=False)
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0.0000"))
-    __table_args__ = (CheckConstraint("rate >= 0", name="ck_purchase_tax_rate_nonnegative"), CheckConstraint("charge_type IN ('Actual','On Net Total','On Previous Row Amount')", name="ck_purchase_tax_charge_type"), Index("ix_purchase_tax_detail_tenant_template", "tenant_id", "template_id"))
+    reference_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    included_in_rate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    add_deduct: Mapped[str] = mapped_column(String(8), nullable=False, default="ADD")
+    consider_for_valuation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    __table_args__ = (CheckConstraint("rate >= 0", name="ck_purchase_tax_rate_nonnegative"), CheckConstraint("charge_type IN ('Actual','On Net Total','On Previous Row Amount','On Previous Row Total','On Item Quantity')", name="ck_purchase_tax_charge_type"), CheckConstraint("add_deduct IN ('ADD','DEDUCT')", name="ck_purchase_tax_add_deduct"), Index("ix_purchase_tax_detail_tenant_template", "tenant_id", "template_id"))
     template: Mapped[PurchaseTaxesAndChargesTemplate] = relationship(back_populates="taxes")
 
 
@@ -93,6 +97,7 @@ class PromotionalScheme(Base, TenantMixin, TimestampMixin):
     buy_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     free_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("items.item_id", ondelete="CASCADE"), nullable=True)
+    free_item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=True)
     item_group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("item_groups.item_group_id", ondelete="CASCADE"), nullable=True)
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -111,6 +116,7 @@ class PricingRule(Base, TenantMixin, TimestampMixin):
     discount_type: Mapped[str] = mapped_column(String(16), nullable=False, default="PERCENT")
     discount_value: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0.0000"))
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    stackable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -55,6 +55,8 @@ class Item(Base, TenantMixin, TimestampMixin):
     standard_rate: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
+    weight_per_unit: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False, default=Decimal("0"))
+    weight_uom: Mapped[str] = mapped_column(String(16), nullable=False, default="KG")
     reorder_level: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, default=Decimal("0.0000")
     )
@@ -72,7 +74,10 @@ class Item(Base, TenantMixin, TimestampMixin):
     parent_item = relationship("Item", remote_side=[item_id])
     item_group = relationship("ItemGroup")
 
-    __table_args__ = (Index("idx_item_tenant_code", "tenant_id", "item_code", unique=True),)
+    __table_args__ = (
+        Index("idx_item_tenant_code", "tenant_id", "item_code", unique=True),
+        CheckConstraint("weight_per_unit >= 0", name="ck_item_weight_nonnegative"),
+    )
 
 
 class ItemTodo(Base, TenantMixin, TimestampMixin):
@@ -204,6 +209,50 @@ class StockLevel(Base, TenantMixin, TimestampMixin):
         Index(
             "idx_stock_level_tenant_item_wh", "tenant_id", "item_id", "warehouse_id", unique=True
         ),
+    )
+
+
+class StockValuationLayer(Base, TenantMixin):
+    """Persisted FIFO receipt/opening layer for inventory ageing and COGS."""
+
+    __tablename__ = "stock_valuation_layers"
+
+    layer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=False)
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.warehouse_id"), nullable=False)
+    source_entry_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("stock_ledger_entries.entry_id"), nullable=True)
+    source_document_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_qty: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    remaining_qty: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    is_cancelled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("ix_stock_fifo_tenant_item_wh_date", "tenant_id", "item_id", "warehouse_id", "received_at", "layer_id"),
+        Index("uq_stock_layer_source_entry", "tenant_id", "source_entry_id", unique=True),
+        CheckConstraint("received_qty > 0 AND remaining_qty >= 0 AND remaining_qty <= received_qty", name="ck_stock_layer_qty_valid"),
+        CheckConstraint("unit_cost >= 0", name="ck_stock_layer_cost_nonnegative"),
+    )
+
+
+class StockLayerConsumption(Base, TenantMixin):
+    """Immutable link between an outgoing ledger entry and FIFO source layers."""
+
+    __tablename__ = "stock_layer_consumptions"
+
+    consumption_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    layer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("stock_valuation_layers.layer_id"), nullable=False)
+    outgoing_entry_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("stock_ledger_entries.entry_id"), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    is_reversed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("ix_stock_layer_consumption_tenant_entry", "tenant_id", "outgoing_entry_id"),
+        Index("uq_stock_layer_consumption_pair", "tenant_id", "outgoing_entry_id", "layer_id", unique=True),
+        CheckConstraint("quantity > 0 AND unit_cost >= 0", name="ck_stock_layer_consumption_valid"),
     )
 
 

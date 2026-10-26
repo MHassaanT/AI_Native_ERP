@@ -26,7 +26,9 @@ from erp.db.models.ledger import GeneralLedgerEntry
 from erp.db.models.sales import (
     Customer,
     DeliveryNote,
+    DeliveryNoteItem,
     SalesInvoice,
+    SalesInvoiceItem,
     SalesOrder,
     SalesOrderItem,
     SalesQuotation,
@@ -170,6 +172,20 @@ async def test_order_to_cash_full_lifecycle():
         order_id = order_data["order_id"]
         assert order_data["status"] == "CONFIRMED"
 
+        async with async_session_factory() as session:
+            order = (
+                await session.execute(
+                    select(SalesOrder).where(SalesOrder.order_id == order_id)
+                )
+            ).scalar_one()
+            assert order.source_quotation_id == uuid.UUID(quote_id)
+            order_line = (
+                await session.execute(
+                    select(SalesOrderItem).where(SalesOrderItem.order_id == order_id)
+                )
+            ).scalar_one()
+            assert order_line.stock_quantity == Decimal("10.0000")
+
         # Verify DB: stock reserved
         async with async_session_factory() as session:
             stk = (
@@ -195,6 +211,20 @@ async def test_order_to_cash_full_lifecycle():
         dn_data = fulfill_res.json()
         dn_id = dn_data["delivery_note_id"]
         assert dn_data["status"] == "COMPLETED"
+
+        async with async_session_factory() as session:
+            dn_line = (
+                await session.execute(
+                    select(DeliveryNoteItem).where(DeliveryNoteItem.delivery_note_id == dn_id)
+                )
+            ).scalar_one()
+            order_line = (
+                await session.execute(
+                    select(SalesOrderItem).where(SalesOrderItem.order_id == order_id)
+                )
+            ).scalar_one()
+            assert dn_line.order_item_id == order_line.order_item_id
+            assert order_line.delivered_quantity == Decimal("10.0000")
 
         # Verify DB: stock deducted and SLE recorded
         async with async_session_factory() as session:
@@ -232,6 +262,21 @@ async def test_order_to_cash_full_lifecycle():
         inv_id = inv_data["invoice_id"]
         inv_number = inv_data["invoice_number"]
         assert inv_data["status"] == "ISSUED"
+
+        async with async_session_factory() as session:
+            invoice_line = (
+                await session.execute(
+                    select(SalesInvoiceItem).where(SalesInvoiceItem.invoice_id == uuid.UUID(inv_id))
+                )
+            ).scalar_one()
+            order_line = (
+                await session.execute(
+                    select(SalesOrderItem).where(SalesOrderItem.order_id == order_id)
+                )
+            ).scalar_one()
+            assert invoice_line.order_item_id == order_line.order_item_id
+            assert invoice_line.delivery_note_item_id is not None
+            assert order_line.invoiced_quantity == Decimal("10.0000")
 
         # Verify DB: GeneralLedgerEntry posted (Dr AR-Customers / Cr Sales Revenue)
         async with async_session_factory() as session:
@@ -1345,5 +1390,3 @@ async def test_gemini_order_agent_model_fallback_on_404():
         assert res.total_price == 200.0
         assert attempted_models[0] == "custom-deprecated-model"
         assert attempted_models[1] == "gemini-3.6-flash"
-
-

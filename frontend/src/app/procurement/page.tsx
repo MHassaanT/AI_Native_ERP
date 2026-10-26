@@ -54,19 +54,23 @@ export default function ProcurementPage() {
     | "landed-costs"
     | "scorecards"
     | "subcontracting"
+    | "tracker"
   >("requisitions");
 
   // Shared master data
   const [items, setItems] = useState<any[]>([]);
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [warehouses, setWarehouses] = useState<any[]>([]);
+  const [employees, setEmployees] = useState<any[]>([]);
   const [goodsReceipts, setGoodsReceipts] = useState<any[]>([]);
+  const [procurementTracker, setProcurementTracker] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [notification, setNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   // Tab 1: Requisitions
   const [materialRequests, setMaterialRequests] = useState<any[]>([]);
+  const [purchaseTaxTemplates, setPurchaseTaxTemplates] = useState<any[]>([]);
   const [mrFilterStatus, setMrFilterStatus] = useState<string>("");
   const [showCreateMRModal, setShowCreateMRModal] = useState(false);
   const [showConvertMRModal, setShowConvertMRModal] = useState<any | null>(null);
@@ -75,11 +79,15 @@ export default function ProcurementPage() {
     material_request_type: "PURCHASE",
     schedule_date: "",
     notes: "",
+    requester_employee_id: "",
+    external_reference: "",
+    terms_text: "",
     items: [{ item_id: "", quantity: 1, target_warehouse_id: "", uom: "Nos" }],
   });
   const [convertPOData, setConvertPOData] = useState<any>({
     po_number: "",
     supplier_id: "",
+    purchase_tax_template_id: "",
   });
 
   // Tab 2: Sourcing & RFQs
@@ -192,20 +200,32 @@ export default function ProcurementPage() {
     if (activeTab === "landed-costs") loadLandedCosts();
     if (activeTab === "scorecards") loadScorecards();
     if (activeTab === "subcontracting") loadSubcontracting();
+    if (activeTab === "tracker") loadProcurementTracker();
   }, [activeTab, mrFilterStatus]);
+
+  const loadProcurementTracker = async () => {
+    setLoading(true);
+    try { setProcurementTracker(await api.getProcurementTracker()); }
+    catch (err: any) { showToast(err.message || "Could not load procurement lineage.", "error"); }
+    finally { setLoading(false); }
+  };
 
   const loadMasterData = async () => {
     try {
-      const [itms, supps, whs, grns] = await Promise.all([
+      const [itms, supps, whs, grns, staff, taxTemplates] = await Promise.all([
         api.getItems().catch(() => []),
         api.getSuppliers().catch(() => []),
         api.getWarehouses().catch(() => []),
         api.getGoodsReceipts().catch(() => []),
+        api.getEmployees().catch(() => []),
+        api.getMasterData("purchase-tax-templates").catch(() => []),
       ]);
       setItems(itms || []);
       setSuppliers(supps || []);
       setWarehouses(whs || []);
       setGoodsReceipts(grns || []);
+      setEmployees(staff || []);
+      setPurchaseTaxTemplates((taxTemplates || []).filter((row: any) => !row.disabled));
     } catch (err: any) {
       console.error("Failed to load master data", err);
     }
@@ -307,6 +327,9 @@ export default function ProcurementPage() {
         material_request_type: mrFormData.material_request_type,
         schedule_date: mrFormData.schedule_date || undefined,
         notes: mrFormData.notes || undefined,
+        requester_employee_id: mrFormData.requester_employee_id || undefined,
+        external_reference: mrFormData.external_reference || undefined,
+        terms_text: mrFormData.terms_text || undefined,
         items: mrFormData.items.map((it: any) => ({
           item_id: it.item_id,
           quantity: Number(it.quantity),
@@ -342,9 +365,24 @@ export default function ProcurementPage() {
     if (!showConvertMRModal) return;
     setActionLoading(true);
     try {
-      const po = await api.convertMRToPO(showConvertMRModal.mr_id, {
+      const supplier = suppliers.find((row) => row.supplier_id === convertPOData.supplier_id);
+      const po = await api.createPurchaseOrder({
         po_number: convertPOData.po_number || `PO-${Date.now().toString().slice(-6)}`,
         supplier_id: convertPOData.supplier_id,
+        order_date: new Date().toISOString().slice(0, 10),
+        currency: supplier?.currency || "USD",
+        material_request_id: showConvertMRModal.mr_id,
+        terms_template_id: showConvertMRModal.terms_template_id || undefined,
+        terms_text: showConvertMRModal.terms_text || undefined,
+        purchase_tax_template_id: convertPOData.purchase_tax_template_id || undefined,
+        submit: true,
+        items: (showConvertMRModal.items || []).filter((line: any) => Number(line.quantity) > Number(line.ordered_qty || 0)).map((line: any) => ({
+          item_id: line.item_id,
+          quantity: Number(line.quantity) - Number(line.ordered_qty || 0),
+          unit_price: Number(line.item?.standard_rate || 0),
+          material_request_item_id: line.mr_item_id,
+          target_warehouse_id: line.target_warehouse_id || undefined,
+        })),
       });
       showToast(`Generated Purchase Order ${po.po_number} successfully!`);
       setShowConvertMRModal(null);
@@ -728,6 +766,9 @@ export default function ProcurementPage() {
                     material_request_type: "PURCHASE",
                     schedule_date: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                     notes: "",
+                    requester_employee_id: "",
+                    external_reference: "",
+                    terms_text: "",
                     items: [{ item_id: items[0]?.item_id || "", quantity: 10, target_warehouse_id: warehouses[0]?.warehouse_id || "", uom: "Nos" }],
                   });
                   setShowCreateMRModal(true);
@@ -867,6 +908,8 @@ export default function ProcurementPage() {
               <span>New Subcontracting Order</span>
             </button>
           )}
+
+          {activeTab === "tracker" && <button onClick={() => void loadProcurementTracker()} className="flex items-center gap-2 rounded-lg border border-cream-300 bg-white px-3 py-2 text-xs"><RefreshCw className="h-4 w-4"/>Refresh tracker</button>}
         </div>
       </div>
 
@@ -882,6 +925,7 @@ export default function ProcurementPage() {
             { id: "landed-costs", label: "Landed Cost Vouchers", icon: Scale },
             { id: "scorecards", label: "Supplier Scorecards & Ranking", icon: Award },
             { id: "subcontracting", label: "Subcontracting & Issuance", icon: Wrench },
+            { id: "tracker", label: "Document Lineage", icon: ArrowRight },
           ].map((tab) => {
             const Icon = tab.icon;
             const isCurrent = activeTab === tab.id;
@@ -1047,6 +1091,7 @@ export default function ProcurementPage() {
                                   setConvertPOData({
                                     po_number: `PO-MR-${Date.now().toString().slice(-6)}`,
                                     supplier_id: suppliers[0]?.supplier_id || "",
+                                    purchase_tax_template_id: "",
                                   });
                                 }}
                                 className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded bg-cream-900 text-cream-50 hover:bg-cream-800 transition-colors"
@@ -1668,6 +1713,8 @@ export default function ProcurementPage() {
         </div>
       )}
 
+      {activeTab === "tracker" && <section className="space-y-4 rounded-xl border border-cream-200 bg-white p-5 shadow-sm"><div><h2 className="font-semibold">Procurement document lineage</h2><p className="mt-1 text-xs text-cream-500">Links are read from persisted source-line IDs. Older unlinked transactions are not guessed into a chain.</p></div>{loading ? <p className="py-6 text-center text-sm text-cream-500">Loading document links…</p> : !procurementTracker ? <p className="py-6 text-center text-sm text-cream-500">No tracker data loaded.</p> : <div className="space-y-5"><div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-xs"><thead className="bg-cream-50 uppercase text-cream-500"><tr><th className="px-3 py-2">Material request line</th><th className="px-3 py-2">Requested</th><th className="px-3 py-2">Ordered</th><th className="px-3 py-2">Purchase orders / source lines</th><th className="px-3 py-2">Receipts</th><th className="px-3 py-2">Supplier invoices</th></tr></thead><tbody className="divide-y divide-cream-100">{procurementTracker.material_requests.flatMap((mr: any) => (mr.items || []).map((line: any) => { const poLinks = procurementTracker.purchase_orders.flatMap((po: any) => (po.items || []).filter((poLine: any) => poLine.material_request_item_id === line.mr_item_id).map((poLine: any) => ({ po, poLine }))); const receiptLinks = procurementTracker.goods_receipts.flatMap((grn: any) => (grn.items || []).filter((grnLine: any) => grnLine.material_request_item_id === line.mr_item_id).map((grnLine: any) => ({ grn, grnLine }))); const invoiceLinks = procurementTracker.supplier_invoices.flatMap((invoice: any) => (invoice.items || []).filter((invLine: any) => poLinks.some((link: any) => link.poLine.item_line_id === invLine.po_item_id) || receiptLinks.some((link: any) => link.grnLine.grn_item_id === invLine.grn_item_id)).map(() => invoice)); return <tr key={line.mr_item_id}><td className="px-3 py-3"><div className="font-medium">{mr.mr_number} · {line.item_id.slice(0, 8)}</div><div className="text-cream-500">{mr.status}</div></td><td className="px-3 py-3">{line.quantity}</td><td className="px-3 py-3">{line.ordered_qty}</td><td className="px-3 py-3">{poLinks.length ? poLinks.map((link: any) => <div key={link.poLine.item_line_id}>{link.po.po_number} · {link.po.status} · SQ {link.poLine.supplier_quotation_item_id?.slice(0, 8) || "—"}</div>) : "No linked PO"}</td><td className="px-3 py-3">{receiptLinks.length ? receiptLinks.map((link: any) => <div key={link.grnLine.grn_item_id}>{link.grn.grn_number} · {link.grnLine.quantity_received}</div>) : "No receipt"}</td><td className="px-3 py-3">{invoiceLinks.length ? invoiceLinks.map((invoice: any) => <div key={invoice.invoice_id}>{invoice.invoice_number} · {invoice.matching_status}</div>) : "No invoice"}</td></tr>;}))}</tbody></table></div><p className="text-[11px] text-cream-500">{procurementTracker.purchase_orders.length} POs · {procurementTracker.goods_receipts.length} GRNs · {procurementTracker.supplier_invoices.length} supplier invoices in this workspace.</p></div>}</section>}
+
       {/* ================================================================= */}
       {/* MODALS */}
       {/* ================================================================= */}
@@ -1730,6 +1777,24 @@ export default function ProcurementPage() {
                     className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50"
                   />
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-cream-700 font-semibold mb-1">Requester</label>
+                  <select value={mrFormData.requester_employee_id} onChange={(e) => setMrFormData({ ...mrFormData, requester_employee_id: e.target.value })} className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50">
+                    <option value="">Select employee (optional)</option>
+                    {employees.map((employee) => <option key={employee.employee_id} value={employee.employee_id}>{employee.employee_name || employee.full_name || employee.employee_code}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-cream-700 font-semibold mb-1">External Reference</label>
+                  <input type="text" maxLength={255} value={mrFormData.external_reference} onChange={(e) => setMrFormData({ ...mrFormData, external_reference: e.target.value })} placeholder="Project, department, or request reference" className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-cream-700 font-semibold mb-1">Terms Snapshot</label>
+                <textarea rows={2} value={mrFormData.terms_text} onChange={(e) => setMrFormData({ ...mrFormData, terms_text: e.target.value })} placeholder="Terms copied onto this request" className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50" />
               </div>
 
               {/* Items Section */}
@@ -1887,6 +1952,20 @@ export default function ProcurementPage() {
                   onChange={(e) => setConvertPOData({ ...convertPOData, po_number: e.target.value })}
                   className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50 font-mono"
                 />
+              </div>
+
+              <div>
+                <label className="block text-cream-700 font-semibold mb-1">Purchase Tax Template</label>
+                <select
+                  value={convertPOData.purchase_tax_template_id || ""}
+                  onChange={(e) => setConvertPOData({ ...convertPOData, purchase_tax_template_id: e.target.value })}
+                  className="w-full px-3 py-2 border border-cream-300 rounded-lg bg-cream-50/50"
+                >
+                  <option value="">No purchase tax template</option>
+                  {purchaseTaxTemplates.map((template: any) => (
+                    <option key={template.template_id} value={template.template_id}>{template.title}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="bg-cream-50 p-3 rounded-lg border border-cream-200 space-y-1">

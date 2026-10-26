@@ -1,7 +1,7 @@
 """Material Request (Requisition) and Automated Replenishment Service."""
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -11,10 +11,12 @@ from sqlalchemy.orm import selectinload
 
 from erp.db.models.inventory import Item, StockLevel, Warehouse
 from erp.db.models.purchasing import (
+    DocumentAuditBatch,
     MaterialRequest,
     MaterialRequestItem,
     PurchaseOrder,
     PurchaseOrderItem,
+    Supplier,
 )
 
 
@@ -29,6 +31,10 @@ class RequisitionService:
         material_request_type: str = "PURCHASE",
         schedule_date: date | None = None,
         notes: str | None = None,
+        requester_employee_id: uuid.UUID | None = None,
+        external_reference: str | None = None,
+        terms_template_id: uuid.UUID | None = None,
+        terms_text: str | None = None,
         items: list[dict[str, Any]] | None = None,
     ) -> MaterialRequest:
         """Creates a new Material Request (Requisition)."""
@@ -42,6 +48,10 @@ class RequisitionService:
             schedule_date=schedule_date,
             status="DRAFT",
             notes=notes,
+            requester_employee_id=requester_employee_id,
+            external_reference=external_reference,
+            terms_template_id=terms_template_id,
+            terms_text=terms_text,
         )
         session.add(req)
         await session.flush()
@@ -83,7 +93,17 @@ class RequisitionService:
         mr_id: uuid.UUID,
     ) -> MaterialRequest:
         """Transitions material request from DRAFT to SUBMITTED."""
-        req = await self.get_material_request(session, tenant_id, mr_id)
+        req = (
+            await session.execute(
+                select(MaterialRequest)
+                .options(
+                    selectinload(MaterialRequest.items).selectinload(MaterialRequestItem.item),
+                    selectinload(MaterialRequest.items).selectinload(MaterialRequestItem.target_warehouse),
+                )
+                .where(MaterialRequest.tenant_id == tenant_id, MaterialRequest.mr_id == mr_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
         if not req:
             raise ValueError(f"Material Request {mr_id} not found.")
         if req.status != "DRAFT":
@@ -99,7 +119,17 @@ class RequisitionService:
         mr_id: uuid.UUID,
     ) -> MaterialRequest:
         """Cancels a material request."""
-        req = await self.get_material_request(session, tenant_id, mr_id)
+        req = (
+            await session.execute(
+                select(MaterialRequest)
+                .options(
+                    selectinload(MaterialRequest.items).selectinload(MaterialRequestItem.item),
+                    selectinload(MaterialRequest.items).selectinload(MaterialRequestItem.target_warehouse),
+                )
+                .where(MaterialRequest.tenant_id == tenant_id, MaterialRequest.mr_id == mr_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
         if not req:
             raise ValueError(f"Material Request {mr_id} not found.")
         if req.status in ("ORDERED", "CANCELLED"):
@@ -165,6 +195,26 @@ class RequisitionService:
             raise ValueError(f"Material Request must be SUBMITTED or PARTIALLY_ORDERED, got {req.status}")
 
         req_items_by_id = {item.mr_item_id: item for item in req.items}
+        # The header lock serializes conversions; lock child rows in stable order as
+        # well so concurrent edits cannot oversubscribe individual request lines.
+        locked_items = (
+            await session.execute(
+                select(MaterialRequestItem)
+                .where(MaterialRequestItem.tenant_id == tenant_id, MaterialRequestItem.mr_id == mr_id)
+                .order_by(MaterialRequestItem.mr_item_id)
+                .with_for_update()
+            )
+        ).scalars().all()
+        req_items_by_id = {item.mr_item_id: item for item in req.items}
+        supplier = await session.scalar(
+            select(Supplier).where(
+                Supplier.tenant_id == tenant_id,
+                Supplier.supplier_id == supplier_id,
+                Supplier.is_active.is_(True),
+            )
+        )
+        if supplier is None:
+            raise ValueError("Supplier must be active and belong to this workspace.")
         po_lines: list[PurchaseOrderItem] = []
         total_subtotal = Decimal("0.0000")
 
@@ -186,15 +236,29 @@ class RequisitionService:
             tenant_id=tenant_id,
             po_number=po_number,
             supplier_id=supplier_id,
+            material_request_id=req.mr_id,
             order_date=date.today(),
-            currency="USD",
+            currency=supplier.currency,
             subtotal=Decimal("0.0000"),
             tax_amount=Decimal("0.0000"),
             total_amount=Decimal("0.0000"),
             status="SUBMITTED",
+            submitted_at=datetime.now(UTC),
+            terms_template_id=req.terms_template_id,
+            terms_text=req.terms_text,
+            payment_terms=f"Net {supplier.payment_terms_days} days",
         )
         session.add(po)
         await session.flush()
+        session.add(DocumentAuditBatch(
+            tenant_id=tenant_id,
+            operation="PURCHASE_ORDER_SUBMITTED",
+            idempotency_key=str(po.po_id),
+            status="COMPLETED",
+            input_snapshot={"po_number": po.po_number, "material_request_id": str(req.mr_id)},
+            result_snapshot={"po_id": str(po.po_id), "status": po.status},
+            completed_at=datetime.now(UTC),
+        ))
 
         for ord_info in items_to_order:
             mr_item_id = (
@@ -225,6 +289,9 @@ class RequisitionService:
                 quantity=qty,
                 unit_price=unit_price,
                 line_total=line_total,
+                material_request_item_id=mr_item.mr_item_id,
+                stock_quantity=qty,
+                target_warehouse_id=mr_item.target_warehouse_id,
             )
             session.add(po_item)
             mr_item.ordered_qty += qty

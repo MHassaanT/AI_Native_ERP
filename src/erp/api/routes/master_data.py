@@ -16,7 +16,7 @@ from erp.api.deps import DbSessionDep, TenantIdDep
 from erp.db.models import (
     Address, Contact, Item, ItemGroup, ItemPrice, IssueType, NamingSeries,
     PriceList, ProductBundle, ProductBundleItem, TermsAndConditionsTemplate,
-    UOM, UOMConversion, Tenant,
+    UOM, UOMConversion, Tenant, SalesTaxesAndChargesTemplate, SalesTaxesAndChargesTemplateDetail,
 )
 from erp.db.models.phase_b import (
     ItemManufacturer, LoyaltyPointEntry, LoyaltyProgram, PricingRule, PromotionalScheme,
@@ -44,6 +44,8 @@ RESOURCES = {
     "supplier-groups": (SupplierGroup, "supplier_group_id", "group_name"),
     "purchase-tax-templates": (PurchaseTaxesAndChargesTemplate, "template_id", "title"),
     "purchase-tax-details": (PurchaseTaxesAndChargesTemplateDetail, "detail_id", "description"),
+    "sales-tax-templates": (SalesTaxesAndChargesTemplate, "template_id", "title"),
+    "sales-tax-details": (SalesTaxesAndChargesTemplateDetail, "detail_id", "description"),
     "shipping-rules": (ShippingRule, "shipping_rule_id", "rule_name"),
     "shipping-conditions": (ShippingRuleCondition, "condition_id", "condition_id"),
     "item-manufacturers": (ItemManufacturer, "item_manufacturer_id", "manufacturer_name"),
@@ -91,15 +93,16 @@ def _coerce(model: type, payload: dict[str, Any]) -> dict[str, Any]:
 
 REFERENCE_CHECKS = {
     ItemGroup: {"parent_id": (ItemGroup, "item_group_id")},
-    ItemPrice: {"item_id": (Item, "item_id"), "price_list_id": (PriceList, "price_list_id")},
+    ItemPrice: {"item_id": (Item, "item_id"), "price_list_id": (PriceList, "price_list_id"), "uom_id": (UOM, "uom_id")},
     UOMConversion: {"from_uom_id": (UOM, "uom_id"), "to_uom_id": (UOM, "uom_id"), "item_id": (Item, "item_id")},
     ProductBundle: {"bundle_item_id": (Item, "item_id")},
-    ProductBundleItem: {"bundle_id": (ProductBundle, "bundle_id"), "item_id": (Item, "item_id")},
+    ProductBundleItem: {"bundle_id": (ProductBundle, "bundle_id"), "item_id": (Item, "item_id"), "uom_id": (UOM, "uom_id")},
     SupplierGroup: {"parent_id": (SupplierGroup, "supplier_group_id")},
     PurchaseTaxesAndChargesTemplateDetail: {"template_id": (PurchaseTaxesAndChargesTemplate, "template_id")},
+    SalesTaxesAndChargesTemplateDetail: {"template_id": (SalesTaxesAndChargesTemplate, "template_id")},
     ShippingRuleCondition: {"shipping_rule_id": (ShippingRule, "shipping_rule_id")},
     ItemManufacturer: {"item_id": (Item, "item_id")},
-    PromotionalScheme: {"item_id": (Item, "item_id"), "item_group_id": (ItemGroup, "item_group_id")},
+    PromotionalScheme: {"item_id": (Item, "item_id"), "free_item_id": (Item, "item_id"), "item_group_id": (ItemGroup, "item_group_id")},
     PricingRule: {"item_id": (Item, "item_id"), "item_group_id": (ItemGroup, "item_group_id"), "price_list_id": (PriceList, "price_list_id")},
     SalesTeam: {"sales_partner_id": (SalesPartner, "sales_partner_id")},
 }
@@ -406,37 +409,41 @@ class PriceEvaluationPayload(BaseModel):
     quantity: Decimal = Field(gt=0)
     as_of_date: date | None = None
     unit_rate: Decimal = Field(default=Decimal("0"), ge=0)
+    context: str | None = Field(default=None, pattern="^(BUYING|SELLING)$")
+    uom_id: uuid.UUID | None = None
 
 
 @router.post("/pricing/evaluate")
 async def evaluate_pricing(payload: PriceEvaluationPayload, session: DbSessionDep, tenant_id: TenantIdDep):
-    from sqlalchemy import or_
-    from erp.db.models.shared_master import ItemPrice
-    item = await session.scalar(select(Item).where(Item.item_id == payload.item_id, Item.tenant_id == tenant_id))
     price_list = await session.scalar(select(PriceList).where(PriceList.price_list_id == payload.price_list_id, PriceList.tenant_id == tenant_id, PriceList.is_active.is_(True)))
-    if not item or not price_list:
+    if not price_list:
         raise HTTPException(status_code=404, detail="Item or active price list not found in this workspace.")
-    as_of = payload.as_of_date or date.today()
-    price = await session.scalar(select(ItemPrice).where(ItemPrice.tenant_id == tenant_id, ItemPrice.item_id == item.item_id, ItemPrice.price_list_id == price_list.price_list_id, or_(ItemPrice.valid_from.is_(None), ItemPrice.valid_from <= as_of), or_(ItemPrice.valid_to.is_(None), ItemPrice.valid_to >= as_of)).order_by(ItemPrice.valid_from.desc().nullslast()).limit(1))
-    base = price.rate if price else item.standard_rate
-    rules = (await session.scalars(
-        select(PricingRule).where(
-            PricingRule.tenant_id == tenant_id,
-            PricingRule.is_active.is_(True),
-            PricingRule.min_quantity <= payload.quantity,
-            or_(PricingRule.item_id.is_(None), PricingRule.item_id == item.item_id),
-            or_(PricingRule.item_group_id.is_(None), PricingRule.item_group_id == item.item_group_id),
-            or_(PricingRule.price_list_id.is_(None), PricingRule.price_list_id == price_list.price_list_id),
-            or_(PricingRule.valid_from.is_(None), PricingRule.valid_from <= as_of),
-            or_(PricingRule.valid_to.is_(None), PricingRule.valid_to >= as_of),
-        ).order_by(PricingRule.priority.asc())
-    )).all()
-    if not rules:
-        return {"base_rate": base, "unit_rate": base, "matched_rule": None, "quantity": payload.quantity}
-    rule = rules[0]
-    discount = base * rule.discount_value / Decimal("100") if rule.discount_type == "PERCENT" else rule.discount_value
-    unit_rate = max(Decimal("0"), base - discount)
-    return {"base_rate": base, "unit_rate": unit_rate.quantize(Decimal("0.0001")), "matched_rule": rule.rule_name, "discount_type": rule.discount_type, "discount_value": rule.discount_value, "quantity": payload.quantity}
+    context = payload.context or ("BUYING" if price_list.buying and not price_list.selling else "SELLING")
+    from erp.workflows.commercial.calculation_service import CalculationLineInput, commercial_calculation_service
+    try:
+        result = await commercial_calculation_service.calculate(
+            session, tenant_id=tenant_id, context=context, currency=price_list.currency,
+            price_list_id=price_list.price_list_id, calculation_date=payload.as_of_date,
+            lines=[CalculationLineInput(
+                item_id=payload.item_id, quantity=payload.quantity,
+                unit_price=payload.unit_rate if payload.unit_rate > 0 else None,
+                uom_id=payload.uom_id, price_list_id=price_list.price_list_id,
+            )],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    line = result.lines[0]
+    return {
+        "base_rate": line.price_list_rate,
+        "unit_rate": line.base_rate,
+        "discount_amount": line.discount_amount,
+        "matched_rule_id": str(line.pricing_rule_id) if line.pricing_rule_id else None,
+        "matched_promotion_id": str(line.promotion_id) if line.promotion_id else None,
+        "item_price_id": str(line.item_price_id) if line.item_price_id else None,
+        "stock_quantity": line.stock_quantity,
+        "quantity": payload.quantity,
+        "calculation_hash": result.calculation_hash,
+    }
 
 
 class LoyaltyEarnPayload(BaseModel):

@@ -40,11 +40,14 @@ class ItemPrice(Base, TenantMixin, TimestampMixin):
     item_price_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("items.item_id", ondelete="CASCADE"), nullable=False)
     price_list_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("price_lists.price_list_id", ondelete="CASCADE"), nullable=False)
+    uom_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("uoms.uom_id"), nullable=True)
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
-    __table_args__ = (UniqueConstraint("tenant_id", "item_id", "price_list_id", "valid_from", name="uq_item_price_period"), CheckConstraint("rate >= 0", name="ck_item_price_nonnegative"), Index("ix_item_price_tenant_list_item", "tenant_id", "price_list_id", "item_id"))
+    __table_args__ = (UniqueConstraint("tenant_id", "item_id", "price_list_id", "uom_id", "currency", "valid_from", name="uq_item_price_period"), CheckConstraint("rate >= 0", name="ck_item_price_nonnegative"), CheckConstraint("priority >= 0", name="ck_item_price_priority_nonnegative"), Index("ix_item_price_tenant_list_item", "tenant_id", "price_list_id", "item_id"))
 
 
 class Contact(Base, TenantMixin, TimestampMixin):
@@ -134,6 +137,7 @@ class ProductBundleItem(Base, TenantMixin, TimestampMixin):
     bundle_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("product_bundles.bundle_id", ondelete="CASCADE"), nullable=False)
     item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("items.item_id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    uom_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("uoms.uom_id"), nullable=True)
     __table_args__ = (CheckConstraint("quantity > 0", name="ck_product_bundle_item_quantity"), UniqueConstraint("tenant_id", "bundle_id", "item_id", name="uq_product_bundle_component"))
     bundle: Mapped[ProductBundle] = relationship(back_populates="items")
 

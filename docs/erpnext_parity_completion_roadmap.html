@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERPNext Parity Completion Roadmap</title>
+  <style>
+    :root { --ink:#17202a; --muted:#617080; --line:#dbe3ea; --paper:#fff; --bg:#f5f8fa; --blue:#225ea8; --blue-bg:#eaf2ff; --amber:#8a5600; --amber-bg:#fff3d6; --red:#9d2737; --red-bg:#feecef; --green:#176c44; --green-bg:#e7f6ee; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width:1200px; margin:0 auto; padding:40px 24px 64px; }
+    h1,h2,h3 { line-height:1.2; margin:0; } h1 { font-size:2.25rem; letter-spacing:-.04em; } h2 { font-size:1.35rem; margin-bottom:14px; } h3 { font-size:1rem; }
+    p { margin:0 0 12px; } a { color:var(--blue); }
+    .eyebrow { color:var(--blue); font-size:.77rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; margin-bottom:10px; }
+    .lead { max-width:840px; color:var(--muted); font-size:1.05rem; margin-top:13px; }
+    .notice { margin:28px 0; border-left:4px solid #d48900; background:var(--amber-bg); padding:16px 18px; border-radius:8px; }
+    .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:24px 0 36px; }
+    .stat,.card { border:1px solid var(--line); background:var(--paper); border-radius:12px; }
+    .stat { padding:18px; } .stat strong { display:block; font-size:1.75rem; letter-spacing:-.04em; } .stat span { color:var(--muted); font-size:.9rem; }
+    section { margin-top:38px; } .section-copy { color:var(--muted); max-width:850px; }
+    .phases { display:grid; gap:12px; margin-top:16px; }
+    .phase { display:grid; grid-template-columns:120px 1fr auto; gap:18px; align-items:start; padding:18px; border:1px solid var(--line); background:var(--paper); border-radius:12px; }
+    .phase-num { color:var(--blue); font-size:.83rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .phase p { color:var(--muted); margin-top:6px; } .badge { border-radius:999px; padding:4px 9px; white-space:nowrap; font-size:.75rem; font-weight:700; } .critical { color:var(--red); background:var(--red-bg); } .dependency { color:var(--amber); background:var(--amber-bg); } .planned { color:var(--green); background:var(--green-bg); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:16px; }
+    .card { padding:20px; } .card p { color:var(--muted); margin-top:8px; } ul { margin:12px 0 0; padding-left:20px; } li { margin:7px 0; }
+    details { border-top:1px solid var(--line); padding:14px 0; } details:last-child { border-bottom:1px solid var(--line); } summary { cursor:pointer; font-weight:700; } summary::marker { color:var(--blue); }
+    .feature { display:flex; justify-content:space-between; gap:12px; align-items:center; } .tag { color:var(--amber); background:var(--amber-bg); border-radius:999px; font-size:.72rem; font-weight:700; padding:3px 8px; }
+    .missing { color:var(--red); background:var(--red-bg); }
+    .gates { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:16px; } .gate { padding:16px; border-left:3px solid var(--blue); background:var(--blue-bg); }
+    footer { margin-top:44px; color:var(--muted); font-size:.88rem; border-top:1px solid var(--line); padding-top:18px; }
+    @media (max-width:760px) { main{padding:28px 16px;} h1{font-size:1.85rem;} .stats,.gates,.grid{grid-template-columns:1fr;} .phase{grid-template-columns:1fr; gap:8px;} .badge{justify-self:start;} }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">AI Native ERP · Implementation Planning</div>
+  <h1>ERPNext parity completion roadmap</h1>
+  <p class="lead">A dependency-first plan for the 35 partially implemented features and the missing Leave Control Panel. The detailed, implementation-level plan is available alongside this page as <a href="erpnext_partial_features_implementation_plan.md">ERPNext Parity Completion Plan</a>.</p>
+
+  <div class="notice"><strong>Critical sequencing:</strong> do not improve reports by adding more queries over inferred data. First persist document lineage and immutable calculation snapshots; then reports can show exact financial, stock, and operational values.</div>
+
+  <div class="stats">
+    <div class="stat"><strong>36</strong><span>Features to complete</span></div>
+    <div class="stat"><strong>7</strong><span>Delivery phases</span></div>
+    <div class="stat"><strong>1–2</strong><span>Phases to start first</span></div>
+    <div class="stat"><strong>0</strong><span>Destructive migrations proposed</span></div>
+  </div>
+
+  <section>
+    <h2>Delivery order</h2>
+    <p class="section-copy">Each phase unlocks the next. The plan deliberately treats submitted records as immutable snapshots: a changed price list, tax template, contact, UOM, or promotion must never rewrite historical transactions.</p>
+    <div class="phases">
+      <article class="phase"><div class="phase-num">Phase 0</div><div><h3>Foundation and safety net</h3><p>Architecture decision record, tenant feature flags, migration harness, factory data, cross-tenant negative tests, and balanced-ledger test helper.</p></div><span class="badge planned">Start here</span></article>
+      <article class="phase"><div class="phase-num">Phase 1</div><div><h3>Documents and source lineage</h3><p>Purchase/sales document fields, source-line foreign keys, addresses, contacts, terms snapshots, lifecycle commands, and audit trail.</p></div><span class="badge dependency">High dependency</span></article>
+      <article class="phase"><div class="phase-num">Phase 2</div><div><h3>Commercial calculation engine</h3><p>Price lists, item prices, UOM, taxes, shipping, terms, promotions, bundles, and naming-series allocation—calculated on the backend and frozen at submission.</p></div><span class="badge dependency">High dependency</span></article>
+      <article class="phase"><div class="phase-num">Phase 3</div><div><h3>Loyalty and sales-partner execution</h3><p>Invoice/POS loyalty earn, redemption, expiry and reversals; sales-team allocation and commission lifecycle.</p></div><span class="badge planned">After calculation</span></article>
+      <article class="phase"><div class="phase-num">Phase 4</div><div><h3>Trusted reports and reporting UX</h3><p>Party ledger, recorded margin, FIFO layers, exact stock projection, lineage tracker, charts, drill-through, and estimation labels for legacy data.</p></div><span class="badge critical">Requires Phases 1–2</span></article>
+      <article class="phase"><div class="phase-num">Phase 5</div><div><h3>Leave Period and Leave Control Panel</h3><p>Leave periods, idempotent bulk allocations, employee filtering, preview/confirm/results workflow, and durable batch audit records.</p></div><span class="badge planned">Independent workstream</span></article>
+      <article class="phase"><div class="phase-num">Phase 6</div><div><h3>Rollout and operational readiness</h3><p>Staging reconciliation, pilot flags, data-quality dashboards, support runbooks, and gradual tenant enablement.</p></div><span class="badge planned">Release gate</span></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>What each workstream completes</h2>
+    <div class="grid">
+      <article class="card"><h3>Commercial documents and procurement</h3><p>Make every conversion traceable, and every commercial field explicit.</p><ul><li>Material Request details, terms and external metadata</li><li>Purchase Order contacts, addresses, taxes, terms, shipping, UOM, discounts and source lines</li><li>Sales Order taxes, terms, addresses, source quotation and fulfilment/billing progress</li><li>Procurement Tracker and item purchase history based on real source links</li><li>Subcontract settings plus transfer/subcontract reports</li></ul></article>
+      <article class="card"><h3>Pricing, taxes, UOM and fulfilment</h3><p>Use one backend calculation service for all drafts; persist its result at submission.</p><ul><li>Item Price and Price List selection</li><li>Pricing Rules, Promotional Schemes and Product Bundles</li><li>Purchase tax, shipping rule and Terms template snapshots</li><li>Naming Series atomic allocation</li><li>UOM conversion in purchase, sales, inventory and manufacturing lines</li></ul></article>
+      <article class="card"><h3>Sales incentives</h3><p>Turn configuration-only masters into operational behavior.</p><ul><li>Sales partner/team assignment, contribution validation and commission event</li><li>Loyalty enrollment, earn, redemption, expiry and cancellation/return reversal</li><li>POS loyalty and price calculation parity with Sales Invoice</li></ul></article>
+      <article class="card"><h3>Reports that can be trusted</h3><p>Replace estimates and inference with persisted accounting and stock facts.</p><ul><li>Customer and Supplier ledger journals with running balance</li><li>Recorded gross-profit cost snapshots</li><li>Persistent FIFO stock layers for exact ageing</li><li>Stock summary, transfer reports, exact projected quantity</li><li>Chart, drill-through and export experience for all trends</li></ul></article>
+      <article class="card"><h3>HR leave administration</h3><p>Complete the only missing function and the related partial leave-period capability.</p><ul><li>LeavePeriod model and allocation/policy linkage</li><li>Leave Control Panel preview and bulk allocation batches</li><li>Safe employee filters, carry-forward checks and idempotent retries</li></ul></article>
+      <article class="card"><h3>Data safety and release discipline</h3><p>Protect history and make the new behavior reversible operationally.</p><ul><li>Additive Alembic revisions only; no edits to 032–038</li><li>Tenant-scoped lookups and ledger-balance invariants</li><li>Feature-flagged pilot deployment</li><li>Legacy data remains labelled estimated/unlinked instead of guessed</li></ul></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Complete audit mapping</h2>
+    <p class="section-copy">Open a group to see every previously partial or missing feature covered by the plan.</p>
+
+    <details><summary class="feature">Accounting and analytics <span class="tag">6 partial</span></summary><ul><li>Customer Ledger Summary — add party-aware GL entries and a running-balance journal.</li><li>Supplier Ledger Summary — use actual payment/ledger events, never invoice-status proxies.</li><li>Gross Profit — persist cost-at-sale and disclose legacy estimates.</li><li>Sales Invoice Trends and Purchase Invoice Trends — chart-ready series, comparisons and drill-through.</li><li>All report upgrades depend on immutable source and calculation snapshots.</li></ul></details>
+    <details><summary class="feature">Buying <span class="tag">17 partial</span></summary><ul><li>Material Request; Purchase Order; Item Price; Price List; Product Bundle; Promotional Scheme; Naming Series.</li><li>Subcontracting Settings; Purchase Taxes & Charges; Terms & Conditions; Supplier-Wise Sales Analytics.</li><li>Procurement Tracker; Item-wise Purchase History; Shipping Rule; UOM conversion.</li><li>Requested Items to be Transferred; Subcontracted raw-material receipt/transfer reports.</li><li>All will use explicit source-line foreign keys, snapshots, and a deterministic backend calculation service.</li></ul></details>
+    <details><summary class="feature">Selling and stock <span class="tag">10 partial</span></summary><ul><li>Sales Order details/taxes/terms; Sales Partner/Rep; Loyalty Point Entry; Sales Order Analysis.</li><li>Quotation Trends; Sales Order Trends; Item-wise Sales History; Stock Summary; Stock Ageing; Delivery Note Trends.</li><li>Sales and purchasing pricing, shipping and tax behavior are shared rather than separately implemented.</li></ul></details>
+    <details><summary class="feature">HR leaves <span class="tag">1 partial + 1 missing</span></summary><ul><li>Leave Type / Period — add an explicit LeavePeriod and link allocations/assignments.</li><li>Leave Control Panel — build preview, filtering, confirmation, idempotent batch allocation, results, and audit records.</li></ul></details>
+  </section>
+
+  <section>
+    <h2>Release acceptance gates</h2>
+    <div class="gates"><div class="gate"><h3>Correctness</h3><p>Submitted records retain snapshots; conversion lineage is navigable; tenant isolation and double-entry invariants pass.</p></div><div class="gate"><h3>Data quality</h3><p>Legacy data is never silently inferred. Reports flag estimated cost, FIFO, or unlinked history.</p></div><div class="gate"><h3>Operational readiness</h3><p>Staging reconciliation, pilot feature flags, monitoring, error runbooks, and a safe disable path are complete.</p></div></div>
+  </section>
+
+  <section>
+    <h2>Recommended first release</h2>
+    <div class="notice"><strong>Implement Phases 1 and the core of Phase 2 first:</strong> document lineage, contact/address/terms snapshots, UOM persistence, price resolution, and tax snapshots. This resolves the most partial features and establishes the trustworthy data needed for loyalty, procurement tracking, margin, stock ageing, and reports.</div>
+  </section>
+
+  <footer>Research basis: official ERPNext guidance for <a href="https://docs.frappe.io/erpnext/pricing-rule">Pricing Rules</a>, <a href="https://docs.frappe.io/erpnext/purchase-taxes-and-charges-template">Purchase Taxes</a>, <a href="https://docs.frappe.io/erpnext/purchase-order">Purchase Orders</a>, <a href="https://docs.frappe.io/erpnext/loyalty-program">Loyalty</a>, and the <a href="https://docs.frappe.io/hr/leave-control-panel">Leave Control Panel</a>. This page is a roadmap; the linked Markdown document contains the exact migration, API, service, UI, testing, rollout, and acceptance details.</footer>
+</main>
+</body>
+</html>

@@ -1,7 +1,7 @@
 """Strategic Sourcing, RFQs, Supplier Quotations, and Matrix Comparison Service."""
 
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from erp.db.models.inventory import Item
 from erp.db.models.purchasing import (
+    DocumentAuditBatch,
     PurchaseOrder,
     PurchaseOrderItem,
     RequestForQuotation,
@@ -383,9 +384,25 @@ class SourcingService:
             tax_amount=quote.tax_amount,
             total_amount=quote.grand_total,
             status="SUBMITTED",
+            submitted_at=datetime.now(UTC),
         )
         session.add(po)
         await session.flush()
+        session.add(DocumentAuditBatch(
+            tenant_id=tenant_id,
+            operation="PURCHASE_ORDER_SUBMITTED",
+            idempotency_key=str(po.po_id),
+            status="COMPLETED",
+            input_snapshot={"po_number": po.po_number, "supplier_quotation_id": str(quote.sq_id)},
+            result_snapshot={"po_id": str(po.po_id), "status": po.status},
+            completed_at=datetime.now(UTC),
+        ))
+
+        rfq_items_by_item_id = {}
+        if quote.rfq_id:
+            rfq = await self.get_rfq(session, tenant_id, quote.rfq_id)
+            if rfq:
+                rfq_items_by_item_id = {item.item_id: item for item in rfq.items}
 
         for it in quote.items:
             po_item = PurchaseOrderItem(
@@ -395,6 +412,9 @@ class SourcingService:
                 quantity=it.quantity,
                 unit_price=it.unit_price,
                 line_total=it.line_total,
+                rfq_item_id=rfq_items_by_item_id.get(it.item_id).rfq_item_id if it.item_id in rfq_items_by_item_id else None,
+                supplier_quotation_item_id=it.sq_item_id,
+                stock_quantity=it.quantity,
             )
             session.add(po_item)
 

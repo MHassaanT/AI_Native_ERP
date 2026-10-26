@@ -191,6 +191,14 @@ async def test_phase2_complete_procurement_parity():
         )
         assert po_from_mr.po_number == po_num_mr
         assert po_from_mr.subtotal == Decimal("2450.0000")
+        assert po_from_mr.material_request_id == mr.mr_id
+        po_from_mr_line = (
+            await session.execute(
+                select(PurchaseOrderItem).where(PurchaseOrderItem.po_id == po_from_mr.po_id)
+            )
+        ).scalar_one()
+        assert po_from_mr_line.material_request_item_id == mr.items[0].mr_item_id
+        assert po_from_mr_line.stock_quantity == Decimal("100.0000")
         # MR should now be PARTIALLY_ORDERED
         reloaded_mr = await requisition_service.get_material_request(session, tenant_id, mr.mr_id)
         assert reloaded_mr is not None
@@ -306,6 +314,8 @@ async def test_phase2_complete_procurement_parity():
         )
         assert awarded_po.supplier_id == supplier_b.supplier_id
         assert awarded_po.total_amount == Decimal("23500.0000")
+        assert awarded_po.items[0].supplier_quotation_item_id == sq_b.items[0].sq_item_id
+        assert awarded_po.items[0].rfq_item_id == rfq.items[0].rfq_item_id
 
         # Verify competitor quotation was rejected and RFQ completed
         sq_a_check = await sourcing_service.get_supplier_quotation(session, tenant_id, sq_a.sq_id)
