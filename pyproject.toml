@@ -38,6 +38,7 @@ dependencies = [
 dev = [
     "pytest>=8.1.0",
     "pytest-asyncio>=0.23.5",
+    "aiosqlite>=0.20.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.3.0",
     "mypy>=1.9.0",

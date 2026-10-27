@@ -5,20 +5,22 @@ from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.audit.hasher import compute_audit_record_hash, get_latest_audit_hash
 from erp.db.models.audit import AgentAuditLog
+from erp.db.models.inventory import Item, Warehouse
 from erp.db.models.ledger import GeneralLedgerEntry
 from erp.db.models.outbox import TransactionalOutbox
 from erp.ledger.ceilings import CeilingEvaluationResult, evaluate_autonomy_tier
-from erp.ledger.party import validate_party_lines
 from erp.ledger.invariants import (
     LedgerLineProposal,
     validate_chart_of_accounts,
     validate_fiscal_period,
     validate_zero_sum,
 )
+from erp.ledger.party import validate_party_lines
 
 
 class TransactionProposal(BaseModel):
@@ -68,6 +70,13 @@ class LedgerEngine:
         total_volume = validate_zero_sum(proposal.entries)
         party_names = await validate_party_lines(session, proposal.tenant_id, proposal.entries)
 
+        for model, field, pk in ((Item, "item_id", Item.item_id), (Warehouse, "warehouse_id", Warehouse.warehouse_id)):
+            ids = {getattr(line, field) for line in proposal.entries if getattr(line, field)}
+            if ids:
+                found = set((await session.scalars(select(pk).where(model.tenant_id == proposal.tenant_id, pk.in_(ids)))).all())
+                if ids != found:
+                    raise ValueError(f"Ledger {field} must belong to this workspace.")
+
         # 2. Autonomous Financial Ceilings Check
         ceiling_result = evaluate_autonomy_tier(
             total_amount=total_volume,
@@ -112,6 +121,9 @@ class LedgerEngine:
                 exchange_rate=line.exchange_rate,
                 source_document_type=proposal.source_document_type,
                 source_document_id=proposal.source_document_id,
+                purpose=line.purpose,
+                warehouse_id=line.warehouse_id,
+                item_id=line.item_id,
                 party_type=line.party_type,
                 party_id=line.party_id,
                 party_name_snapshot=party_names.get((line.party_type, line.party_id)),

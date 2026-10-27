@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BarChart3,
   RefreshCw,
@@ -26,6 +26,9 @@ export default function ReportsHubPage() {
   const [activeTab, setActiveTab] = useState<TabType>("trial-balance");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const latestRequest = useRef(0);
+  const [periodMode, setPeriodMode] = useState("dates");
 
   // Filter States
   const [fromDate, setFromDate] = useState(() => {
@@ -64,35 +67,40 @@ export default function ReportsHubPage() {
   });
 
   const loadData = async () => {
+    const request = ++latestRequest.current;
+    if (!fromDate || !toDate || fromDate > toDate) {
+      setError("Choose a valid period: From must be on or before To.");
+      setTrialBalance(null); setLoading(false); return;
+    }
     setLoading(true);
     setError(null);
     try {
       if (activeTab === "trial-balance") {
         const data = await api.getTrialBalance({ from_date: fromDate, to_date: toDate });
-        setTrialBalance(data);
+        if (request === latestRequest.current) setTrialBalance(data);
       } else if (activeTab === "balance-sheet") {
         const data = await api.getBalanceSheet(toDate);
-        setBalanceSheet(data);
+        if (request === latestRequest.current) setBalanceSheet(data);
       } else if (activeTab === "profit-loss") {
         const data = await api.getProfitAndLoss({ from_date: fromDate, to_date: toDate });
-        setProfitAndLoss(data);
+        if (request === latestRequest.current) setProfitAndLoss(data);
       } else if (activeTab === "cash-flow") {
         const data = await api.getCashFlow({ from_date: fromDate, to_date: toDate });
-        setCashFlow(data);
+        if (request === latestRequest.current) setCashFlow(data);
       } else if (activeTab === "aging") {
         const [ar, ap] = await Promise.all([
           api.getArAging(toDate),
           api.getApAging(toDate),
         ]);
-        setArAging(ar);
-        setApAging(ap);
+        if (request === latestRequest.current) setArAging(ar);
+        if (request === latestRequest.current) setApAging(ap);
       } else if (activeTab === "stock-ops") {
         const [sb, pa] = await Promise.all([
           api.getStockBalanceReport(),
           api.getProductionAnalytics(),
         ]);
-        setStockBalance(sb);
-        setProductionAnalytics(pa);
+        if (request === latestRequest.current) setStockBalance(sb);
+        if (request === latestRequest.current) setProductionAnalytics(pa);
       } else if (activeTab === "consolidation") {
         const [comps, txs, ctb, rates, revs] = await Promise.all([
           api.getCompanies(),
@@ -101,22 +109,23 @@ export default function ReportsHubPage() {
           api.getExchangeRates(),
           api.getExchangeRevaluations(),
         ]);
-        setCompanies(comps);
-        setInterCompanyTx(txs);
-        setConsolidatedTb(ctb);
-        setExchangeRates(rates);
-        setRevaluations(revs);
+        if (request === latestRequest.current) setCompanies(comps);
+        if (request === latestRequest.current) setInterCompanyTx(txs);
+        if (request === latestRequest.current) setConsolidatedTb(ctb);
+        if (request === latestRequest.current) setExchangeRates(rates);
+        if (request === latestRequest.current) setRevaluations(revs);
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Failed to load reporting data");
+      if (request === latestRequest.current) { setError(err.message || "Failed to load reporting data"); setTrialBalance(null); }
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadData();
+    return () => { latestRequest.current++; };
   }, [activeTab, fromDate, toDate]);
 
   const handleRunRevaluation = async () => {
@@ -173,18 +182,38 @@ export default function ReportsHubPage() {
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-[#E5E0D8] text-xs">
             <Calendar className="w-3.5 h-3.5 text-[#736B63]" />
+            {activeTab === "trial-balance" && <select aria-label="Period selection" value={periodMode} onChange={e => {
+              setPeriodMode(e.target.value);
+              if (e.target.value === "months") {
+                if (fromDate) setFromDate(fromDate.slice(0, 7) + "-01");
+                const [year, month] = toDate.slice(0, 7).split("-").map(Number);
+                if (toDate) setToDate(`${toDate.slice(0, 7)}-${new Date(year, month, 0).getDate()}`);
+              }
+            }} className="bg-transparent"><option value="dates">Date range</option><option value="months">Monthly periods</option></select>}
             <span className="text-[#736B63]">From:</span>
             <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
+              aria-label="From date / starting period"
+              type={activeTab === "trial-balance" && periodMode === "months" ? "month" : "date"}
+              value={activeTab === "trial-balance" && periodMode === "months" ? fromDate.slice(0, 7) : fromDate}
+              max={activeTab === "trial-balance" && periodMode === "months" ? toDate.slice(0, 7) : toDate}
+              required
+              onChange={(e) => setFromDate(e.target.value && activeTab === "trial-balance" && periodMode === "months" ? e.target.value + "-01" : e.target.value)}
               className="bg-transparent text-[#2D2A26] focus:outline-none"
             />
             <span className="text-[#736B63] ml-2">To:</span>
             <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
+              aria-label="To date / ending period"
+              type={activeTab === "trial-balance" && periodMode === "months" ? "month" : "date"}
+              value={activeTab === "trial-balance" && periodMode === "months" ? toDate.slice(0, 7) : toDate}
+              min={activeTab === "trial-balance" && periodMode === "months" ? fromDate.slice(0, 7) : fromDate}
+              required
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value && activeTab === "trial-balance" && periodMode === "months") {
+                  const [year, month] = value.split("-").map(Number);
+                  setToDate(`${value}-${new Date(year, month, 0).getDate()}`);
+                } else setToDate(value);
+              }}
               className="bg-transparent text-[#2D2A26] focus:outline-none"
             />
           </div>
@@ -247,6 +276,7 @@ export default function ReportsHubPage() {
           <div className="space-y-4">
             {trialBalance && (
               <>
+                <p className="text-xs text-[#736B63]">Starting period: {trialBalance.from_date} · Ending period: {trialBalance.to_date} (inclusive). Opening balances are before the starting date; period movement is within this range; closing balances are through the ending date.</p>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-4 bg-white rounded-2xl border border-[#E5E0D8]">
                     <span className="text-xs text-[#736B63]">Opening Debits</span>

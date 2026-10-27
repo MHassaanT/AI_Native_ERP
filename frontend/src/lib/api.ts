@@ -353,6 +353,10 @@ export const api = {
 
   // --- General Ledger ---
   getGLEntries: (transactionId?: string) => fetchWithTenant(`/ledger/entries${transactionId ? `?transaction_id=${encodeURIComponent(transactionId)}` : ""}`),
+  getLedgerReport: (params: Record<string, string> = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== ""));
+    return fetchWithTenant(`/ledger/report?${query}`);
+  },
   getAccounts: () => fetchWithTenant("/ledger/accounts"),
   stageTransaction: (data: any) =>
     fetchWithTenant("/ledger/stage", { method: "POST", body: JSON.stringify(data) }),

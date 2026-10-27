@@ -11,8 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from erp.db.models.ledger import Account, CostCenter, FiscalPeriod
 from erp.ledger.exceptions import (
-    AccountNotFoundError,
-    CostCenterNotFoundError,
     NegativeAmountViolation,
     PeriodLockedError,
     SingleSidedViolation,
@@ -31,6 +29,9 @@ class LedgerLineProposal(BaseModel):
     credit_amount: Decimal = Field(default=Decimal("0.0000"))
     currency: str = Field(default="USD", max_length=3)
     exchange_rate: Decimal = Field(default=Decimal("1.000000"))
+    purpose: str | None = Field(default=None, max_length=1000)
+    warehouse_id: uuid.UUID | None = None
+    item_id: uuid.UUID | None = None
     party_type: Literal["CUSTOMER", "SUPPLIER"] | None = None
     party_id: uuid.UUID | None = None
     against_document_type: Literal["SALES_INVOICE", "SUPPLIER_INVOICE"] | None = None

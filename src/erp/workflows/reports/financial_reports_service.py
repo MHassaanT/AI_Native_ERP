@@ -31,6 +31,9 @@ class FinancialReportsService:
         Computes 4-column Trial Balance (Opening, Period Dr/Cr, Closing).
         Verifies mathematical double-entry invariant: Sum(Debits) == Sum(Credits).
         """
+        if from_date > to_date:
+            raise ValueError("From date must be on or before To date.")
+
         # 1. Fetch opening balances (entries strictly prior to from_date)
         op_stmt = (
             select(
@@ -90,6 +93,7 @@ class FinancialReportsService:
 
             # Net opening
             net_op = op_dr - op_cr
+            op_dr, op_cr = max(net_op, Decimal("0")), max(-net_op, Decimal("0"))
             cl_dr = op_dr + p_dr
             cl_cr = op_cr + p_cr
             net_cl = cl_dr - cl_cr

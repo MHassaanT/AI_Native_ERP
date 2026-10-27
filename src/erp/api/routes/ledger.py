@@ -3,13 +3,16 @@
 import uuid
 from datetime import date
 from decimal import Decimal
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from erp.api.deps import DbSessionDep, TenantIdDep
-from erp.db.models.ledger import Account, GeneralLedgerEntry
+from erp.db.models.ledger import Account
 from erp.ledger.engine import LedgerCommitResult, TransactionProposal, ledger_engine
 from erp.ledger.exceptions import (
     AccountNotFoundError,
@@ -21,6 +24,7 @@ from erp.ledger.exceptions import (
     ZeroSumViolation,
 )
 from erp.ledger.invariants import LedgerLineProposal
+from erp.workflows.reports.general_ledger_service import LedgerFilters, query_ledger
 
 router = APIRouter(prefix="/ledger", tags=["Deterministic Ledger Engine"])
 
@@ -51,6 +55,11 @@ class GLEntryResponse(BaseModel):
     party_type: str | None = None
     party_id: uuid.UUID | None = None
     party_name_snapshot: str | None = None
+    purpose: str | None = None
+    warehouse_id: uuid.UUID | None = None
+    item_id: uuid.UUID | None = None
+    from_accounts: list[str] = Field(default_factory=list)
+    to_accounts: list[str] = Field(default_factory=list)
     against_document_type: str | None = None
     against_document_id: uuid.UUID | None = None
 
@@ -112,31 +121,45 @@ async def stage_transaction(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
-@router.get(
-    "/entries",
-    response_model=list[GLEntryResponse],
-    summary="Query general ledger entries for tenant",
-)
+def serialize_entries(result):
+    rows = []
+    for entry in result["entries"]:
+        row = GLEntryResponse.model_validate(entry, from_attributes=True).model_dump()
+        for field, values in result["counterparts"].get(entry.transaction_id, {}).items():
+            row[field] = sorted(values)
+        rows.append(row)
+    return rows
+
+
+@router.get("/entries", response_model=list[GLEntryResponse], summary="Query filtered general ledger entries")
 async def list_gl_entries(
-    tenant_id: TenantIdDep,
-    db: DbSessionDep,
-    limit: int = Query(default=100, le=500),
+    tenant_id: TenantIdDep, db: DbSessionDep,
+    filters: Annotated[LedgerFilters, Depends()],
+    limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    transaction_id: uuid.UUID | None = None,
 ):
-    """Returns general ledger entries filtered strictly by tenant isolation."""
-    stmt = (
-        select(GeneralLedgerEntry)
-        .where(GeneralLedgerEntry.tenant_id == tenant_id)
-        .order_by(GeneralLedgerEntry.posting_date.desc(), GeneralLedgerEntry.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
-    if transaction_id:
-        stmt = stmt.where(GeneralLedgerEntry.transaction_id == transaction_id)
-    result = await db.execute(stmt)
-    entries = result.scalars().all()
-    return entries
+    try:
+        result = await query_ledger(db, tenant_id, filters, limit, offset)
+        return serialize_entries(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/report", summary="Filtered ledger with full-result totals and pagination")
+async def ledger_report(
+    tenant_id: TenantIdDep, db: DbSessionDep,
+    filters: Annotated[LedgerFilters, Depends()],
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        result = await query_ledger(db, tenant_id, filters, limit, offset)
+        return JSONResponse(jsonable_encoder({
+            "entries": serialize_entries(result), "total": result["total"],
+            "totals": result["totals"], "limit": limit, "offset": offset,
+        }, custom_encoder={Decimal: str}))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get(

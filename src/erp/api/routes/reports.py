@@ -58,6 +58,9 @@ async def get_trial_balance(
     if not from_date:
         from_date = date(to_date.year, 1, 1)
 
+    if from_date > to_date:
+        raise HTTPException(status_code=422, detail="From date must be on or before To date.")
+
     return await financial_reports_service.get_trial_balance(
         session, tenant_id, from_date=from_date, to_date=to_date, cost_center=cost_center
     )

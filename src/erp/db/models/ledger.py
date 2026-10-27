@@ -67,6 +67,9 @@ class GeneralLedgerEntry(Base, TenantMixin):
         UUID(as_uuid=True),
         nullable=False,
     )
+    purpose: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    warehouse_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     party_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     party_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     party_name_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
